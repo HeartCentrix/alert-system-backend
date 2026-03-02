@@ -100,7 +100,14 @@ class EmailService:
 
     def send_email(self, to: str, subject: str, body_text: str, body_html: Optional[str] = None) -> dict:
         if not self.client:
-            logger.warning(f"[MOCK EMAIL] To: {to} | Subject: {subject}")
+            # MOCK MODE: Print full email content to console for development/testing
+            logger.info("=" * 80)
+            logger.info("📧 [MOCK EMAIL] Would send to: %s", to)
+            logger.info("   Subject: %s", subject)
+            logger.info("   --- EMAIL CONTENT ---")
+            logger.info("%s", body_text)
+            logger.info("   ---------------------")
+            logger.info("=" * 80)
             return {"message_id": "MOCK_EMAIL_ID", "status": "sent", "mock": True}
         try:
             html_body = body_html or self._text_to_html(body_text)
@@ -134,12 +141,85 @@ class EmailService:
             <p>Hi {user_name},</p>
             <p>Someone requested a password reset for your TM Alert account.</p>
             <p style="text-align: center; margin: 30px 0;">
-                <a href="{reset_url}" style="background: #1e40af; color: white; padding: 12px 24px; 
+                <a href="{reset_url}" style="background: #1e40af; color: white; padding: 12px 24px;
                    text-decoration: none; border-radius: 6px; font-weight: bold;">Reset My Password</a>
             </p>
             <p style="color: #666; font-size: 14px;">This link expires in 1 hour. If you didn't request this, ignore this email.</p>
         </div>
         </body></html>"""
+        return self.send_email(to, subject, body_text, body_html)
+
+    def send_welcome_email(self, to: str, user_name: str, password: str) -> dict:
+        """Send welcome email with login credentials to newly imported users."""
+        login_url = f"{settings.FRONTEND_URL}/login"
+        subject = "Welcome to TM Alert - Your Login Credentials"
+        
+        body_text = f"""Hi {user_name},
+
+Welcome to TM Alert! You've been added to the Taylor Morrison emergency notification system.
+
+Your login credentials:
+Email: {to}
+Temporary Password: {password}
+
+Login here: {login_url}
+
+IMPORTANT SECURITY NOTES:
+- Please change your password immediately after logging in
+- This is a temporary password - do not share it with anyone
+- If you didn't expect this email, contact your administrator
+
+TM Alert sends you critical emergency notifications via SMS, Email, Voice, and WhatsApp.
+
+Stay safe,
+TM Alert Team
+Taylor Morrison"""
+
+        body_html = f"""
+        <html><body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #f1f5f9;">
+        <div style="background: #1e40af; padding: 25px; text-align: center;">
+            <h1 style="color: white; margin: 0; font-size: 24px;">🚨 TM Alert</h1>
+            <p style="color: #93c5fd; margin: 5px 0 0 0; font-size: 14px;">Taylor Morrison Emergency Notification System</p>
+        </div>
+        <div style="background: white; padding: 30px; margin: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <h2 style="color: #1e293b; margin-top: 0;">Welcome to TM Alert!</h2>
+            <p style="color: #475569;">Hi {user_name},</p>
+            <p style="color: #475569;">You've been added to the Taylor Morrison emergency notification system. You'll receive critical emergency alerts via SMS, Email, Voice, and WhatsApp.</p>
+            
+            <div style="background: #f8fafc; border: 2px solid #e2e8f0; border-radius: 8px; padding: 20px; margin: 25px 0;">
+                <h3 style="color: #1e40af; margin-top: 0; font-size: 16px;">📧 Your Login Credentials</h3>
+                <table style="width: 100%; margin: 15px 0;">
+                    <tr>
+                        <td style="padding: 8px 0; color: #64748b; font-weight: 600;">Email:</td>
+                        <td style="padding: 8px 0; color: #1e293b; font-family: monospace;">{to}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 8px 0; color: #64748b; font-weight: 600;">Temporary Password:</td>
+                        <td style="padding: 8px 0; font-family: monospace; background: #fef3c7; padding: 4px 8px; border-radius: 4px; color: #92400e;">{password}</td>
+                    </tr>
+                </table>
+                <div style="text-align: center; margin-top: 20px;">
+                    <a href="{login_url}" style="background: #1e40af; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">Login Now</a>
+                </div>
+            </div>
+            
+            <div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 15px; margin: 20px 0; border-radius: 4px;">
+                <p style="color: #92400e; margin: 0; font-weight: 600;">⚠️ Important Security Reminders:</p>
+                <ul style="color: #92400e; margin: 10px 0 0 0; padding-left: 20px; font-size: 14px;">
+                    <li>Change your password immediately after logging in</li>
+                    <li>Do not share your password with anyone</li>
+                    <li>If you didn't expect this email, contact your administrator</li>
+                </ul>
+            </div>
+            
+            <p style="color: #64748b; font-size: 14px; margin-top: 25px;">Stay safe,<br/><strong>TM Alert Team</strong><br/>Taylor Morrison</p>
+        </div>
+        <div style="text-align: center; padding: 20px; color: #94a3b8; font-size: 12px;">
+            <p>This is an automated message. Please do not reply to this email.</p>
+            <p>&copy; 2024 Taylor Morrison. All rights reserved.</p>
+        </div>
+        </body></html>"""
+        
         return self.send_email(to, subject, body_text, body_html)
 
     def _text_to_html(self, text: str) -> str:

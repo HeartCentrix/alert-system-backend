@@ -1,5 +1,6 @@
 import io
 import csv
+import logging
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
@@ -9,6 +10,8 @@ from app.models import User, UserRole, AuditLog
 from app.schemas import UserCreate, UserUpdate, UserResponse, UserListResponse, CSVImportResponse
 from app.core.security import hash_password
 from app.core.deps import get_current_user, require_admin, require_manager
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/users", tags=["Users / People"])
 
@@ -183,8 +186,8 @@ async def import_users_csv(
     """
     Import users from CSV. Expected columns:
     first_name, last_name, email, phone, department, title, employee_id, role
-    
-    Returns passwords for newly created users - admin must distribute these securely.
+
+    Sends welcome emails with login credentials to newly created users.
     """
     if not file.filename.endswith('.csv'):
         raise HTTPException(status_code=400, detail="File must be a CSV")
@@ -194,7 +197,8 @@ async def import_users_csv(
 
     created, updated, failed = 0, 0, 0
     errors = []
-    created_users = []  # Track new users and their passwords
+    created_users = []  # Track new users for email sending
+    email_failures = []
 
     for i, row in enumerate(reader, start=2):
         try:
@@ -227,7 +231,7 @@ async def import_users_csv(
                     existing.deleted_at = None
                     existing.is_active = True
                     is_restored = True
-                
+
                 # Update user fields
                 existing.first_name = first_name
                 existing.last_name = last_name
@@ -255,7 +259,7 @@ async def import_users_csv(
                 )
                 db.add(user)
                 created += 1
-                # Track new user credentials for secure distribution
+                # Track new user credentials for email sending
                 created_users.append({
                     "email": email,
                     "password": default_password,
@@ -267,6 +271,7 @@ async def import_users_csv(
             errors.append(f"Row {i}: {str(e)}")
             failed += 1
 
+    # Commit all users to database first
     db.add(AuditLog(
         user_id=current_user.id,
         action="import_users_csv",
@@ -274,11 +279,34 @@ async def import_users_csv(
         details={"created": created, "updated": updated, "failed": failed}
     ))
     db.commit()
+
+    # Send welcome emails to newly created users (after commit)
+    from app.services.messaging import email_service
+    for user_data in created_users:
+        try:
+            full_name = f"{user_data['first_name']} {user_data['last_name']}"
+            result = email_service.send_welcome_email(
+                to=user_data['email'],
+                user_name=full_name,
+                password=user_data['password']
+            )
+            if result.get('status') == 'failed':
+                email_failures.append(f"Email to {user_data['email']} failed: {result.get('error', 'Unknown error')}")
+                logger.error(f"Welcome email failed for {user_data['email']}: {result.get('error')}")
+            else:
+                logger.info(f"Welcome email sent to {user_data['email']}")
+        except Exception as e:
+            email_failures.append(f"Email to {user_data['email']} error: {str(e)}")
+            logger.error(f"Exception sending welcome email to {user_data['email']}: {e}")
+
+    # Add errors to response if any
+    all_errors = errors + email_failures
+
     return CSVImportResponse(
         created=created,
         updated=updated,
         failed=failed,
-        errors=errors[:20],
+        errors=all_errors[:20],  # Return first 20 errors
         created_users=created_users
     )
 

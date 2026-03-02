@@ -210,6 +210,11 @@ first_name, last_name, email, phone, department, title, employee_id, role
 
 Roles: `super_admin`, `admin`, `manager`, `viewer` (default: viewer)
 
+**Password Handling:**
+- New users imported via CSV are automatically sent a **welcome email** with their temporary password
+- The email includes login URL and security reminders to change password after first login
+- Ensure AWS SES is configured with valid credentials for emails to be sent
+
 ---
 
 ## Sending a Notification (API Example)
