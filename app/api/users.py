@@ -120,6 +120,21 @@ def update_user(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    # Check for duplicate employee_id if it's being updated
+    if data.employee_id is not None:
+        employee_id_value = data.employee_id if data.employee_id != '' else None
+        if employee_id_value:
+            existing = db.query(User).filter(
+                User.employee_id == employee_id_value,
+                User.deleted_at == None,
+                User.id != user_id  # Exclude current user from check
+            ).first()
+            if existing:
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Employee ID '{employee_id_value}' already assigned to another user"
+                )
+
     # Use exclude_unset=True to only update fields that were explicitly provided
     # This allows setting fields to None (to clear them) while not requiring all fields
     for field, value in data.model_dump(exclude_unset=True).items():
