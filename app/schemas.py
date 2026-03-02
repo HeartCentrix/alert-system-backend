@@ -330,7 +330,10 @@ class DeliveryLogResponse(BaseModel):
 
 
 class NotificationResponseCreate(BaseModel):
-    notification_id: int
+    """Schema for submitting a safety response to a notification.
+    
+    Note: notification_id is provided via URL path parameter, not in request body.
+    """
     response_type: ResponseType
     message: Optional[str] = None
     latitude: Optional[float] = None
