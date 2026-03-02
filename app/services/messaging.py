@@ -151,7 +151,7 @@ class EmailService:
 
     def send_welcome_email(self, to: str, user_name: str, password: str) -> dict:
         """Send welcome email with login credentials to newly imported users."""
-        login_url = f"{settings.FRONTEND_URL}/login"
+        login_url = f"{settings.FRONTEND_URL}/#/login"
         subject = "Welcome to TM Alert - Your Login Credentials"
         
         body_text = f"""Hi {user_name},
