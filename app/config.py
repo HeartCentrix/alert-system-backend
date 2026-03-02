@@ -9,7 +9,11 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     FRONTEND_URL: str = "http://localhost:3000"
+<<<<<<< Updated upstream
     BACKEND_URL: str = "http://localhost:8000"  # Base URL for webhooks (Twilio, etc.)
+=======
+    BACKEND_URL: str = "http://localhost:8000"
+>>>>>>> Stashed changes
 
     DATABASE_URL: str = "postgresql://postgres:password@localhost:5432/tm_alert"
     REDIS_URL: str = "redis://localhost:6379/0"
