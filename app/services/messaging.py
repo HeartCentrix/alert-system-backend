@@ -128,7 +128,7 @@ class EmailService:
             return {"error": str(e), "status": "failed"}
 
     def send_password_reset_email(self, to: str, reset_token: str, user_name: str) -> dict:
-        reset_url = f"{settings.FRONTEND_URL}/reset-password?token={reset_token}"
+        reset_url = f"{settings.FRONTEND_URL}/#/reset-password?token={reset_token}"
         subject = "TM Alert - Password Reset Request"
         body_text = f"Hi {user_name},\n\nClick the link to reset your password:\n{reset_url}\n\nThis link expires in 1 hour.\n\nIf you didn't request this, ignore this email."
         body_html = f"""
