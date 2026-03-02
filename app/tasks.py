@@ -8,6 +8,7 @@ from app.models import (
     AlertChannel, User
 )
 from app.services.messaging import twilio_service, email_service, webhook_service
+from sqlalchemy import update   
 
 logger = logging.getLogger(__name__)
 
@@ -142,14 +143,27 @@ def _send_to_channel(self, notification_id: int, user_id: int, channel: str):
         if result.get("error"):
             log.status = DeliveryStatus.FAILED
             log.error_message = result["error"]
-            notification.failed_count = (notification.failed_count or 0) + 1
+            db.add(log)
+            db.commit()
+            # Atomic increment to avoid race condition
+            db.execute(
+                update(Notification)
+                .where(Notification.id == notification_id)
+                .values(failed_count=Notification.failed_count + 1)
+            )
+            db.commit()
         else:
             log.status = DeliveryStatus.SENT
             log.external_id = result.get("sid") or result.get("message_id")
-            notification.sent_count = (notification.sent_count or 0) + 1
-
-        db.add(log)
-        db.commit()
+            db.add(log)
+            db.commit()
+            # Atomic increment to avoid race condition
+            db.execute(
+                update(Notification)
+                .where(Notification.id == notification_id)
+                .values(sent_count=Notification.sent_count + 1)
+            )
+            db.commit()
 
     except Exception as e:
         logger.error(f"Error sending to user {user_id} via {channel}: {e}")

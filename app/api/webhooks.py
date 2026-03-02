@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Request, Form, Depends, HTTPException
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
-from sqlalchemy import desc
+from sqlalchemy import desc, update
 from typing import Optional, List
 from app.database import get_db
 from app.core.deps import get_current_user, require_manager
@@ -124,10 +124,12 @@ async def sms_status_callback(
                 log.status = new_status
                 if new_status == DeliveryStatus.DELIVERED:
                     log.delivered_at = datetime.now(timezone.utc)
-                    # Update notification delivered_count
-                    notif = log.notification
-                    if notif:
-                        notif.delivered_count = (notif.delivered_count or 0) + 1
+                    # Update notification delivered_count atomically to avoid race condition
+                    db.execute(
+                        update(Notification)
+                        .where(Notification.id == log.notification_id)
+                        .values(delivered_count=Notification.delivered_count + 1)
+                    )
             db.commit()
 
     return Response(content="", status_code=200)
