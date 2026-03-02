@@ -46,7 +46,7 @@ class TwilioService:
   <Say voice="alice" loop="2">{message}</Say>
   <Pause length="1"/>
   <Say voice="alice">Press 1 if you are safe. Press 2 if you need help.</Say>
-  <Gather numDigits="1" action="/api/v1/webhooks/voice-response" method="POST">
+  <Gather numDigits="1" action="/api/v1/webhooks/voice/response" method="POST">
     <Say>Please press a key now.</Say>
   </Gather>
 </Response>"""
