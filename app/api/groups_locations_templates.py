@@ -210,7 +210,12 @@ def update_location(
         setattr(location, field, value)
     db.commit()
     db.refresh(location)
-    user_count = db.query(User).filter(User.location_id == location_id).count()
+    # Count only active, non-deleted users at this location
+    user_count = db.query(User).filter(
+        User.location_id == location_id,
+        User.is_active == True,
+        User.deleted_at == None
+    ).count()
     return LocationResponse(**{**location.__dict__, "user_count": user_count})
 
 
