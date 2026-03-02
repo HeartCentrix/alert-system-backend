@@ -189,43 +189,56 @@ async def voice_response(
     db: Session = Depends(get_db)
 ):
     """Handle keypress response from voice calls - 1=Safe, 2=Help."""
-    logger.info(f"Voice response from {From}: pressed {Digits}")
+    try:
+        logger.info(f"Voice response from {From}: pressed {Digits}, CallSid: {CallSid}")
 
-    response_type = ResponseType.SAFE if Digits == "1" else ResponseType.NEED_HELP if Digits == "2" else ResponseType.ACKNOWLEDGED
+        response_type = ResponseType.SAFE if Digits == "1" else ResponseType.NEED_HELP if Digits == "2" else ResponseType.ACKNOWLEDGED
 
-    # Find user by phone with proper validation (prevents matching empty From)
-    user = _find_user_by_phone(db, From)
+        # Find user by phone with proper validation (prevents matching empty From)
+        user = _find_user_by_phone(db, From)
+        logger.info(f"User found: {user.email if user else 'None'}")
 
-    latest_log = None
-    if user:
-        latest_log = db.query(DeliveryLog).filter(
-            DeliveryLog.user_id == user.id,
-            DeliveryLog.channel == AlertChannel.VOICE
-        ).order_by(desc(DeliveryLog.created_at)).first()
+        latest_log = None
+        if user:
+            latest_log = db.query(DeliveryLog).filter(
+                DeliveryLog.user_id == user.id,
+                DeliveryLog.channel == AlertChannel.VOICE
+            ).order_by(desc(DeliveryLog.created_at)).first()
+            logger.info(f"Latest voice log: {latest_log.notification_id if latest_log else 'None'}")
 
-    if latest_log:
-        resp = NotificationResponse(
-            notification_id=latest_log.notification_id,
-            user_id=user.id if user else None,
-            channel=AlertChannel.VOICE,
-            response_type=response_type,
-            from_number=From
-        )
-        db.add(resp)
-        db.commit()
+        if latest_log:
+            resp = NotificationResponse(
+                notification_id=latest_log.notification_id,
+                user_id=user.id if user else None,
+                channel=AlertChannel.VOICE,
+                response_type=response_type,
+                from_number=From
+            )
+            db.add(resp)
+            db.commit()
+            logger.info(f"Response saved: {response_type.value}")
 
-    if response_type == ResponseType.SAFE:
-        message = "Thank you. Your safe status has been recorded. Goodbye."
-    elif response_type == ResponseType.NEED_HELP:
-        message = "Help request recorded. Emergency team has been notified. Please stay where you are."
-    else:
-        message = "Response recorded. Thank you."
+        if response_type == ResponseType.SAFE:
+            message = "Thank you. Your safe status has been recorded. Goodbye."
+        elif response_type == ResponseType.NEED_HELP:
+            message = "Help request recorded. Emergency team has been notified. Please stay where you are."
+        else:
+            message = "Response recorded. Thank you."
 
-    twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="alice">{message}</Say>
 </Response>"""
-    return Response(content=twiml, media_type="application/xml")
+        return Response(content=twiml, media_type="application/xml")
+    
+    except Exception as e:
+        logger.error(f"Voice response error: {str(e)}", exc_info=True)
+        # Return error TwiML
+        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="alice">Sorry, an error occurred. Please try again later.</Say>
+</Response>"""
+        return Response(content=twiml, media_type="application/xml")
 
 
 @router.get("/incoming-messages", response_model=List[IncomingMessageResponse])
