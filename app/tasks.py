@@ -15,7 +15,13 @@ logger = logging.getLogger(__name__)
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=30)
 def send_notification_task(self, notification_id: int):
-    """Main task to dispatch a notification to all recipients across all channels."""
+    """Main task to dispatch a notification to all recipients across all channels.
+    
+    Sets notification status to:
+    - SENT: All deliveries successful
+    - PARTIALLY_SENT: Some deliveries failed
+    - FAILED: All deliveries failed or zero recipients
+    """
     db = SessionLocal()
     notification = None
     try:
@@ -55,12 +61,14 @@ def send_notification_task(self, notification_id: int):
                     DeliveryLog.user_id == user.id,
                     DeliveryLog.channel == channel
                 ).first()
-                
+
                 if not existing_log:
                     _send_to_channel.delay(notification_id, user.id, channel)
                     dispatched_count += 1
 
-        notification.status = NotificationStatus.SENT
+        # Status will be updated by _send_to_channel tasks based on delivery results
+        # Final status determined after all subtasks complete (handled in _send_to_channel)
+        notification.status = NotificationStatus.SENDING  # Keep as SENDING until subtasks complete
         notification.sent_at = datetime.now(timezone.utc)
         db.commit()
 
@@ -78,7 +86,7 @@ def send_notification_task(self, notification_id: int):
             except Exception as e:
                 logger.error(f"Slack webhook failed for notification {notification_id}: {e}")
                 webhook_errors.append(f"Slack: {e}")
-                
+
         if AlertChannel.TEAMS in notification.channels and notification.teams_webhook_url:
             try:
                 webhook_service.send_teams(
@@ -194,6 +202,8 @@ def _send_to_channel(self, notification_id: int, user_id: int, channel: str):
                 .values(failed_count=Notification.failed_count + 1)
             )
             db.commit()
+            # Update notification status based on delivery results
+            _update_notification_status(db, notification_id)
         else:
             log.status = DeliveryStatus.SENT
             log.external_id = result.get("sid") or result.get("message_id")
@@ -206,6 +216,8 @@ def _send_to_channel(self, notification_id: int, user_id: int, channel: str):
                 .values(sent_count=Notification.sent_count + 1)
             )
             db.commit()
+            # Update notification status based on delivery results
+            _update_notification_status(db, notification_id)
 
     except Exception as e:
         logger.error(f"Error sending to user {user_id} via {channel}: {e}")
@@ -247,6 +259,40 @@ def process_scheduled_notifications():
         db.rollback()
     finally:
         db.close()
+
+
+def _update_notification_status(db, notification_id: int):
+    """Update notification status based on delivery results.
+    
+    Sets status to:
+    - PARTIALLY_SENT: Some deliveries succeeded, some failed
+    - SENT: All deliveries succeeded
+    - FAILED: All deliveries failed
+    """
+    notification = db.query(Notification).filter(Notification.id == notification_id).first()
+    if not notification:
+        return
+    
+    total_expected = notification.total_recipients * len(notification.channels)
+    total_delivered = notification.sent_count + notification.failed_count
+    
+    # Only update status if all deliveries are complete
+    if total_delivered >= total_expected:
+        if notification.failed_count == 0:
+            # All succeeded
+            notification.status = NotificationStatus.SENT
+        elif notification.sent_count == 0:
+            # All failed
+            notification.status = NotificationStatus.FAILED
+        else:
+            # Mixed results
+            notification.status = NotificationStatus.PARTIALLY_SENT
+        
+        db.commit()
+        logger.info(
+            f"Notification {notification_id} status updated to {notification.status}: "
+            f"{notification.sent_count} sent, {notification.failed_count} failed out of {total_expected}"
+        )
 
 
 def _get_recipients(db, notification: Notification) -> List[User]:
