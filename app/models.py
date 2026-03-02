@@ -1,6 +1,6 @@
 from sqlalchemy import (
     Column, Integer, String, Boolean, DateTime, Text,
-    ForeignKey, Enum, Float, JSON, Table, event
+    ForeignKey, Enum, Float, JSON, Table
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -55,13 +55,6 @@ class AlertChannel(str, enum.Enum):
     SLACK = "slack"
     TEAMS = "teams"
     WEB = "web"
-
-
-# PostgreSQL enum configuration - runs when tables are created
-@event.listens_for(AlertChannel.__table__, 'after_create')
-def add_web_channel_enum(target, connection, **kw):
-    """Add 'web' value to alertchannel enum after table creation."""
-    connection.execute("ALTER TYPE alertchannel ADD VALUE IF NOT EXISTS 'web'")
 
 
 class IncidentSeverity(str, enum.Enum):
