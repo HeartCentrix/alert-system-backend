@@ -17,6 +17,42 @@ router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
 logger = logging.getLogger(__name__)
 
 
+def _find_user_by_phone(db: Session, phone_number: str) -> Optional[User]:
+    """Find user by phone number with proper validation.
+    
+    Handles various phone formats: +1234567890, 1234567890, (123) 456-7890
+    Returns None if phone number is empty or no match found.
+    """
+    if not phone_number or not phone_number.strip():
+        return None
+    
+    # Clean and extract last 10 digits for matching
+    phone_clean = ''.join(c for c in phone_number if c.isdigit())
+    
+    if len(phone_clean) < 10:
+        logger.warning(f"Invalid phone number format: {phone_number}")
+        return None
+    
+    # Get last 10 digits for matching (handles country codes)
+    last_10 = phone_clean[-10:]
+    
+    # Try multiple matching strategies
+    phone_variants = [
+        phone_number,  # Original format
+        f"+{phone_clean}",  # With + prefix
+        phone_clean,  # Digits only
+        last_10,  # Last 10 digits
+    ]
+    
+    for ph in phone_variants:
+        if ph and len(ph) >= 10:
+            user = db.query(User).filter(User.phone.contains(ph[-10:])).first()
+            if user:
+                return user
+    
+    return None
+
+
 @router.post("/sms/inbound")
 async def sms_inbound(
     request: Request,
@@ -41,12 +77,7 @@ async def sms_inbound(
         response_type = ResponseType.CUSTOM
 
     # Find the user by phone
-    phone_variants = [From, From.replace("+1", ""), From[-10:]]
-    user = None
-    for ph in phone_variants:
-        user = db.query(User).filter(User.phone.contains(ph[-10:])).first()
-        if user:
-            break
+    user = _find_user_by_phone(db, From)
 
     # Find the most recent active notification sent to this user
     notification = None
@@ -148,7 +179,8 @@ async def voice_response(
 
     response_type = ResponseType.SAFE if Digits == "1" else ResponseType.NEED_HELP if Digits == "2" else ResponseType.ACKNOWLEDGED
 
-    user = db.query(User).filter(User.phone.contains(From[-10:])).first()
+    # Find user by phone with proper validation (prevents matching empty From)
+    user = _find_user_by_phone(db, From)
 
     latest_log = None
     if user:
