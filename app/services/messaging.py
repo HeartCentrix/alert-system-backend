@@ -41,12 +41,14 @@ class TwilioService:
             logger.warning(f"[MOCK VOICE] To: {to} | Message: {message[:50]}...")
             return {"sid": "MOCK_VOICE_SID", "status": "initiated", "mock": True}
         try:
+            # Use full absolute URL for the Gather action (Twilio requirement)
+            voice_webhook_url = f"{settings.BACKEND_URL}/api/v1/webhooks/voice/response"
             twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say voice="alice" loop="2">{message}</Say>
   <Pause length="1"/>
   <Say voice="alice">Press 1 if you are safe. Press 2 if you need help.</Say>
-  <Gather numDigits="1" action="/api/v1/webhooks/voice/response" method="POST">
+  <Gather numDigits="1" action="{voice_webhook_url}" method="POST">
     <Say>Please press a key now.</Say>
   </Gather>
 </Response>"""

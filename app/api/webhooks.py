@@ -141,7 +141,7 @@ async def sms_inbound(
 <Response>
     <Message>{reply}</Message>
 </Response>"""
-    return Response(content=twiml, media_type="application/xml")
+    return Response(content=twiml, media_type="text/xml")
 
 
 @router.post("/sms/status")
@@ -229,7 +229,7 @@ async def voice_response(
 <Response>
     <Say voice="alice">{message}</Say>
 </Response>"""
-        return Response(content=twiml, media_type="application/xml")
+        return Response(content=twiml, media_type="text/xml")
     
     except Exception as e:
         logger.error(f"Voice response error: {str(e)}", exc_info=True)
@@ -238,7 +238,7 @@ async def voice_response(
 <Response>
     <Say voice="alice">Sorry, an error occurred. Please try again later.</Say>
 </Response>"""
-        return Response(content=twiml, media_type="application/xml")
+        return Response(content=twiml, media_type="text/xml")
 
 
 @router.get("/incoming-messages", response_model=List[IncomingMessageResponse])
