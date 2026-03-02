@@ -103,6 +103,8 @@ class CSVImportResponse(BaseModel):
     updated: int
     failed: int
     errors: List[str]
+    # Passwords for newly created users (only for new accounts, not updates)
+    created_users: List[dict] = []  # [{email, password}, ...]
 
 
 # ─── LOCATION ─────────────────────────────────────────────────────────────────
