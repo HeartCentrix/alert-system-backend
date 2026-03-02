@@ -38,9 +38,11 @@ def send_notification_task(self, notification_id: int):
         db.commit()
 
         if not recipients:
-            notification.status = NotificationStatus.SENT
+            # No recipients found - mark as FAILED with clear error
+            notification.status = NotificationStatus.FAILED
             notification.sent_at = datetime.now(timezone.utc)
             db.commit()
+            logger.warning(f"Notification {notification_id} has zero recipients - marked as FAILED")
             return
 
         # Dispatch per recipient per channel (skip if already sent)
