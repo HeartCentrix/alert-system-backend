@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 def send_notification_task(self, notification_id: int):
     """Main task to dispatch a notification to all recipients across all channels."""
     db = SessionLocal()
+    notification = None
     try:
         notification = db.query(Notification).filter(Notification.id == notification_id).first()
         if not notification:
