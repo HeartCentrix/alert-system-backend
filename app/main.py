@@ -20,6 +20,7 @@ from app.api.notifications import (
 from app.api.webhooks import router as webhooks_router
 from app.api.dashboard import router as dashboard_router
 from app.api.location_v2 import router as location_router
+from app.api.location_audience import router as location_audience_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -137,6 +138,7 @@ app.include_router(notifications_router, prefix=API_PREFIX)
 app.include_router(webhooks_router, prefix=API_PREFIX)
 app.include_router(dashboard_router, prefix=API_PREFIX)
 app.include_router(location_router, prefix=API_PREFIX)
+app.include_router(location_audience_router, prefix=API_PREFIX)
 
 
 # ─── HEALTH CHECK ─────────────────────────────────────────────────────────────

@@ -1,9 +1,10 @@
-from pydantic import BaseModel, EmailStr, Field, validator
-from typing import Optional, List, Any
+from pydantic import BaseModel, EmailStr, Field, validator, field_validator
+from typing import Optional, List, Any, Dict
 from datetime import datetime
 from app.models import (
     UserRole, GroupType, NotificationStatus, DeliveryStatus,
-    ResponseType, AlertChannel, IncidentSeverity, IncidentStatus
+    ResponseType, AlertChannel, IncidentSeverity, IncidentStatus,
+    UserLocationAssignmentType, UserLocationStatus
 )
 
 
@@ -385,4 +386,134 @@ class IncomingMessageResponse(BaseModel):
     notification_id: Optional[int]
     is_processed: bool
     received_at: datetime
+
+
+# ─── LOCATION AUDIENCE MANAGEMENT ─────────────────────────────────────────────
+
+class UserLocationAssign(BaseModel):
+    """Schema for manually assigning a user to a location."""
+    user_id: int
+    location_id: int
+    notes: Optional[str] = None
+    expires_at: Optional[datetime] = None
+
+
+class UserLocationRemove(BaseModel):
+    """Schema for removing a user from a location."""
+    reason: Optional[str] = None
+
+
+class UserLocationGeofenceUpdate(BaseModel):
+    """Schema for user location update (geofence detection)."""
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+
+
+class UserLocationResponse(BaseModel):
+    """Response schema for user-location assignment."""
+    id: int
+    user_id: int
+    user_name: Optional[str] = None
+    user_email: Optional[str] = None
+    location_id: int
+    location_name: str
+    assignment_type: UserLocationAssignmentType
+    status: UserLocationStatus
+    detected_latitude: Optional[float] = None
+    detected_longitude: Optional[float] = None
+    distance_from_center_miles: Optional[float] = None
+    assigned_by_id: Optional[int] = None
+    assigned_by_name: Optional[str] = None
+    notes: Optional[str] = None
+    assigned_at: datetime
+    expires_at: Optional[datetime] = None
+    
+    class Config:
+        from_attributes = True
+
+
+class UserLocationHistoryResponse(BaseModel):
+    """Response schema for location membership history."""
+    id: int
+    user_id: int
+    user_name: Optional[str] = None
+    location_id: int
+    location_name: str
+    action: str
+    assignment_type: Optional[UserLocationAssignmentType] = None
+    previous_status: Optional[UserLocationStatus] = None
+    new_status: Optional[UserLocationStatus] = None
+    triggered_by_user_id: Optional[int] = None
+    triggered_by_name: Optional[str] = None
+    reason: Optional[str] = None
+    detected_latitude: Optional[float] = None
+    detected_longitude: Optional[float] = None
+    distance_from_center_miles: Optional[float] = None
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+
+class LocationOverlapInfo(BaseModel):
+    """Information about overlapping locations."""
+    location_id: int
+    location_name: str
+    distance_miles: float
+    overlap_miles: float
+    overlap_percentage: float
+
+
+class LocationCreateValidated(BaseModel):
+    """Validated location creation data."""
+    name: str
+    address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    zip_code: Optional[str] = None
+    country: str = "USA"
+    latitude: float
+    longitude: float
+    geofence_radius_miles: float
+    overlaps: Optional[List[LocationOverlapInfo]] = None
+
+
+class GeofenceCheckResult(BaseModel):
+    """Result of a geofence check for a single location."""
+    location_id: int
+    location_name: str
+    is_inside: bool
+    distance_miles: float
+    distance_km: float
+    radius_miles: float
+    margin_miles: float
+
+
+class UserGeofenceStatus(BaseModel):
+    """User's geofence status across all locations."""
+    user_id: int
+    latitude: float
+    longitude: float
+    checked_at: datetime
+    locations_inside: List[GeofenceCheckResult]
+    locations_outside: List[GeofenceCheckResult]
+    assignments_changed: List[Dict[str, Any]] = []
+
+
+class LocationMemberListResponse(BaseModel):
+    """Response for listing location members."""
+    total: int
+    page: int
+    page_size: int
+    location_id: int
+    location_name: str
+    items: List[UserLocationResponse]
+
+
+class UserLocationHistoryListResponse(BaseModel):
+    """Response for listing location membership history."""
+    total: int
+    page: int
+    page_size: int
+    items: List[UserLocationHistoryResponse]
 

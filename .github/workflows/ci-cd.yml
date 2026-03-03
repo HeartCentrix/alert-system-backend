@@ -1,0 +1,492 @@
+# =============================================================================
+# TM Alert - CI/CD Pipeline
+# 
+# Triggers:
+# - Push to any branch
+# - Pull requests
+# - Manual dispatch
+#
+# Stages:
+# 1. Lint & Type Check
+# 2. Security Scan
+# 3. Test (Unit, Integration, API)
+# 4. Coverage Verification
+# 5. Build (Docker)
+# 6. Deploy (main branch only)
+# =============================================================================
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  pull_request:
+    branches: [main, develop]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+env:
+  PYTHON_VERSION: '3.11'
+  NODE_VERSION: '18'
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+# Cancel in-progress runs for PRs
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ===========================================================================
+  # LINTING & TYPE CHECKING
+  # ===========================================================================
+  
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff mypy
+      
+      - name: Run Ruff linting
+        run: |
+          ruff check app/ --statistics
+          ruff check app/ --output-format=github
+      
+      - name: Run Ruff format check
+        run: |
+          ruff format app/ --check
+      
+      - name: Run MyPy type checking
+        run: |
+          mypy app/ --ignore-missing-imports --no-error-summary
+        continue-on-error: true  # Type errors shouldn't fail CI initially
+      
+      - name: Annotate lint results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-results
+          path: |
+            .ruff_cache/
+          retention-days: 7
+
+  # ===========================================================================
+  # SECURITY SCANNING
+  # ===========================================================================
+  
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      security-events: write
+      contents: read
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: Install security tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install bandit safety pip-audit secretlint
+      
+      - name: Run Bandit security scan
+        run: |
+          bandit -r app/ -f json -o bandit-report.json --severity-level medium --confidence-level medium || true
+          bandit -r app/ --severity-level high --confidence-level high
+        continue-on-error: false  # High severity issues should fail CI
+      
+      - name: Upload Bandit results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: bandit-report.json
+          category: bandit
+      
+      - name: Run Safety dependency check
+        run: |
+          safety check --json --output safety-report.json || true
+          safety check --fail-on any
+        continue-on-error: false  # Known vulnerabilities should fail CI
+      
+      - name: Run pip-audit
+        run: |
+          pip-audit --format json > pip-audit-report.json || true
+          pip-audit --fail-on-vuln
+        continue-on-error: false
+      
+      - name: Run Gitleaks secret detection
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+      
+      - name: Check for hardcoded secrets
+        run: |
+          # Check for common secret patterns
+          grep -r "password\s*=\s*['\"][^'\"]*['\"]" app/ --include="*.py" | grep -v "test_" | grep -v "__pycache__" || true
+          grep -r "api_key\s*=\s*['\"][^'\"]*['\"]" app/ --include="*.py" | grep -v "test_" | grep -v "__pycache__" || true
+          grep -r "secret\s*=\s*['\"][^'\"]*['\"]" app/ --include="*.py" | grep -v "test_" | grep -v "__pycache__" || true
+        continue-on-error: true  # Warnings only
+      
+      - name: Upload security reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: |
+            bandit-report.json
+            safety-report.json
+            pip-audit-report.json
+          retention-days: 30
+
+  # ===========================================================================
+  # TESTING
+  # ===========================================================================
+  
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: tm_alert_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov pytest-asyncio pytest-mock httpx
+      
+      - name: Set up test environment
+        run: |
+          cp .env.example .env || true
+          echo "TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/tm_alert_test" >> .env
+          echo "TEST_REDIS_URL=redis://localhost:6379/15" >> .env
+          echo "SECRET_KEY=test-secret-key-for-ci-pipeline-32chars" >> .env
+      
+      - name: Run database migrations
+        run: |
+          alembic upgrade head
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/tm_alert_test
+      
+      - name: Run unit tests
+        run: |
+          pytest app/tests/unit \
+            --cov=app \
+            --cov-report=xml:coverage-unit.xml \
+            --cov-report=term-missing \
+            -v \
+            -m unit \
+            --tb=short
+      
+      - name: Run integration tests
+        run: |
+          pytest app/tests/integration \
+            --cov=app \
+            --cov-report=xml:coverage-integration.xml \
+            --cov-report=term-missing \
+            -v \
+            -m integration \
+            --tb=short \
+            -x
+        env:
+          USE_POSTGRES_FOR_TESTS: "true"
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/tm_alert_test
+      
+      - name: Run API tests
+        run: |
+          pytest app/tests/api \
+            --cov=app \
+            --cov-report=xml:coverage-api.xml \
+            --cov-report=term-missing \
+            -v \
+            -m api \
+            --tb=short \
+            -x
+      
+      - name: Run security tests
+        run: |
+          pytest app/tests/security \
+            --cov=app \
+            --cov-report=xml:coverage-security.xml \
+            --cov-report=term-missing \
+            -v \
+            -m security \
+            --tb=short \
+            -x
+      
+      - name: Combine coverage reports
+        run: |
+          pip install coverage
+          coverage combine coverage-unit.xml coverage-integration.xml coverage-api.xml coverage-security.xml || true
+          coverage xml -o coverage.xml
+          coverage html -d htmlcov
+          coverage report --fail-under=85
+      
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+      
+      - name: Upload coverage HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: htmlcov/
+          retention-days: 14
+      
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            .pytest_cache/
+            coverage*.xml
+          retention-days: 7
+
+  # ===========================================================================
+  # PROPERTY & FUZZ TESTING
+  # ===========================================================================
+  
+  property-fuzz-test:
+    name: Property & Fuzz Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest hypothesis pytest-hypothesis
+      
+      - name: Run property-based tests
+        run: |
+          pytest app/tests/property \
+            -v \
+            --tb=short \
+            --hypothesis-seed=0 \
+            --hypothesis-examples=100
+      
+      - name: Run fuzz tests
+        run: |
+          pytest app/tests/fuzz \
+            -v \
+            --tb=short \
+            --hypothesis-seed=0 \
+            --hypothesis-examples=200 \
+            --hypothesis-deadline=500
+
+  # ===========================================================================
+  # DOCKER BUILD
+  # ===========================================================================
+  
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [lint, security, test]
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix=
+            type=semver,pattern={{version}}
+      
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+      
+      - name: Run Trivy vulnerability scanner on image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+      
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  # ===========================================================================
+  # DEPLOYMENT (Main Branch Only)
+  # ===========================================================================
+  
+  deploy:
+    name: Deploy to Environment
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [lint, security, test, build]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    environment:
+      name: ${{ github.event.inputs.environment || 'staging' }}
+      url: ${{ vars.DEPLOYMENT_URL }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Deploy to Railway
+        uses: railwayapp/railway-action@v1
+        with:
+          railway_token: ${{ secrets.RAILWAY_TOKEN }}
+        continue-on-error: true
+      
+      - name: Run smoke tests
+        run: |
+          # Basic health check after deployment
+          curl -f ${{ vars.DEPLOYMENT_URL }}/health || exit 1
+        env:
+          DEPLOYMENT_URL: ${{ vars.DEPLOYMENT_URL }}
+      
+      - name: Notify deployment success
+        if: success()
+        run: |
+          echo "✅ Deployment to ${{ github.event.inputs.environment || 'staging' }} successful!"
+      
+      - name: Notify deployment failure
+        if: failure()
+        run: |
+          echo "❌ Deployment to ${{ github.event.inputs.environment || 'staging' }} failed!"
+
+  # ===========================================================================
+  # SUMMARY
+  # ===========================================================================
+  
+  summary:
+    name: Pipeline Summary
+    runs-on: ubuntu-latest
+    needs: [lint, security, test, property-fuzz-test, build]
+    if: always()
+    
+    steps:
+      - name: Generate summary
+        run: |
+          echo "## CI/CD Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Stage | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Lint | ${{ needs.lint.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Security | ${{ needs.security.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Test | ${{ needs.test.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Property/Fuzz | ${{ needs.property-fuzz-test.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build | ${{ needs.build.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Triggered by:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY

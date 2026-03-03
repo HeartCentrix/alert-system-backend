@@ -336,3 +336,104 @@ class RefreshToken(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     user = relationship("User")
+
+
+# ─── LOCATION AUDIENCE MANAGEMENT ─────────────────────────────────────────────
+
+class UserLocationAssignmentType(str, enum.Enum):
+    """How the user was assigned to this location."""
+    MANUAL = "manual"  # Admin manually assigned
+    GEOFENCE = "geofence"  # Auto-assigned via geofence detection
+
+
+class UserLocationStatus(str, enum.Enum):
+    """Current status of the location membership."""
+    ACTIVE = "active"
+    INACTIVE = "inactive"  # User exited geofence or was removed
+
+
+class UserLocation(Base):
+    """
+    Many-to-many relationship between users and locations.
+    
+    Tracks both manual assignments by admins and automatic geofence-based assignments.
+    A user can belong to multiple locations simultaneously.
+    """
+    __tablename__ = "user_locations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    location_id = Column(Integer, ForeignKey("locations.id", ondelete="CASCADE"), nullable=False, index=True)
+    assignment_type = Column(Enum(UserLocationAssignmentType), nullable=False, default=UserLocationAssignmentType.MANUAL)
+    status = Column(Enum(UserLocationStatus), nullable=False, default=UserLocationStatus.ACTIVE)
+    
+    # For geofence assignments: track the coordinates that triggered the assignment
+    detected_latitude = Column(Float, nullable=True)
+    detected_longitude = Column(Float, nullable=True)
+    distance_from_center_miles = Column(Float, nullable=True)  # Distance when assigned
+    
+    # Metadata
+    assigned_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # Admin who manually assigned (if manual)
+    notes = Column(Text, nullable=True)
+    
+    # Timestamps
+    assigned_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=True)  # Optional expiration for temporary assignments
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    # Unique constraint: one active assignment per user-location pair
+    __table_args__ = (
+        # Prevent duplicate active assignments
+        # (handled at application level for flexibility with status changes)
+    )
+
+    # Relationships
+    user = relationship("User", foreign_keys=[user_id], back_populates="location_assignments")
+    location = relationship("Location", back_populates="user_assignments")
+    assigned_by = relationship("User", foreign_keys=[assigned_by_id])
+
+
+class UserLocationHistory(Base):
+    """
+    Audit trail for all location membership changes.
+    
+    Records every assignment, removal, and status change for compliance and debugging.
+    """
+    __tablename__ = "user_location_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    location_id = Column(Integer, ForeignKey("locations.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_location_id = Column(Integer, ForeignKey("user_locations.id", ondelete="CASCADE"), nullable=True)  # Reference to current record
+    
+    # Action taken
+    action = Column(String(50), nullable=False)  # assigned, removed, entered_geofence, exited_geofence, status_changed
+    assignment_type = Column(Enum(UserLocationAssignmentType), nullable=True)
+    previous_status = Column(Enum(UserLocationStatus), nullable=True)
+    new_status = Column(Enum(UserLocationStatus), nullable=True)
+    
+    # Context
+    triggered_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # Admin who triggered (if manual)
+    reason = Column(Text, nullable=True)
+    
+    # Location data at time of action
+    detected_latitude = Column(Float, nullable=True)
+    detected_longitude = Column(Float, nullable=True)
+    distance_from_center_miles = Column(Float, nullable=True)
+    
+    # Metadata
+    ip_address = Column(String(45), nullable=True)
+    user_agent = Column(String(500), nullable=True)
+    extra_data = Column(JSON, nullable=True)  # Additional context (renamed from 'metadata' to avoid conflict)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    # Relationships
+    user = relationship("User", foreign_keys=[user_id])
+    location = relationship("Location")
+    triggered_by = relationship("User", foreign_keys=[triggered_by_user_id])
+
+
+# Add back-references to User and Location models
+User.location_assignments = relationship("UserLocation", foreign_keys=[UserLocation.user_id], back_populates="user")
+Location.user_assignments = relationship("UserLocation", foreign_keys=[UserLocation.location_id], back_populates="location")

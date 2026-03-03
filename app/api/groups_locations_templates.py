@@ -1,15 +1,18 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+import logging
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 from typing import Optional, List
 from app.database import get_db
-from app.models import Group, GroupType, Location, NotificationTemplate, User, AuditLog
+from app.models import Group, GroupType, Location, NotificationTemplate, User, AuditLog, UserLocation, UserLocationStatus
 from app.schemas import (
     GroupCreate, GroupUpdate, GroupResponse, GroupDetailResponse, GroupMemberAdd,
     LocationCreate, LocationUpdate, LocationResponse,
     TemplateCreate, TemplateUpdate, TemplateResponse
 )
 from app.core.deps import get_current_user, require_admin, require_manager
+
+logger = logging.getLogger(__name__)
 
 # ─── GROUPS ───────────────────────────────────────────────────────────────────
 
@@ -193,8 +196,10 @@ def list_locations(
     locations = db.query(Location).filter(Location.is_active == True).order_by(Location.name).all()
     result = []
     for loc in locations:
-        user_count = db.query(User).filter(
-            User.location_id == loc.id, User.is_active == True, User.deleted_at == None
+        # Count users in user_locations table (many-to-many)
+        user_count = db.query(UserLocation).filter(
+            UserLocation.location_id == loc.id,
+            UserLocation.status == UserLocationStatus.ACTIVE
         ).count()
         r = LocationResponse(
             id=loc.id, name=loc.name, address=loc.address,
@@ -207,16 +212,96 @@ def list_locations(
     return result
 
 
-@locations_router.post("", response_model=LocationResponse, status_code=201)
+@locations_router.post("", response_model=LocationResponse, status_code=status.HTTP_201_CREATED)
 def create_location(
     data: LocationCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    location = Location(**data.model_dump())
+    """
+    Create a new location with geofence.
+    
+    Features:
+    - Input validation and sanitization
+    - Overlap detection with existing locations
+    - Redis GEO index sync
+    - Audit logging
+    """
+    from app.core.geofence import validate_location_input, check_location_overlap, get_geo_service
+    
+    # Validate and sanitize input
+    validation = validate_location_input(
+        name=data.name,
+        latitude=data.latitude,
+        longitude=data.longitude,
+        radius_miles=data.geofence_radius_miles
+    )
+    
+    if not validation["is_valid"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "message": "Validation failed",
+                "errors": validation["errors"]
+            }
+        )
+    
+    # Check for overlaps with existing locations
+    existing_locations = db.query(Location).filter(
+        Location.is_active == True,
+        Location.latitude.isnot(None),
+        Location.longitude.isnot(None)
+    ).all()
+    
+    overlaps = check_location_overlap(
+        new_latitude=validation["sanitized"]["latitude"],
+        new_longitude=validation["sanitized"]["longitude"],
+        new_radius=validation["sanitized"]["geofence_radius_miles"],
+        existing_locations=existing_locations
+    )
+    
+    # Create location
+    location = Location(
+        name=validation["sanitized"]["name"],
+        address=data.address,
+        city=data.city,
+        state=data.state,
+        zip_code=data.zip_code,
+        country=data.country,
+        latitude=validation["sanitized"]["latitude"],
+        longitude=validation["sanitized"]["longitude"],
+        geofence_radius_miles=validation["sanitized"]["geofence_radius_miles"],
+        is_active=True
+    )
     db.add(location)
+    
+    # Audit log
+    db.add(AuditLog(
+        user_id=current_user.id,
+        action="create_location",
+        resource_type="location",
+        details={
+            "name": location.name,
+            "latitude": location.latitude,
+            "longitude": location.longitude,
+            "geofence_radius_miles": location.geofence_radius_miles,
+            "overlaps": len(overlaps)
+        },
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent") if request else None
+    ))
+    
     db.commit()
     db.refresh(location)
+    
+    # Sync to Redis GEO index (async)
+    try:
+        from app.location_tasks import sync_all_locations_to_redis
+        sync_all_locations_to_redis.delay()
+    except Exception as e:
+        logger.warning(f"Failed to sync location to Redis: {e}")
+    
     return LocationResponse(**{**location.__dict__, "user_count": 0})
 
 
@@ -224,23 +309,106 @@ def create_location(
 def update_location(
     location_id: int,
     data: LocationUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
+    """
+    Update location with validation and Redis sync.
+    
+    Features:
+    - Input validation for coordinates and radius
+    - Overlap detection
+    - Redis GEO index update
+    - Audit logging
+    """
+    from app.core.geofence import validate_coordinates, validate_geofence_radius, check_location_overlap
+    
     location = db.query(Location).filter(Location.id == location_id).first()
     if not location:
         raise HTTPException(status_code=404, detail="Location not found")
-    # Use exclude_unset=True to allow clearing fields to None
-    for field, value in data.model_dump(exclude_unset=True).items():
+    
+    # Validate coordinates if being updated
+    new_latitude = data.latitude if data.latitude is not None else location.latitude
+    new_longitude = data.longitude if data.longitude is not None else location.longitude
+    new_radius = data.geofence_radius_miles if data.geofence_radius_miles is not None else location.geofence_radius_miles
+    
+    # Validate coordinates
+    if data.latitude is not None or data.longitude is not None:
+        if new_latitude is None or new_longitude is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Both latitude and longitude must be provided together"
+            )
+        is_valid, error = validate_coordinates(new_latitude, new_longitude)
+        if not is_valid:
+            raise HTTPException(status_code=400, detail=error)
+    
+    # Validate radius if being updated
+    if data.geofence_radius_miles is not None:
+        is_valid, error = validate_geofence_radius(new_radius)
+        if not is_valid:
+            raise HTTPException(status_code=400, detail=error)
+    
+    # Check for overlaps if coordinates or radius changed
+    if (data.latitude is not None or data.longitude is not None or 
+        data.geofence_radius_miles is not None):
+        
+        existing_locations = db.query(Location).filter(
+            Location.is_active == True,
+            Location.latitude.isnot(None),
+            Location.longitude.isnot(None),
+            Location.id != location_id  # Exclude self
+        ).all()
+        
+        overlaps = check_location_overlap(
+            new_latitude=new_latitude,
+            new_longitude=new_longitude,
+            new_radius=new_radius,
+            existing_locations=existing_locations
+        )
+        
+        if overlaps:
+            # Log overlaps but don't prevent update - just warn
+            logger.info(f"Location update overlaps with {len(overlaps)} locations")
+    
+    # Update fields
+    update_data = data.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
         setattr(location, field, value)
+    
+    # Audit log
+    db.add(AuditLog(
+        user_id=current_user.id,
+        action="update_location",
+        resource_type="location",
+        resource_id=location_id,
+        details={
+            "updated_fields": list(update_data.keys()),
+            "latitude": location.latitude,
+            "longitude": location.longitude,
+            "geofence_radius_miles": location.geofence_radius_miles
+        },
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent") if request else None
+    ))
+    
     db.commit()
     db.refresh(location)
-    # Count only active, non-deleted users at this location
-    user_count = db.query(User).filter(
-        User.location_id == location_id,
-        User.is_active == True,
-        User.deleted_at == None
+    
+    # Sync to Redis GEO index
+    try:
+        from app.location_tasks import sync_all_locations_to_redis
+        sync_all_locations_to_redis.delay()
+    except Exception as e:
+        logger.warning(f"Failed to sync location to Redis: {e}")
+    
+    # Count active assignments
+    user_count = db.query(UserLocation).filter(
+        UserLocation.location_id == location_id,
+        UserLocation.status == UserLocationStatus.ACTIVE
     ).count()
+    
     return LocationResponse(**{**location.__dict__, "user_count": user_count})
 
 

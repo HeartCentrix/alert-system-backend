@@ -15,7 +15,7 @@ celery_app = Celery(
     "tm_alert",
     broker=broker_url,
     backend=backend_url,
-    include=["app.tasks", "app.core.location_cache"]
+    include=["app.tasks", "app.location_tasks", "app.core.location_cache"]
 )
 
 celery_app.conf.update(
