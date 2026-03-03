@@ -75,7 +75,6 @@ pytest-asyncio==0.23.6
 pytest-mock==3.14.0
 pytest-xdist==3.6.1  # Parallel test execution
 pytest-timeout==2.3.1
-pytest-hypothesis==0.1.0
 
 # Property-Based & Fuzz Testing
 hypothesis==6.100.2
@@ -98,7 +97,7 @@ mypy==1.10.0
 bandit==1.7.9
 safety==3.2.2
 pip-audit==2.7.3
-secretlint==1.2.0
+# secretlint==1.2.0  # Not available on PyPI - removed
 
 # =============================================================================
 # DEVELOPMENT TOOLS (Optional)

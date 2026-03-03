@@ -531,6 +531,94 @@ def cleanup_expired_assignments() -> Dict[str, Any]:
 
 
 @celery_app.task
+def periodic_geofence_check() -> Dict[str, Any]:
+    """
+    Periodic task (no arguments) for Celery beat.
+
+    Queries all users with known lat/lon and runs geofence checks for each.
+    This enables fully automatic geofence-based location assignment.
+    """
+    db = SessionLocal()
+    try:
+        # Get all active users that have a known location
+        users_with_location = db.query(User).filter(
+            User.is_active == True,
+            User.latitude.isnot(None),
+            User.longitude.isnot(None),
+            User.deleted_at.is_(None)
+        ).all()
+
+        if not users_with_location:
+            logger.info("No users with known coordinates for geofence check")
+            return {"processed": 0, "message": "No users with coordinates"}
+
+        # Build user_locations list and call batch check
+        user_locations = [
+            {"user_id": u.id, "latitude": u.latitude, "longitude": u.longitude}
+            for u in users_with_location
+        ]
+
+        logger.info(f"Running periodic geofence check for {len(user_locations)} users")
+
+        # Reuse batch logic inline to avoid serialization overhead
+        locations = db.query(Location).filter(
+            Location.is_active == True,
+            Location.latitude.isnot(None),
+            Location.longitude.isnot(None)
+        ).all()
+
+        if not locations:
+            return {"processed": len(user_locations), "message": "No active locations"}
+
+        total_changes = 0
+        for user_loc in user_locations:
+            try:
+                uid = user_loc["user_id"]
+                lat = user_loc["latitude"]
+                lng = user_loc["longitude"]
+
+                is_valid, _ = validate_coordinates(lat, lng)
+                if not is_valid:
+                    continue
+
+                results = check_geofences_batch(lat, lng, locations)
+
+                for result in results:
+                    if result.is_inside:
+                        if _assign_user_to_location(
+                            db=db, user_id=uid, location_id=result.location_id,
+                            assignment_type=UserLocationAssignmentType.GEOFENCE,
+                            detected_latitude=lat, detected_longitude=lng,
+                            distance_miles=result.distance_miles, action="entered_geofence"
+                        ):
+                            total_changes += 1
+                    else:
+                        if _remove_user_from_location(
+                            db=db, user_id=uid, location_id=result.location_id,
+                            reason="User exited geofence", action="exited_geofence"
+                        ):
+                            total_changes += 1
+
+                _update_primary_location(db, uid, results)
+            except Exception as e:
+                logger.error(f"Periodic geofence failed for user {user_loc.get('user_id')}: {e}")
+
+        db.commit()
+        logger.info(f"Periodic geofence check complete: {len(user_locations)} users, {total_changes} changes")
+
+        return {
+            "processed": len(user_locations),
+            "total_changes": total_changes
+        }
+    except Exception as e:
+        logger.error(f"Periodic geofence check failed: {e}")
+        db.rollback()
+        return {"error": str(e)}
+    finally:
+        db.close()
+
+
+@celery_app.task
 def refresh_redis_geo_index() -> Dict[str, Any]:
     """
     Periodic task to ensure Redis GEO index is up to date.

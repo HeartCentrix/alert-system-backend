@@ -116,6 +116,8 @@ class User(Base):
     mfa_secret = Column(String(32))
     avatar_url = Column(String(500))
     preferred_channels = Column(JSON, default=["sms", "email"])
+    latitude = Column(Float, nullable=True)   # Last known latitude
+    longitude = Column(Float, nullable=True)  # Last known longitude
     location_id = Column(Integer, ForeignKey("locations.id"), nullable=True)
     last_login = Column(DateTime(timezone=True))
     password_reset_token = Column(String(100))

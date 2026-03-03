@@ -17,7 +17,7 @@ import logging
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from fastapi.responses import JSONResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 from sqlalchemy import select, func, and_, or_
 from typing import Optional, List
 from time import time as current_time
@@ -133,30 +133,39 @@ def assign_user_to_location(
     if not location:
         raise HTTPException(status_code=404, detail="Location not found or inactive")
     
-    # Check for existing active assignment
+    # Check for existing assignment (active or inactive)
     existing = db.query(UserLocation).filter(
         UserLocation.user_id == data.user_id,
         UserLocation.location_id == data.location_id,
-        UserLocation.status == UserLocationStatus.ACTIVE
     ).first()
-    
-    if existing:
+
+    if existing and existing.status == UserLocationStatus.ACTIVE:
         raise HTTPException(
             status_code=400,
             detail="User is already assigned to this location"
         )
-    
-    # Create assignment
-    assignment = UserLocation(
-        user_id=data.user_id,
-        location_id=data.location_id,
-        assignment_type=UserLocationAssignmentType.MANUAL,
-        status=UserLocationStatus.ACTIVE,
-        assigned_by_id=current_user.id,
-        notes=data.notes,
-        expires_at=data.expires_at
-    )
-    db.add(assignment)
+
+    if existing:
+        # Reactivate the inactive assignment instead of creating a duplicate
+        existing.status = UserLocationStatus.ACTIVE
+        existing.assignment_type = UserLocationAssignmentType.MANUAL
+        existing.assigned_by_id = current_user.id
+        existing.notes = data.notes
+        existing.expires_at = data.expires_at
+        existing.assigned_at = datetime.now(timezone.utc)
+        assignment = existing
+    else:
+        # Create new assignment
+        assignment = UserLocation(
+            user_id=data.user_id,
+            location_id=data.location_id,
+            assignment_type=UserLocationAssignmentType.MANUAL,
+            status=UserLocationStatus.ACTIVE,
+            assigned_by_id=current_user.id,
+            notes=data.notes,
+            expires_at=data.expires_at
+        )
+        db.add(assignment)
     
     # Record history
     history = UserLocationHistory(
@@ -187,9 +196,31 @@ def assign_user_to_location(
     
     db.commit()
     db.refresh(assignment)
-    
-    # Build response with relationships
-    return _build_user_location_response(db, assignment)
+
+    # Build response - fetch related data explicitly to avoid ambiguous joins
+    # Use the already-loaded relationships (these work because foreign_keys are defined in model)
+    user = assignment.user
+    location_rel = assignment.location
+    assigned_by_user = assignment.assigned_by
+
+    return UserLocationResponse(
+        id=assignment.id,
+        user_id=assignment.user_id,
+        user_name=user.full_name if user else None,
+        user_email=user.email if user else None,
+        location_id=assignment.location_id,
+        location_name=location_rel.name if location_rel else None,
+        assignment_type=assignment.assignment_type,
+        status=assignment.status,
+        detected_latitude=assignment.detected_latitude,
+        detected_longitude=assignment.detected_longitude,
+        distance_from_center_miles=assignment.distance_from_center_miles,
+        assigned_by_id=assignment.assigned_by_id,
+        assigned_by_name=assigned_by_user.full_name if assigned_by_user else None,
+        notes=assignment.notes,
+        assigned_at=assignment.assigned_at,
+        expires_at=assignment.expires_at
+    )
 
 
 @router.post("/remove")
@@ -378,51 +409,105 @@ def get_location_members(
 ):
     """
     Get all users assigned to a location.
-    
+
     **Requirements:**
     - Manager role or higher required
     - Location must exist
-    
+
     **Features:**
     - Pagination
     - Status filtering
     - Assignment type filtering
     """
-    # Validate location exists
-    location = db.query(Location).filter(Location.id == location_id).first()
-    if not location:
-        raise HTTPException(status_code=404, detail="Location not found")
-    
-    # Build query
-    query = db.query(UserLocation).filter(
-        UserLocation.location_id == location_id
-    )
-    
-    # Apply filters
-    if status_filter:
-        query = query.filter(UserLocation.status == status_filter)
-    if assignment_type:
-        query = query.filter(UserLocation.assignment_type == assignment_type)
-    
-    # Join with user for ordering and info
-    query = query.join(User).filter(User.deleted_at == None)
-    
-    total = query.count()
-    assignments = query.order_by(
-        UserLocation.assigned_at.desc(),
-        User.first_name
-    ).offset((page - 1) * page_size).limit(page_size).all()
-    
-    items = [_build_user_location_response(db, a) for a in assignments]
-    
-    return LocationMemberListResponse(
-        total=total,
-        page=page,
-        page_size=page_size,
-        location_id=location_id,
-        location_name=location.name,
-        items=items
-    )
+    try:
+        # Validate location exists
+        location = db.query(Location).filter(Location.id == location_id).first()
+        if not location:
+            raise HTTPException(status_code=404, detail="Location not found")
+
+        # Create aliases for the two User relationships to avoid AmbiguousForeignKeysError
+        # member_user: the user who is assigned to the location (via user_id)
+        # assigner_user: the admin who made the assignment (via assigned_by_id)
+        member_user = aliased(User)
+        assigner_user = aliased(User)
+
+        # Build the base query with explicit joins using aliases
+        # This tells SQLAlchemy exactly which foreign keys to use for each join
+        # We select columns explicitly to avoid any relationship ambiguity
+        base_query = db.query(
+            UserLocation,
+            member_user,
+            assigner_user
+        ).join(
+            member_user,
+            and_(
+                UserLocation.user_id == member_user.id,
+                member_user.deleted_at.is_(None)  # Exclude deleted users at SQL level
+            )
+        ).outerjoin(
+            assigner_user,
+            UserLocation.assigned_by_id == assigner_user.id
+        ).filter(
+            UserLocation.location_id == location_id
+        )
+
+        # Apply optional filters
+        if status_filter:
+            base_query = base_query.filter(UserLocation.status == status_filter)
+        if assignment_type:
+            base_query = base_query.filter(UserLocation.assignment_type == assignment_type)
+
+        # Get total count using a separate simple count query
+        # This avoids ORDER BY affecting the count and ensures no ambiguity
+        count_query = db.query(func.count(UserLocation.id)).join(
+            member_user,
+            and_(
+                UserLocation.user_id == member_user.id,
+                member_user.deleted_at.is_(None)
+            )
+        ).filter(
+            UserLocation.location_id == location_id
+        )
+        if status_filter:
+            count_query = count_query.filter(UserLocation.status == status_filter)
+        if assignment_type:
+            count_query = count_query.filter(UserLocation.assignment_type == assignment_type)
+        
+        total = count_query.scalar()
+
+        # Apply ordering and pagination
+        # Order by assigned_at DESC, then by member's first_name for consistent ordering
+        assignments_with_users = base_query.order_by(
+            UserLocation.assigned_at.desc(),
+            member_user.first_name.asc()
+        ).offset(
+            (page - 1) * page_size
+        ).limit(page_size).all()
+
+        # Build response from the tuple results (UserLocation, member_user, assigner_user)
+        items = []
+        for row in assignments_with_users:
+            assignment = row[0]
+            member = row[1]  # Already loaded from the join
+            assigner = row[2]  # Already loaded from the outerjoin
+            
+            items.append(
+                _build_user_location_response_from_joined(
+                    assignment, member, assigner, location
+                )
+            )
+
+        return LocationMemberListResponse(
+            total=total,
+            page=page,
+            page_size=page_size,
+            location_id=location_id,
+            location_name=location.name,
+            items=items
+        )
+    except Exception as e:
+        logger.error(f"Error in get_location_members: {e}", exc_info=True)
+        raise
 
 
 @router.get("/user/{user_id}/locations", response_model=List[UserLocationResponse])
@@ -565,14 +650,65 @@ def get_location_audience_stats(
 
 # ─── HELPER FUNCTIONS ─────────────────────────────────────────────────────────
 
-def _build_user_location_response(db: Session, assignment: UserLocation) -> UserLocationResponse:
-    """Build response with related user and location data."""
-    user = db.query(User).filter(User.id == assignment.user_id).first()
-    location = db.query(Location).filter(Location.id == assignment.location_id).first()
-    assigned_by = None
-    if assignment.assigned_by_id:
-        assigned_by = db.query(User).filter(User.id == assignment.assigned_by_id).first()
+def _build_user_location_response_from_joined(
+    assignment: UserLocation,
+    member: User,
+    assigner: Optional[User],
+    location: Optional[Location]
+) -> UserLocationResponse:
+    """
+    Build response from pre-joined query results.
     
+    This function is used when the query explicitly joins UserLocation with
+    aliased User tables and returns tuples of (UserLocation, member, assigner).
+    
+    This approach completely avoids AmbiguousForeignKeysError because:
+    1. We use explicit aliases with explicit onclause in joins
+    2. We don't rely on relationship loaders at all
+    3. All data is fetched in a single query
+    
+    Args:
+        assignment: UserLocation instance from query result
+        member: User instance (the member, from the join via user_id)
+        assigner: User instance or None (the admin who assigned, from outerjoin)
+        location: Location instance (passed from earlier query)
+    """
+    return UserLocationResponse(
+        id=assignment.id,
+        user_id=assignment.user_id,
+        user_name=member.full_name if member else None,
+        user_email=member.email if member else None,
+        location_id=assignment.location_id,
+        location_name=location.name if location else None,
+        assignment_type=assignment.assignment_type,
+        status=assignment.status,
+        detected_latitude=assignment.detected_latitude,
+        detected_longitude=assignment.detected_longitude,
+        distance_from_center_miles=assignment.distance_from_center_miles,
+        assigned_by_id=assignment.assigned_by_id,
+        assigned_by_name=assigner.full_name if assigner else None,
+        notes=assignment.notes,
+        assigned_at=assignment.assigned_at,
+        expires_at=assignment.expires_at
+    )
+
+
+def _build_user_location_response(db: Session, assignment: UserLocation) -> UserLocationResponse:
+    """
+    Build response with related user and location data using relationships.
+    
+    WARNING: This function should ONLY be used when:
+    - The UserLocation was fetched with explicit joins that resolve FK ambiguity, OR
+    - The model relationships have properly configured foreign_keys parameters
+    
+    For the get_location_members endpoint, use 
+    _build_user_location_response_from_joined() instead.
+    """
+    # Use relationships - these work because the model defines foreign_keys explicitly
+    user = assignment.user
+    location = assignment.location
+    assigned_by_user = assignment.assigned_by
+
     return UserLocationResponse(
         id=assignment.id,
         user_id=assignment.user_id,
@@ -586,7 +722,7 @@ def _build_user_location_response(db: Session, assignment: UserLocation) -> User
         detected_longitude=assignment.detected_longitude,
         distance_from_center_miles=assignment.distance_from_center_miles,
         assigned_by_id=assignment.assigned_by_id,
-        assigned_by_name=assigned_by.full_name if assigned_by else None,
+        assigned_by_name=assigned_by_user.full_name if assigned_by_user else None,
         notes=assignment.notes,
         assigned_at=assignment.assigned_at,
         expires_at=assignment.expires_at

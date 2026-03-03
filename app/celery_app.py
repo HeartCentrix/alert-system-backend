@@ -34,5 +34,17 @@ celery_app.conf.update(
             "task": "app.tasks.process_scheduled_notifications",
             "schedule": 60.0,
         },
+        "periodic-geofence-check": {
+            "task": "app.location_tasks.periodic_geofence_check",
+            "schedule": 300.0,  # Every 5 minutes
+        },
+        "cleanup-expired-assignments": {
+            "task": "app.location_tasks.cleanup_expired_assignments",
+            "schedule": 86400.0,  # Daily
+        },
+        "refresh-redis-geo-index": {
+            "task": "app.location_tasks.refresh_redis_geo_index",
+            "schedule": 3600.0,  # Hourly
+        },
     },
 )

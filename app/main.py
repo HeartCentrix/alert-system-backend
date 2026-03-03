@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 import logging
 
 from app.config import settings
+from sqlalchemy import text
 from app.database import engine, Base, SessionLocal
 from app.models import User, UserRole, AlertChannel
 from app.core.security import hash_password
@@ -34,17 +35,38 @@ def ensure_alertchannel_enum():
     db = SessionLocal()
     try:
         result = db.execute(
-            "SELECT EXISTS(SELECT 1 FROM pg_enum WHERE enumlabel = 'web' AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'alertchannel'))"
+            text("SELECT EXISTS(SELECT 1 FROM pg_enum WHERE enumlabel = 'web' AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'alertchannel'))")
         ).scalar()
-        
+
         if not result:
-            db.execute("ALTER TYPE alertchannel ADD VALUE IF NOT EXISTS 'web'")
+            db.execute(text("ALTER TYPE alertchannel ADD VALUE IF NOT EXISTS 'web'"))
             db.commit()
             logger.info("Added 'web' to alertchannel enum")
         else:
             logger.info("alertchannel enum already has 'web' value")
     except Exception as e:
         logger.error(f"Error ensuring alertchannel enum: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+
+def _ensure_user_location_columns():
+    """Add latitude/longitude columns to users table if they don't exist."""
+    db = SessionLocal()
+    try:
+        result = db.execute(
+            text("SELECT column_name FROM information_schema.columns WHERE table_name='users' AND column_name='latitude'")
+        ).fetchone()
+        if not result:
+            db.execute(text("ALTER TABLE users ADD COLUMN latitude DOUBLE PRECISION"))
+            db.execute(text("ALTER TABLE users ADD COLUMN longitude DOUBLE PRECISION"))
+            db.commit()
+            logger.info("Added latitude/longitude columns to users table")
+        else:
+            logger.info("Users table already has latitude/longitude columns")
+    except Exception as e:
+        logger.error(f"Error adding user location columns: {e}")
         db.rollback()
     finally:
         db.close()
@@ -68,6 +90,9 @@ async def lifespan(app: FastAPI):
     # Ensure alertchannel enum has 'web' value
     logger.info("Ensuring alertchannel enum has 'web' value...")
     ensure_alertchannel_enum()
+
+    # Ensure User table has latitude/longitude columns
+    _ensure_user_location_columns()
 
     # Seed default super admin if no users exist
     db = SessionLocal()

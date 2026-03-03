@@ -54,3 +54,6 @@ htmlcov/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+
+FIXES_SUMMARY.md
