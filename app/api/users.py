@@ -16,6 +16,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/users", tags=["Users / People"])
 
 
+def _prevent_privilege_escalation(current_user: User, target_role: Optional[UserRole]):
+    """Prevent ADMIN users from creating or updating SUPER_ADMIN users.
+    
+    Only SUPER_ADMIN can assign SUPER_ADMIN role to other users.
+    """
+    if target_role == UserRole.SUPER_ADMIN and current_user.role != UserRole.SUPER_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only SUPER_ADMIN can create or update SUPER_ADMIN users"
+        )
+
+
 @router.get("", response_model=UserListResponse)
 def list_users(
     page: int = Query(1, ge=1),
@@ -66,6 +78,9 @@ def create_user(
     if data.employee_id:
         if db.query(User).filter(User.employee_id == data.employee_id, User.deleted_at == None).first():
             raise HTTPException(status_code=400, detail="Employee ID already exists")
+
+    # Prevent privilege escalation: ADMIN cannot create SUPER_ADMIN users
+    _prevent_privilege_escalation(current_user, data.role)
 
     user = User(
         email=data.email,
@@ -123,6 +138,17 @@ def update_user(
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+
+    # Prevent privilege escalation: ADMIN cannot modify SUPER_ADMIN users
+    if user.role == UserRole.SUPER_ADMIN and current_user.role != UserRole.SUPER_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only SUPER_ADMIN can modify SUPER_ADMIN users"
+        )
+
+    # Prevent privilege escalation: ADMIN cannot escalate user to SUPER_ADMIN
+    if data.role is not None:
+        _prevent_privilege_escalation(current_user, data.role)
     
     # Auto-restore soft-deleted user
     if user.deleted_at is not None:
@@ -225,7 +251,19 @@ async def import_users_csv(
             except ValueError:
                 role = UserRole.VIEWER
 
+            # Prevent privilege escalation: ADMIN cannot create/update SUPER_ADMIN via CSV
+            if role == UserRole.SUPER_ADMIN and current_user.role != UserRole.SUPER_ADMIN:
+                errors.append(f"Row {i}: Only SUPER_ADMIN can assign SUPER_ADMIN role")
+                failed += 1
+                continue
+
             if existing:
+                # Prevent privilege escalation: ADMIN cannot modify SUPER_ADMIN users via CSV
+                if existing.role == UserRole.SUPER_ADMIN and current_user.role != UserRole.SUPER_ADMIN:
+                    errors.append(f"Row {i}: Only SUPER_ADMIN can modify SUPER_ADMIN user ({email})")
+                    failed += 1
+                    continue
+
                 # Restore soft-deleted user
                 if existing.deleted_at is not None:
                     existing.deleted_at = None
