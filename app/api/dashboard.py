@@ -31,9 +31,15 @@ def get_dashboard_stats(
     active_incidents = db.query(Incident).filter(Incident.status == IncidentStatus.ACTIVE).count()
 
     # Count notifications that were actually dispatched today
-    # Include: SENT (completed), SENDING (in progress), FAILED (attempted but failed, e.g., zero recipients)
+    # Include: SENT (completed), PARTIALLY_SENT (mixed results), 
+    #          SENDING (in progress), FAILED (attempted but failed)
     # Exclude: DRAFT (never sent), SCHEDULED (not yet sent)
-    dispatched_statuses = [NotificationStatus.SENT, NotificationStatus.SENDING, NotificationStatus.FAILED]
+    dispatched_statuses = [
+        NotificationStatus.SENT,
+        NotificationStatus.PARTIALLY_SENT,
+        NotificationStatus.SENDING,
+        NotificationStatus.FAILED
+    ]
     
     notifications_today = db.query(Notification).filter(
         Notification.created_at >= today_start,
