@@ -288,6 +288,18 @@ def create_template(
     return template
 
 
+# IMPORTANT: /categories must be defined BEFORE /{template_id} to avoid route shadowing
+# FastAPI matches routes in order, and /{template_id} would match "categories" as an ID
+@templates_router.get("/categories")
+def get_categories(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Get all unique template categories."""
+    results = db.query(NotificationTemplate.category).filter(
+        NotificationTemplate.category != None,
+        NotificationTemplate.is_active == True
+    ).distinct().all()
+    return [r[0] for r in results if r[0]]
+
+
 @templates_router.put("/{template_id}", response_model=TemplateResponse)
 def update_template(
     template_id: int,
@@ -318,12 +330,3 @@ def delete_template(
     template.is_active = False
     db.commit()
     return {"message": "Template deleted"}
-
-
-@templates_router.get("/categories")
-def get_categories(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    results = db.query(NotificationTemplate.category).filter(
-        NotificationTemplate.category != None,
-        NotificationTemplate.is_active == True
-    ).distinct().all()
-    return [r[0] for r in results if r[0]]
