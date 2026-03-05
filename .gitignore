@@ -54,3 +54,19 @@ htmlcov/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+info/
+
+# Temporary documentation files (not needed in repo)
+*_SUMMARY.md
+*_GUIDE.md
+*_STRATEGY.md
+*_TROUBLESHOOTING.md
+*_STATUS.md
+*_PRODUCTION.md
+QUICKSTART_*.md
+FINAL_STATUS_REPORT.md
+LOCATION_AUDIENCE_SYSTEM.md
+LOCATION_AUTOCOMPLETE.md
+IMPLEMENTATION_SUMMARY.md
+test_location_members_api.py

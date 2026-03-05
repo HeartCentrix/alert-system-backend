@@ -1,6 +1,7 @@
 import logging
+import httpx
 from datetime import datetime, timezone
-from typing import List
+from typing import List, Optional, Dict, Any
 from app.celery_app import celery_app
 from app.database import SessionLocal
 from app.models import (
@@ -8,7 +9,8 @@ from app.models import (
     AlertChannel, User
 )
 from app.services.messaging import twilio_service, email_service, webhook_service
-from sqlalchemy import update   
+from app.config import settings
+from sqlalchemy import update
 
 logger = logging.getLogger(__name__)
 
@@ -438,14 +440,14 @@ def _get_recipients(db, notification: Notification) -> List[User]:
 
     if notification.target_all:
         users = db.query(User).filter(
-            User.is_active == True,
-            User.deleted_at == None
+            User.is_active,
+            User.deleted_at is None
         ).all()
         return users
 
     for group in notification.target_groups:
         if group.type == "dynamic" and group.dynamic_filter:
-            query = db.query(User).filter(User.is_active == True, User.deleted_at == None)
+            query = db.query(User).filter(User.is_active, User.deleted_at is None)
             f = group.dynamic_filter
             if f.get("department"):
                 query = query.filter(User.department == f["department"])
@@ -467,6 +469,109 @@ def _get_recipients(db, notification: Notification) -> List[User]:
 
     return db.query(User).filter(
         User.id.in_(recipient_ids),
-        User.is_active == True,
-        User.deleted_at == None
+        User.is_active,
+        User.deleted_at is None
     ).all()
+
+
+# ─── LOCATION AUTOCOMPLETE TASKS ──────────────────────────────────────────────
+
+@celery_app.task(bind=True, max_retries=2, default_retry_delay=5)
+def fetch_location_autocomplete_task(
+    self,
+    query: str,
+    limit: int = 10,
+    countrycodes: Optional[str] = None,
+    viewbox: Optional[str] = None,
+    bounded: bool = False,
+) -> Optional[List[Dict[str, Any]]]:
+    """
+    Fetch location autocomplete results from LocationIQ API.
+    
+    This task is called when cache misses occur. Results should be cached
+    in Redis after successful fetch.
+    
+    Args:
+        query: Search query (already normalized)
+        limit: Max results (1-20)
+        countrycodes: Comma-separated country codes (e.g., 'us,ca')
+        viewbox: Bounding box for biasing (x1,y1,x2,y2)
+        bounded: Restrict results to viewbox
+        
+    Returns:
+        List of location results or None on failure
+    """
+    if not settings.LOCATIONIQ_API_KEY:
+        logger.error("LocationIQ API key not configured")
+        return None
+    
+    url = f"{settings.LOCATIONIQ_BASE_URL}/autocomplete"
+    params = {
+        "key": settings.LOCATIONIQ_API_KEY,
+        "q": query,
+        "limit": min(limit, 20),  # Enforce max limit
+        "format": "json",
+    }
+    
+    if countrycodes:
+        params["countrycodes"] = countrycodes
+    
+    if viewbox:
+        params["viewbox"] = viewbox
+        params["bounded"] = "1" if bounded else "0"
+    
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            response = client.get(url, params=params)
+            
+            # Handle rate limiting
+            if response.status_code == 429:
+                retry_after = int(response.headers.get("Retry-After", 5))
+                logger.warning(f"LocationIQ rate limited. Retrying after {retry_after}s")
+                raise self.retry(countdown=retry_after)
+            
+            response.raise_for_status()
+            data = response.json()
+            
+            # Normalize results
+            results = []
+            for item in data:
+                display_name = item.get("display_name", "")
+                parts = display_name.split(", ")
+                
+                results.append({
+                    "place_id": str(item.get("place_id", "")),
+                    "display_name": display_name,
+                    "display_place": parts[0] if parts else display_name,
+                    "display_address": ", ".join(parts[1:]) if len(parts) > 1 else "",
+                    "lat": float(item.get("lat", 0)),
+                    "lon": float(item.get("lon", 0)),
+                    "address": {
+                        "name": item.get("address", {}).get("name", ""),
+                        "road": item.get("address", {}).get("road", ""),
+                        "city": item.get("address", {}).get("city", 
+                                item.get("address", {}).get("town", 
+                                item.get("address", {}).get("village", ""))),
+                        "state": item.get("address", {}).get("state", ""),
+                        "postcode": item.get("address", {}).get("postcode", ""),
+                        "country": item.get("address", {}).get("country", ""),
+                        "country_code": item.get("address", {}).get("country_code", ""),
+                    },
+                    "type": item.get("type", ""),
+                    "importance": item.get("importance", 0),
+                })
+            
+            logger.info(f"Fetched {len(results)} location results for query: {query}")
+            return results
+            
+    except httpx.TimeoutException as e:
+        logger.error(f"LocationIQ timeout: {e}")
+        raise self.retry(exc=e)
+    except httpx.HTTPStatusError as e:
+        logger.error(f"LocationIQ HTTP error {e.response.status_code}: {e}")
+        if e.response.status_code >= 500:
+            raise self.retry(exc=e)
+        return None
+    except Exception as e:
+        logger.error(f"LocationIQ fetch error: {e}")
+        raise self.retry(exc=e)

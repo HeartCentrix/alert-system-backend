@@ -6,9 +6,11 @@ import logging
 
 from sqlalchemy import text
 from app.config import settings
+from sqlalchemy import text
 from app.database import engine, Base, SessionLocal
-from app.models import User, UserRole, AlertChannel
+from app.models import User, UserRole
 from app.core.security import hash_password
+from app.core.location_cache import init_location_cache, close_location_cache
 from app.api.auth import router as auth_router
 from app.api.users import router as users_router
 from app.api.groups_locations_templates import (
@@ -19,6 +21,8 @@ from app.api.notifications import (
 )
 from app.api.webhooks import router as webhooks_router
 from app.api.dashboard import router as dashboard_router
+from app.api.location_v2 import router as location_router
+from app.api.location_audience import router as location_audience_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,8 +58,37 @@ def ensure_alertchannel_enum():
         logger.error(f"Error ensuring alertchannel enum: {e}")
 
 
+def _ensure_user_location_columns():
+    """Add latitude/longitude columns to users table if they don't exist."""
+    db = SessionLocal()
+    try:
+        result = db.execute(
+            text("SELECT column_name FROM information_schema.columns WHERE table_name='users' AND column_name='latitude'")
+        ).fetchone()
+        if not result:
+            db.execute(text("ALTER TABLE users ADD COLUMN latitude DOUBLE PRECISION"))
+            db.execute(text("ALTER TABLE users ADD COLUMN longitude DOUBLE PRECISION"))
+            db.commit()
+            logger.info("Added latitude/longitude columns to users table")
+        else:
+            logger.info("Users table already has latitude/longitude columns")
+    except Exception as e:
+        logger.error(f"Error adding user location columns: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Initialize Redis cache for location autocomplete
+    logger.info("Initializing location cache...")
+    try:
+        await init_location_cache(settings.REDIS_URL)
+        logger.info("Location cache initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize location cache: {e}")
+    
     # Create all DB tables on startup
     logger.info("Creating database tables...")
     Base.metadata.create_all(bind=engine)
@@ -64,6 +97,9 @@ async def lifespan(app: FastAPI):
     # Ensure alertchannel enum has 'web' value
     logger.info("Ensuring alertchannel enum has 'web' value...")
     ensure_alertchannel_enum()
+
+    # Ensure User table has latitude/longitude columns
+    _ensure_user_location_columns()
 
     # Seed default super admin if no users exist
     db = SessionLocal()
@@ -84,6 +120,10 @@ async def lifespan(app: FastAPI):
         db.close()
 
     yield
+    
+    # Cleanup: close Redis cache connection
+    logger.info("Closing location cache...")
+    await close_location_cache()
     logger.info("Shutting down TM Alert")
 
 
@@ -150,6 +190,8 @@ app.include_router(incidents_router, prefix=API_PREFIX)
 app.include_router(notifications_router, prefix=API_PREFIX)
 app.include_router(webhooks_router, prefix=API_PREFIX)
 app.include_router(dashboard_router, prefix=API_PREFIX)
+app.include_router(location_router, prefix=API_PREFIX)
+app.include_router(location_audience_router, prefix=API_PREFIX)
 
 
 # ─── HEALTH CHECK ─────────────────────────────────────────────────────────────

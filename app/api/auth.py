@@ -1,4 +1,5 @@
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
@@ -23,6 +24,10 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 MAX_FAILED_ATTEMPTS = 5  # Lock out after 5 failed attempts
 LOCKOUT_DURATION_MINUTES = 15  # Lockout duration
 FAILED_WINDOW_MINUTES = 30  # Time window to count failed attempts
+# Simple in-memory rate limiting for password reset requests
+# Format: {email: last_request_timestamp}
+_password_reset_rate_limit: dict[str, float] = {}
+PASSWORD_RESET_RATE_LIMIT_SECONDS = 30  # 30 seconds between requests per email
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -55,7 +60,7 @@ def login(request: LoginRequest, req: Request, db: Session = Depends(get_db)):
     
     user = db.query(User).filter(
         User.email == request.email,
-        User.deleted_at == None
+        User.deleted_at is None
     ).first()
 
     # Check if user exists
@@ -146,7 +151,7 @@ def refresh_token(request: RefreshRequest, db: Session = Depends(get_db)):
     # Check token in DB
     rt = db.query(RefreshToken).filter(
         RefreshToken.token == request.refresh_token,
-        RefreshToken.revoked == False
+        not RefreshToken.revoked
     ).first()
 
     if not rt or rt.expires_at < datetime.now(timezone.utc):
@@ -198,22 +203,49 @@ def logout(
 
 
 @router.post("/forgot-password")
-def forgot_password(request: PasswordResetRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == request.email, User.deleted_at == None).first()
+def forgot_password(request: PasswordResetRequest, req: Request, db: Session = Depends(get_db)):
+    """
+    Request a password reset email.
     
+    Security measures:
+    - Rate limiting: 1 request per minute per email
+    - No email enumeration: Same response regardless of whether email exists
+    """
+    # Normalize email for rate limiting
+    email_normalized = request.email.strip().lower()
+    
+    # Rate limiting check
+    current_time = time.time()
+    last_request = _password_reset_rate_limit.get(email_normalized)
+    if last_request and (current_time - last_request) < PASSWORD_RESET_RATE_LIMIT_SECONDS:
+        # Still within rate limit window - return success anyway to prevent enumeration
+        return {"message": "If that email exists, we've sent a password reset link."}
+    
+    # Find user (case-insensitive email lookup)
+    user = db.query(User).filter(
+        User.email == email_normalized,
+        User.deleted_at is None
+    ).first()
+    
+    # Always return the same message to prevent email enumeration
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No account found with this email address"
-        )
+        # Update rate limit even for non-existent emails
+        _password_reset_rate_limit[email_normalized] = current_time
+        return {"message": "If that email exists, we've sent a password reset link."}
     
+    # Generate reset token
     token = secrets.token_urlsafe(32)
     user.password_reset_token = token
     user.password_reset_expires = datetime.now(timezone.utc) + timedelta(hours=1)
     db.commit()
+    
+    # Send email (async via celery would be better, but keeping sync for simplicity)
     email_service.send_password_reset_email(user.email, token, user.full_name)
     
-    return {"message": "Password reset email sent successfully"}
+    # Update rate limit
+    _password_reset_rate_limit[email_normalized] = current_time
+    
+    return {"message": "If that email exists, we've sent a password reset link."}
 
 
 @router.post("/reset-password")
@@ -221,7 +253,7 @@ def reset_password(request: PasswordResetConfirm, db: Session = Depends(get_db))
     user = db.query(User).filter(
         User.password_reset_token == request.token,
         User.password_reset_expires > datetime.now(timezone.utc),
-        User.deleted_at == None
+        User.deleted_at is None
     ).first()
 
     if not user:

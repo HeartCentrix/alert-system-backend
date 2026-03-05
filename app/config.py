@@ -1,4 +1,4 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
 
 
@@ -9,10 +9,14 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     FRONTEND_URL: str = "http://localhost:3000"
-    BACKEND_URL: str = "http://localhost:8000"  # Base URL for webhooks (Twilio, etc.)
+    BACKEND_URL: str = "http://localhost:8000"
 
     DATABASE_URL: str = "postgresql://postgres:password@localhost:5432/tm_alert"
     REDIS_URL: str = "redis://localhost:6379/0"
+
+    # Test environment variables (optional, used in CI/testing)
+    TEST_DATABASE_URL: Optional[str] = None
+    TEST_REDIS_URL: Optional[str] = None
 
     TWILIO_ACCOUNT_SID: str = ""
     TWILIO_AUTH_TOKEN: str = ""
@@ -27,12 +31,18 @@ class Settings(BaseSettings):
 
     GOOGLE_MAPS_API_KEY: str = ""
 
+    # LocationIQ API for location autocomplete
+    LOCATIONIQ_API_KEY: str = ""
+    LOCATIONIQ_BASE_URL: str = "https://api.locationiq.com/v1"
+
     SLACK_DEFAULT_WEBHOOK_URL: str = ""
     TEAMS_DEFAULT_WEBHOOK_URL: str = ""
 
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=True,
+        extra="ignore"
+    )
 
 
 settings = Settings()
