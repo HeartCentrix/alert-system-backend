@@ -340,14 +340,35 @@ async def import_users_csv(
             user_id=current_user.id,
             action="import_users_csv",
             resource_type="user",
-            details={"created": created, "updated": updated, "failed": failed, "valid_rows": len(valid_users)}
+            details={
+                "created": created,
+                "updated": updated,
+                "failed": failed,
+                "valid_rows": len(valid_users),
+                "total_rows": created + updated + failed
+            }
         ))
         db.commit()
         logger.info(f"CSV import committed: {created} created, {updated} updated, {failed} failed")
     else:
-        # No valid rows to commit
-        logger.warning(f"CSV import had no valid rows to commit")
+        # No valid rows to commit - still log the failed import attempt
+        db.add(AuditLog(
+            user_id=current_user.id,
+            action="import_users_csv_failed",
+            resource_type="user",
+            details={
+                "failed": failed,
+                "total_rows": failed,
+                "errors": errors[:10]  # Include first 10 errors in audit log
+            }
+        ))
+        db.commit()
+        logger.warning(f"CSV import had no valid rows to commit, {failed} rows failed")
 
+    # Track email sending results for audit log
+    emails_sent = 0
+    emails_failed = 0
+    
     # Send welcome emails to newly created users (after commit)
     from app.services.messaging import email_service
     for user_data in created_users:
@@ -359,13 +380,30 @@ async def import_users_csv(
                 password=user_data['password']
             )
             if result.get('status') == 'failed':
+                emails_failed += 1
                 email_failures.append(f"Email to {user_data['email']} failed: {result.get('error', 'Unknown error')}")
                 logger.error(f"Welcome email failed for {user_data['email']}: {result.get('error')}")
             else:
+                emails_sent += 1
                 logger.info(f"Welcome email sent to {user_data['email']}")
         except Exception as e:
+            emails_failed += 1
             email_failures.append(f"Email to {user_data['email']} error: {str(e)}")
             logger.error(f"Exception sending welcome email to {user_data['email']}: {e}")
+
+    # Add secondary audit log for email results if there were newly created users
+    if created_users and (emails_sent > 0 or emails_failed > 0):
+        db.add(AuditLog(
+            user_id=current_user.id,
+            action="import_users_csv_emails",
+            resource_type="user",
+            details={
+                "emails_sent": emails_sent,
+                "emails_failed": emails_failed,
+                "total_created": len(created_users)
+            }
+        ))
+        db.commit()
 
     # Add errors to response if any
     all_errors = errors + email_failures
