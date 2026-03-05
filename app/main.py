@@ -4,6 +4,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from contextlib import asynccontextmanager
 import logging
 
+from sqlalchemy import text
 from app.config import settings
 from app.database import engine, Base, SessionLocal
 from app.models import User, UserRole, AlertChannel
@@ -27,24 +28,30 @@ logger = logging.getLogger(__name__)
 
 
 def ensure_alertchannel_enum():
-    """Ensure 'web' value exists in alertchannel enum (PostgreSQL)."""
-    db = SessionLocal()
+    """Ensure 'web' value exists in alertchannel enum (PostgreSQL).
+    
+    Uses engine.begin() for DDL operations as required by SQLAlchemy 2.x.
+    """
     try:
-        result = db.execute(
-            "SELECT EXISTS(SELECT 1 FROM pg_enum WHERE enumlabel = 'web' AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'alertchannel'))"
-        ).scalar()
-        
-        if not result:
-            db.execute("ALTER TYPE alertchannel ADD VALUE IF NOT EXISTS 'web'")
-            db.commit()
-            logger.info("Added 'web' to alertchannel enum")
-        else:
-            logger.info("alertchannel enum already has 'web' value")
+        with engine.begin() as conn:
+            # Check if 'web' enum value exists
+            result = conn.execute(
+                text(
+                    "SELECT EXISTS("
+                    "SELECT 1 FROM pg_enum "
+                    "WHERE enumlabel = 'web' "
+                    "AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'alertchannel')"
+                    ")"
+                )
+            ).scalar()
+
+            if not result:
+                conn.execute(text("ALTER TYPE alertchannel ADD VALUE IF NOT EXISTS 'web'"))
+                logger.info("Added 'web' to alertchannel enum")
+            else:
+                logger.info("alertchannel enum already has 'web' value")
     except Exception as e:
         logger.error(f"Error ensuring alertchannel enum: {e}")
-        db.rollback()
-    finally:
-        db.close()
 
 
 @asynccontextmanager
