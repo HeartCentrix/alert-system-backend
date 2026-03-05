@@ -37,13 +37,24 @@ class TwilioService:
             return {"error": str(e), "status": "failed"}
 
     def make_voice_call(self, to: str, message: str) -> dict:
+        """Make a voice call with TwiML for keypress response.
+        
+        Uses /voice/response endpoint for Gather action and /voice/status for callbacks.
+        """
         if not self.client:
             logger.warning(f"[MOCK VOICE] To: {to} | Message: {message[:50]}...")
             return {"sid": "MOCK_VOICE_SID", "status": "initiated", "mock": True}
         try:
             # Use full absolute URL for the Gather action (Twilio requirement)
+            # IMPORTANT: Must match the route in webhooks.py: @router.post("/voice/response")
             voice_webhook_url = f"{settings.BACKEND_URL}/api/v1/webhooks/voice/response"
             status_callback_url = f"{settings.BACKEND_URL}/api/v1/webhooks/voice/status"
+            
+            # Validate URL format to prevent callback failures
+            if not voice_webhook_url.startswith("http"):
+                logger.error(f"Invalid voice webhook URL: {voice_webhook_url}")
+                raise ValueError("BACKEND_URL must be a valid HTTP/HTTPS URL")
+            
             # Escape message to prevent XSS in TwiML
             safe_message = _escape_xml(message)
             twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
