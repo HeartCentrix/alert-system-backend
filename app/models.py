@@ -68,6 +68,7 @@ class IncidentStatus(str, enum.Enum):
     ACTIVE = "active"
     MONITORING = "monitoring"
     RESOLVED = "resolved"
+    CANCELLED = "cancelled"
 
 
 # ─── ASSOCIATION TABLES ───────────────────────────────────────────────────────

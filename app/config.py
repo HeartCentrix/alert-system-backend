@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     SES_FROM_NAME: str = "TM Alert"
 
     GOOGLE_MAPS_API_KEY: str = ""
+    LOCATIONIQ_API_KEY: str = ""
 
     SLACK_DEFAULT_WEBHOOK_URL: str = ""
     TEAMS_DEFAULT_WEBHOOK_URL: str = ""
