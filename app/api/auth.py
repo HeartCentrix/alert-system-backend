@@ -20,6 +20,11 @@ from app.config import settings
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
+# Login attempt rate limiting constants
+MAX_FAILED_ATTEMPTS = 5  # Max failed attempts before lockout
+FAILED_WINDOW_SECONDS = 30  # Time window to count failed attempts
+LOCKOUT_SECONDS = 30  # Lockout duration after max attempts reached
+
 # Simple in-memory rate limiting for password reset requests
 # Format: {email: last_request_timestamp}
 _password_reset_rate_limit: dict[str, float] = {}
@@ -29,29 +34,29 @@ PASSWORD_RESET_RATE_LIMIT_SECONDS = 30  # 30 seconds between requests per email
 @router.post("/login", response_model=TokenResponse)
 def login(request: LoginRequest, req: Request, db: Session = Depends(get_db)):
     client_ip = req.client.host if req.client else None
-    
+
     # Check for lockout due to too many failed attempts
-    window_start = datetime.now(timezone.utc) - timedelta(minutes=FAILED_WINDOW_MINUTES)
+    window_start = datetime.now(timezone.utc) - timedelta(seconds=FAILED_WINDOW_SECONDS)
     failed_count = db.query(LoginAttempt).filter(
         LoginAttempt.email == request.email.lower(),
         LoginAttempt.attempted_at >= window_start,
         LoginAttempt.success == False
     ).count()
-    
+
     if failed_count >= MAX_FAILED_ATTEMPTS:
         # Check if still in lockout period
         last_attempt = db.query(LoginAttempt).filter(
             LoginAttempt.email == request.email.lower(),
             LoginAttempt.attempted_at >= window_start
         ).order_by(desc(LoginAttempt.attempted_at)).first()
-        
+
         if last_attempt:
             time_since_last = datetime.now(timezone.utc) - last_attempt.attempted_at
-            if time_since_last < timedelta(minutes=LOCKOUT_DURATION_MINUTES):
-                remaining = int(LOCKOUT_DURATION_MINUTES - time_since_last.total_seconds() / 60)
+            if time_since_last < timedelta(seconds=LOCKOUT_SECONDS):
+                remaining = int(LOCKOUT_SECONDS - time_since_last.total_seconds())
                 raise HTTPException(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail=f"Too many failed login attempts. Please try again in {remaining} minutes."
+                    detail=f"Too many failed login attempts. Please try again in {remaining} seconds."
                 )
     
     user = db.query(User).filter(
