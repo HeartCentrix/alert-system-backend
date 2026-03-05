@@ -19,6 +19,7 @@ from app.models import (
 from app.schemas import IncomingMessageResponse
 from datetime import datetime, timezone
 import logging
+from xml.sax.saxutils import escape as xml_escape
 from twilio.request_validator import RequestValidator
 
 router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
@@ -190,9 +191,11 @@ async def sms_inbound(
     else:
         reply = "Message received. Reply SAFE (1) if you are okay, or HELP (2) if you need assistance."
 
+    # Escape reply to prevent XSS in TwiML (even for hardcoded messages - defense in depth)
+    safe_reply = xml_escape(reply)
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Message>{reply}</Message>
+    <Message>{safe_reply}</Message>
 </Response>"""
     return Response(content=twiml, media_type="text/xml")
 
@@ -388,9 +391,11 @@ async def voice_response(
         else:
             message = "Response recorded. Thank you."
 
+        # Escape message to prevent XSS in TwiML
+        safe_message = xml_escape(message)
         twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say voice="alice">{message}</Say>
+    <Say voice="alice">{safe_message}</Say>
 </Response>"""
         return Response(content=twiml, media_type="text/xml")
 

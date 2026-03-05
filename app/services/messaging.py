@@ -44,9 +44,11 @@ class TwilioService:
             # Use full absolute URL for the Gather action (Twilio requirement)
             voice_webhook_url = f"{settings.BACKEND_URL}/api/v1/webhooks/voice/response"
             status_callback_url = f"{settings.BACKEND_URL}/api/v1/webhooks/voice/status"
+            # Escape message to prevent XSS in TwiML
+            safe_message = _escape_xml(message)
             twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="alice" loop="2">{message}</Say>
+  <Say voice="alice" loop="2">{safe_message}</Say>
   <Pause length="1"/>
   <Say voice="alice">Press 1 if you are safe. Press 2 if you need help.</Say>
   <Gather numDigits="1" action="{voice_webhook_url}" method="POST">
@@ -240,10 +242,27 @@ Taylor Morrison"""
 
 # ─── WEBHOOK SERVICE (Slack / Teams) ─────────────────────────────────────────
 
+from xml.sax.saxutils import escape as xml_escape
 import ipaddress
 import socket
 from urllib.parse import urlparse
 from urllib3.util import parse_url as urllib3_parse_url
+
+
+def _escape_xml(text: str) -> str:
+    """Escape special XML characters to prevent XSS in TwiML responses.
+    
+    Escapes: < > & " '
+    
+    Args:
+        text: The text to escape
+        
+    Returns:
+        XML-safe text
+    """
+    if not text:
+        return ""
+    return xml_escape(str(text))
 
 
 def _is_safe_url(url: str) -> bool:
