@@ -1,7 +1,6 @@
 import logging
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
 from typing import Optional, List
 from app.database import get_db
 from app.models import Group, GroupType, Location, NotificationTemplate, User, AuditLog, UserLocation, UserLocationStatus
@@ -26,7 +25,7 @@ def list_groups(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_manager)
 ):
-    query = db.query(Group).filter(Group.is_active == True)
+    query = db.query(Group).filter(Group.is_active)
     if search:
         query = query.filter(Group.name.ilike(f"%{search}%"))
     if type:
@@ -109,7 +108,7 @@ def update_group(
         # Validate all user IDs exist
         valid_users = db.query(User).filter(
             User.id.in_(member_ids),
-            User.deleted_at == None
+            User.deleted_at is None
         ).all()
         valid_ids = {u.id for u in valid_users}
         invalid_ids = set(member_ids) - valid_ids
@@ -193,7 +192,7 @@ def list_locations(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    locations = db.query(Location).filter(Location.is_active == True).order_by(Location.name).all()
+    locations = db.query(Location).filter(Location.is_active).order_by(Location.name).all()
     result = []
     for loc in locations:
         # Count users in user_locations table (many-to-many)
@@ -228,7 +227,7 @@ def create_location(
     - Redis GEO index sync
     - Audit logging
     """
-    from app.core.geofence import validate_location_input, check_location_overlap, get_geo_service
+    from app.core.geofence import validate_location_input, check_location_overlap
     
     # Validate and sanitize input
     validation = validate_location_input(
@@ -249,7 +248,7 @@ def create_location(
     
     # Check for overlaps with existing locations
     existing_locations = db.query(Location).filter(
-        Location.is_active == True,
+        Location.is_active,
         Location.latitude.isnot(None),
         Location.longitude.isnot(None)
     ).all()
@@ -355,7 +354,7 @@ def update_location(
         data.geofence_radius_miles is not None):
         
         existing_locations = db.query(Location).filter(
-            Location.is_active == True,
+            Location.is_active,
             Location.latitude.isnot(None),
             Location.longitude.isnot(None),
             Location.id != location_id  # Exclude self
@@ -437,7 +436,7 @@ def list_templates(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    query = db.query(NotificationTemplate).filter(NotificationTemplate.is_active == True)
+    query = db.query(NotificationTemplate).filter(NotificationTemplate.is_active)
     if category:
         query = query.filter(NotificationTemplate.category == category)
     return query.order_by(NotificationTemplate.name).all()
@@ -491,7 +490,7 @@ def delete_template(
 @templates_router.get("/categories")
 def get_categories(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     results = db.query(NotificationTemplate.category).filter(
-        NotificationTemplate.category != None,
-        NotificationTemplate.is_active == True
+        NotificationTemplate.category is not None,
+        NotificationTemplate.is_active
     ).distinct().all()
     return [r[0] for r in results if r[0]]

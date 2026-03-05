@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from typing import Optional, List
@@ -14,7 +14,7 @@ from app.schemas import (
     DeliveryLogResponse, NotificationResponseCreate, NotificationResponseOut,
     IncidentCreate, IncidentUpdate, IncidentResponse
 )
-from app.core.deps import get_current_user, require_admin, require_manager
+from app.core.deps import get_current_user, require_manager
 from app.tasks import send_notification_task
 
 # ─── INCIDENTS ────────────────────────────────────────────────────────────────

@@ -7,17 +7,14 @@ Tests cover:
 - Edge case discovery
 - Invalid input handling
 """
-import pytest
-from hypothesis import given, settings, HealthCheck
+from hypothesis import given, settings
 from hypothesis import strategies as st
-from hypothesis.extra.pydantic import build_pydantic_model_strategy
 import json
 
 from app.schemas import (
     LoginRequest,
     UserCreate,
     NotificationCreate,
-    PasswordResetConfirm,
 )
 
 
@@ -142,7 +139,7 @@ class TestUserCreateFuzzing:
     def test_user_role_fuzz(self, role_input):
         """Fuzz role field with various inputs."""
         try:
-            user = UserCreate(
+            UserCreate(
                 email="test@example.com",
                 password="Password123!",
                 first_name="Test",
@@ -195,7 +192,7 @@ class TestNotificationFuzzing:
     def test_notification_channels_fuzz(self, channels):
         """Fuzz channels field."""
         try:
-            notification = NotificationCreate(
+            NotificationCreate(
                 title="Test",
                 message="Test",
                 channels=channels if channels else ["sms"],
@@ -290,7 +287,7 @@ class TestBoundaryValueFuzzing:
         try:
             # Location ID
             from app.schemas import UserUpdate
-            update = UserUpdate(location_id=value if value >= 0 else None)
+            UserUpdate(location_id=value if value >= 0 else None)
         except Exception:
             pass
 

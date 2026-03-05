@@ -1,10 +1,10 @@
-from fastapi import APIRouter, Request, Form, Depends, HTTPException
+from fastapi import APIRouter, Request, Form, Depends
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, update
 from typing import Optional, List
 from app.database import get_db
-from app.core.deps import get_current_user, require_manager
+from app.core.deps import get_current_user
 from app.config import settings
 from app.models import (
     Notification,
@@ -253,7 +253,7 @@ async def voice_response(
     db: Session = Depends(get_db),
 ):
     """Handle keypress response from voice calls - 1=Safe, 2=Help."""
-    logger.info(f"=== VOICE WEBHOOK CALLED ===")
+    logger.info("=== VOICE WEBHOOK CALLED ===")
     logger.info(f"From: {From}, Digits: '{Digits}', CallSid: {CallSid}")
     
     try:
@@ -321,9 +321,9 @@ async def voice_response(
         else:
             logger.warning(f"No notification found for voice response from {From}")
 
-        logger.info(f"About to commit to database...")
+        logger.info("About to commit to database...")
         db.commit()
-        logger.info(f"=== Voice response COMMITTED to DB successfully ===")
+        logger.info("=== Voice response COMMITTED to DB successfully ===")
         logger.info(f"IncomingMessage.id={incoming.id}, NotificationResponse.id={resp.id if latest_log else 'N/A'}")
 
         if response_type == ResponseType.SAFE:
@@ -340,11 +340,11 @@ async def voice_response(
         return Response(content=twiml, media_type="text/xml")
 
     except Exception as e:
-        logger.error(f"=== VOICE WEBHOOK ERROR ===", exc_info=True)
+        logger.error("=== VOICE WEBHOOK ERROR ===", exc_info=True)
         logger.error(f"Error details: {str(e)}")
         db.rollback()
         # Return error TwiML
-        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+        twiml = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="alice">Sorry, an error occurred. Please try again later.</Say>
 </Response>"""

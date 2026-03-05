@@ -7,8 +7,7 @@ Tests cover:
 - Distance calculation invariants
 - Input validation properties
 """
-import pytest
-from hypothesis import given, assume, settings, HealthCheck
+from hypothesis import given, assume, settings
 from hypothesis import strategies as st
 import math
 
@@ -17,8 +16,6 @@ from app.core.geofence import (
     validate_coordinates,
     validate_geofence_radius,
     validate_location_input,
-    check_geofence,
-    EARTH_RADIUS_MILES,
     MIN_COORDINATE,
     MAX_COORDINATE,
 )

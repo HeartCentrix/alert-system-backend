@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models import User, RefreshToken, AuditLog, UserRole
+from app.models import User, RefreshToken, AuditLog
 from app.schemas import (
     LoginRequest, TokenResponse, RefreshRequest, UserResponse,
     PasswordResetRequest, PasswordResetConfirm, ChangePasswordRequest
@@ -29,7 +29,7 @@ PASSWORD_RESET_RATE_LIMIT_SECONDS = 30  # 30 seconds between requests per email
 def login(request: LoginRequest, req: Request, db: Session = Depends(get_db)):
     user = db.query(User).filter(
         User.email == request.email,
-        User.deleted_at == None
+        User.deleted_at is None
     ).first()
 
     # Check if user exists
@@ -94,13 +94,13 @@ def refresh_token(request: RefreshRequest, db: Session = Depends(get_db)):
     # Check token in DB
     rt = db.query(RefreshToken).filter(
         RefreshToken.token == request.refresh_token,
-        RefreshToken.revoked == False
+        not RefreshToken.revoked
     ).first()
 
     if not rt or rt.expires_at < datetime.now(timezone.utc):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token expired")
 
-    user = db.query(User).filter(User.id == rt.user_id, User.is_active == True).first()
+    user = db.query(User).filter(User.id == rt.user_id, User.is_active).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
@@ -162,7 +162,7 @@ def forgot_password(request: PasswordResetRequest, req: Request, db: Session = D
     # Find user (case-insensitive email lookup)
     user = db.query(User).filter(
         User.email == email_normalized,
-        User.deleted_at == None
+        User.deleted_at is None
     ).first()
     
     # Always return the same message to prevent email enumeration
@@ -191,7 +191,7 @@ def reset_password(request: PasswordResetConfirm, db: Session = Depends(get_db))
     user = db.query(User).filter(
         User.password_reset_token == request.token,
         User.password_reset_expires > datetime.now(timezone.utc),
-        User.deleted_at == None
+        User.deleted_at is None
     ).first()
 
     if not user:

@@ -8,7 +8,6 @@ Tests cover:
 - Location overlap detection
 - Batch processing
 """
-import pytest
 import math
 from app.core.geofence import (
     haversine_distance,
@@ -19,7 +18,6 @@ from app.core.geofence import (
     check_geofences_batch,
     check_location_overlap,
     GeoPoint,
-    GeofenceResult,
     EARTH_RADIUS_MILES,
     MIN_GEOFENCE_RADIUS_MILES,
     MAX_GEOFENCE_RADIUS_MILES,

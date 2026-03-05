@@ -1,4 +1,4 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
 
 
@@ -13,6 +13,10 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str = "postgresql://postgres:password@localhost:5432/tm_alert"
     REDIS_URL: str = "redis://localhost:6379/0"
+
+    # Test environment variables (optional, used in CI/testing)
+    TEST_DATABASE_URL: Optional[str] = None
+    TEST_REDIS_URL: Optional[str] = None
 
     TWILIO_ACCOUNT_SID: str = ""
     TWILIO_AUTH_TOKEN: str = ""
@@ -34,9 +38,11 @@ class Settings(BaseSettings):
     SLACK_DEFAULT_WEBHOOK_URL: str = ""
     TEAMS_DEFAULT_WEBHOOK_URL: str = ""
 
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=True,
+        extra="ignore"
+    )
 
 
 settings = Settings()

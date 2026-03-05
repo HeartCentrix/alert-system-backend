@@ -28,7 +28,7 @@ def list_users(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_manager)
 ):
-    query = db.query(User).filter(User.deleted_at == None)
+    query = db.query(User).filter(User.deleted_at is None)
 
     if search:
         query = query.filter(or_(
@@ -60,11 +60,11 @@ def create_user(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    if db.query(User).filter(User.email == data.email, User.deleted_at == None).first():
+    if db.query(User).filter(User.email == data.email, User.deleted_at is None).first():
         raise HTTPException(status_code=400, detail="Email already registered")
 
     if data.employee_id:
-        if db.query(User).filter(User.employee_id == data.employee_id, User.deleted_at == None).first():
+        if db.query(User).filter(User.employee_id == data.employee_id, User.deleted_at is None).first():
             raise HTTPException(status_code=400, detail="Employee ID already exists")
 
     user = User(
@@ -106,7 +106,7 @@ def get_user(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_manager)
 ):
-    user = db.query(User).filter(User.id == user_id, User.deleted_at == None).first()
+    user = db.query(User).filter(User.id == user_id, User.deleted_at is None).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return user
@@ -135,7 +135,7 @@ def update_user(
         if employee_id_value:
             existing = db.query(User).filter(
                 User.employee_id == employee_id_value,
-                User.deleted_at == None,
+                User.deleted_at is None,
                 User.id != user_id  # Exclude current user from check
             ).first()
             if existing:
@@ -163,7 +163,7 @@ def delete_user(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    user = db.query(User).filter(User.id == user_id, User.deleted_at == None).first()
+    user = db.query(User).filter(User.id == user_id, User.deleted_at is None).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     if user.id == current_user.id:
@@ -315,8 +315,8 @@ async def import_users_csv(
 def get_departments(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Get all unique departments for filtering."""
     results = db.query(User.department).filter(
-        User.department != None,
+        User.department is not None,
         User.department != "",
-        User.deleted_at == None
+        User.deleted_at is None
     ).distinct().all()
     return [r[0] for r in results if r[0]]

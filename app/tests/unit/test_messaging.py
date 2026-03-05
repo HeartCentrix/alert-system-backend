@@ -9,8 +9,7 @@ Tests cover:
 - Webhook services (Slack, Teams)
 - Mock mode behavior
 """
-import pytest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 import httpx
 
 from app.services.messaging import (
@@ -39,7 +38,7 @@ class TestTwilioService:
 
     def test_send_sms_empty_phone(self, mock_twilio: MagicMock):
         """SMS to empty phone should handle gracefully."""
-        result = twilio_service.send_sms("", "Test message")
+        twilio_service.send_sms("", "Test message")
         # Should still attempt to send (Twilio will validate)
         mock_twilio.send_sms.assert_called_once_with("", "Test message")
 

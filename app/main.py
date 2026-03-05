@@ -7,7 +7,7 @@ import logging
 from app.config import settings
 from sqlalchemy import text
 from app.database import engine, Base, SessionLocal
-from app.models import User, UserRole, AlertChannel
+from app.models import User, UserRole
 from app.core.security import hash_password
 from app.core.location_cache import init_location_cache, close_location_cache
 from app.api.auth import router as auth_router
