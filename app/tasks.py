@@ -128,10 +128,13 @@ def _send_to_channel(self, notification_id: int, user_id: int, channel: str):
             DeliveryLog.user_id == user_id,
             DeliveryLog.channel == channel
         ).first()
-        
+
         if existing_log and existing_log.status in [DeliveryStatus.SENT, DeliveryStatus.DELIVERED]:
             logger.info(f"Notification {notification_id} to user {user_id} via {channel} already sent, skipping duplicate")
             return
+
+        # Cache total_channels for status update (avoids extra query later)
+        total_channels = len(notification.channels)
 
         log = DeliveryLog(
             notification_id=notification_id,
@@ -152,6 +155,14 @@ def _send_to_channel(self, notification_id: int, user_id: int, channel: str):
                 log.error_message = "No phone number"
                 db.add(log)
                 db.commit()
+                # Atomic increment and status update
+                db.execute(
+                    update(Notification)
+                    .where(Notification.id == notification_id)
+                    .values(failed_count=Notification.failed_count + 1)
+                )
+                db.commit()
+                _update_notification_status(db, notification_id, total_channels)
                 return
 
         elif channel == AlertChannel.EMAIL:
@@ -164,6 +175,14 @@ def _send_to_channel(self, notification_id: int, user_id: int, channel: str):
                 log.error_message = "No email address"
                 db.add(log)
                 db.commit()
+                # Atomic increment and status update
+                db.execute(
+                    update(Notification)
+                    .where(Notification.id == notification_id)
+                    .values(failed_count=Notification.failed_count + 1)
+                )
+                db.commit()
+                _update_notification_status(db, notification_id, total_channels)
                 return
 
         elif channel == AlertChannel.VOICE:
@@ -175,6 +194,14 @@ def _send_to_channel(self, notification_id: int, user_id: int, channel: str):
                 log.error_message = "No phone number for voice call"
                 db.add(log)
                 db.commit()
+                # Atomic increment and status update
+                db.execute(
+                    update(Notification)
+                    .where(Notification.id == notification_id)
+                    .values(failed_count=Notification.failed_count + 1)
+                )
+                db.commit()
+                _update_notification_status(db, notification_id, total_channels)
                 return
 
         elif channel == AlertChannel.WHATSAPP:
@@ -187,6 +214,14 @@ def _send_to_channel(self, notification_id: int, user_id: int, channel: str):
                 log.error_message = "No WhatsApp number"
                 db.add(log)
                 db.commit()
+                # Atomic increment and status update
+                db.execute(
+                    update(Notification)
+                    .where(Notification.id == notification_id)
+                    .values(failed_count=Notification.failed_count + 1)
+                )
+                db.commit()
+                _update_notification_status(db, notification_id, total_channels)
                 return
 
         # Update log based on result
@@ -196,6 +231,7 @@ def _send_to_channel(self, notification_id: int, user_id: int, channel: str):
             db.add(log)
             db.commit()
             # Atomic increment to avoid race condition
+            # Uses SQL-level increment: failed_count = failed_count + 1
             db.execute(
                 update(Notification)
                 .where(Notification.id == notification_id)
@@ -203,13 +239,15 @@ def _send_to_channel(self, notification_id: int, user_id: int, channel: str):
             )
             db.commit()
             # Update notification status based on delivery results
-            _update_notification_status(db, notification_id)
+            # This uses atomic UPDATE with WHERE clause to prevent race conditions
+            _update_notification_status(db, notification_id, total_channels)
         else:
             log.status = DeliveryStatus.SENT
             log.external_id = result.get("sid") or result.get("message_id")
             db.add(log)
             db.commit()
             # Atomic increment to avoid race condition
+            # Uses SQL-level increment: sent_count = sent_count + 1
             db.execute(
                 update(Notification)
                 .where(Notification.id == notification_id)
@@ -217,7 +255,8 @@ def _send_to_channel(self, notification_id: int, user_id: int, channel: str):
             )
             db.commit()
             # Update notification status based on delivery results
-            _update_notification_status(db, notification_id)
+            # This uses atomic UPDATE with WHERE clause to prevent race conditions
+            _update_notification_status(db, notification_id, total_channels)
 
     except Exception as e:
         logger.error(f"Error sending to user {user_id} via {channel}: {e}")
@@ -261,36 +300,57 @@ def process_scheduled_notifications():
         db.close()
 
 
-def _update_notification_status(db, notification_id: int):
+def _update_notification_status(db, notification_id: int, total_channels: int):
     """Update notification status based on delivery results.
+
+    Uses atomic UPDATE query to prevent race conditions when concurrent subtasks complete.
+    The status update is done atomically based on the current database values.
+    
+    Args:
+        db: Database session
+        notification_id: ID of the notification to update
+        total_channels: Number of channels for this notification (prevents extra query)
     
     Sets status to:
     - PARTIALLY_SENT: Some deliveries succeeded, some failed
-    - SENT: All deliveries succeeded
+    - SENT: All deliveries succeeded  
     - FAILED: All deliveries failed
     """
+    # Get total recipients for calculating total expected deliveries
     notification = db.query(Notification).filter(Notification.id == notification_id).first()
     if not notification:
         return
     
-    total_expected = notification.total_recipients * len(notification.channels)
-    total_delivered = notification.sent_count + notification.failed_count
+    total_expected = notification.total_recipients * total_channels
     
-    # Only update status if all deliveries are complete
-    if total_delivered >= total_expected:
-        if notification.failed_count == 0:
-            # All succeeded
-            notification.status = NotificationStatus.SENT
-        elif notification.sent_count == 0:
-            # All failed
-            notification.status = NotificationStatus.FAILED
-        else:
-            # Mixed results
-            notification.status = NotificationStatus.PARTIALLY_SENT
-        
-        db.commit()
+    # Atomically update status only when all deliveries are complete
+    # Uses SQL-level comparison to ensure atomicity - only ONE concurrent subtask
+    # will successfully update the status (the one that completes last)
+    from sqlalchemy import case
+    
+    db.execute(
+        update(Notification)
+        .where(
+            Notification.id == notification_id,
+            # Only update if all deliveries are complete
+            Notification.sent_count + Notification.failed_count >= total_expected
+        )
+        .values({
+            "status": case(
+                (Notification.failed_count == 0, NotificationStatus.SENT.value),
+                (Notification.sent_count == 0, NotificationStatus.FAILED.value),
+                else_=NotificationStatus.PARTIALLY_SENT.value
+            )
+        })
+    )
+    db.commit()
+    
+    # Log the result (read after commit for accurate logging)
+    notification = db.query(Notification).filter(Notification.id == notification_id).first()
+    if notification and notification.status in [NotificationStatus.SENT, NotificationStatus.FAILED, NotificationStatus.PARTIALLY_SENT]:
+        total_delivered = notification.sent_count + notification.failed_count
         logger.info(
-            f"Notification {notification_id} status updated to {notification.status}: "
+            f"Notification {notification_id} status: {notification.status.value} | "
             f"{notification.sent_count} sent, {notification.failed_count} failed out of {total_expected}"
         )
 
