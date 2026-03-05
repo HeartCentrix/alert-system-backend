@@ -252,10 +252,10 @@ def _is_safe_url(url: str) -> bool:
     Blocks:
     - Non-HTTP/HTTPS schemes
     - Private IP addresses (10.x.x.x, 172.16-31.x.x, 192.168.x.x)
-    - Localhost (127.x.x.x, ::1)
+    - Localhost (127.x.x.x, ::1) - except in development
     - Link-local addresses (169.254.x.x)
     - AWS metadata endpoint (169.254.169.254)
-    - Internal hostnames (localhost, internal, etc.)
+    - Internal hostnames (localhost, internal, etc.) - except in development
     
     Args:
         url: The webhook URL to validate
@@ -279,8 +279,14 @@ def _is_safe_url(url: str) -> bool:
             logger.warning("Webhook URL blocked: missing hostname")
             return False
         
-        # Block localhost and common internal hostnames
-        blocked_hostnames = ['localhost', 'internal', 'metadata', '169.254.169.254']
+        # Allow localhost in development mode
+        is_development = settings.APP_ENV == "development"
+        if is_development and hostname.lower() in ['localhost', '127.0.0.1', '::1']:
+            logger.info(f"Webhook URL allowed (development): {url}")
+            return True
+        
+        # Block localhost and common internal hostnames in production
+        blocked_hostnames = ['localhost', 'internal', 'metadata', '169.254.169.254', '127.0.0.1', '::1']
         if hostname.lower() in blocked_hostnames or hostname.endswith('.internal'):
             logger.warning(f"Webhook URL blocked: internal hostname '{hostname}'")
             return False
