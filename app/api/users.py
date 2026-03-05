@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/users", tags=["Users / People"])
 
+# Maximum allowed CSV file size: 5MB
+MAX_CSV_FILE_SIZE = 5 * 1024 * 1024
+
 
 def _prevent_privilege_escalation(current_user: User, target_role: Optional[UserRole]):
     """Prevent ADMIN users from creating or updating SUPER_ADMIN users.
@@ -217,6 +220,17 @@ async def import_users_csv(
     """
     if not file.filename.endswith('.csv'):
         raise HTTPException(status_code=400, detail="File must be a CSV")
+
+    # Validate file size to prevent DoS attacks (max 5MB)
+    file.seek(0, 2)  # Seek to end of file
+    file_size = file.tell()
+    file.seek(0)  # Reset to beginning
+    
+    if file_size > MAX_CSV_FILE_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File size exceeds maximum allowed size of {MAX_CSV_FILE_SIZE // (1024 * 1024)}MB"
+        )
 
     content = await file.read()
     reader = csv.DictReader(io.StringIO(content.decode('utf-8-sig')))
