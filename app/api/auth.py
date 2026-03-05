@@ -94,7 +94,12 @@ def refresh_token(request: RefreshRequest, db: Session = Depends(get_db)):
     if not rt or rt.expires_at < datetime.now(timezone.utc):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token expired")
 
-    user = db.query(User).filter(User.id == rt.user_id, User.is_active == True).first()
+    # Check if user exists, is active, AND is not soft-deleted
+    user = db.query(User).filter(
+        User.id == rt.user_id,
+        User.is_active == True,
+        User.deleted_at == None
+    ).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
