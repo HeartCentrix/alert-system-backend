@@ -336,3 +336,14 @@ class RefreshToken(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     user = relationship("User")
+
+
+class LoginAttempt(Base):
+    """Track failed login attempts for brute force protection."""
+    __tablename__ = "login_attempts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String(255), nullable=False, index=True)  # Track by email
+    ip_address = Column(String(45))  # Track by IP
+    attempted_at = Column(DateTime(timezone=True), server_default=func.now())
+    success = Column(Boolean, default=False)

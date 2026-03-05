@@ -2,8 +2,9 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
+from sqlalchemy import desc, func
 from app.database import get_db
-from app.models import User, RefreshToken, AuditLog, UserRole
+from app.models import User, RefreshToken, AuditLog, UserRole, LoginAttempt
 from app.schemas import (
     LoginRequest, TokenResponse, RefreshRequest, UserResponse,
     PasswordResetRequest, PasswordResetConfirm, ChangePasswordRequest
@@ -18,9 +19,40 @@ from app.config import settings
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
+# Brute force protection settings
+MAX_FAILED_ATTEMPTS = 5  # Lock out after 5 failed attempts
+LOCKOUT_DURATION_MINUTES = 15  # Lockout duration
+FAILED_WINDOW_MINUTES = 30  # Time window to count failed attempts
+
 
 @router.post("/login", response_model=TokenResponse)
 def login(request: LoginRequest, req: Request, db: Session = Depends(get_db)):
+    client_ip = req.client.host if req.client else None
+    
+    # Check for lockout due to too many failed attempts
+    window_start = datetime.now(timezone.utc) - timedelta(minutes=FAILED_WINDOW_MINUTES)
+    failed_count = db.query(LoginAttempt).filter(
+        LoginAttempt.email == request.email.lower(),
+        LoginAttempt.attempted_at >= window_start,
+        LoginAttempt.success == False
+    ).count()
+    
+    if failed_count >= MAX_FAILED_ATTEMPTS:
+        # Check if still in lockout period
+        last_attempt = db.query(LoginAttempt).filter(
+            LoginAttempt.email == request.email.lower(),
+            LoginAttempt.attempted_at >= window_start
+        ).order_by(desc(LoginAttempt.attempted_at)).first()
+        
+        if last_attempt:
+            time_since_last = datetime.now(timezone.utc) - last_attempt.attempted_at
+            if time_since_last < timedelta(minutes=LOCKOUT_DURATION_MINUTES):
+                remaining = int(LOCKOUT_DURATION_MINUTES - time_since_last.total_seconds() / 60)
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=f"Too many failed login attempts. Please try again in {remaining} minutes."
+                )
+    
     user = db.query(User).filter(
         User.email == request.email,
         User.deleted_at == None
@@ -28,6 +60,13 @@ def login(request: LoginRequest, req: Request, db: Session = Depends(get_db)):
 
     # Check if user exists
     if not user:
+        # Log failed attempt (don't reveal user doesn't exist)
+        db.add(LoginAttempt(
+            email=request.email.lower(),
+            ip_address=client_ip,
+            success=False
+        ))
+        db.commit()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="No account found with this email address"
@@ -42,10 +81,29 @@ def login(request: LoginRequest, req: Request, db: Session = Depends(get_db)):
 
     # Check password
     if not verify_password(request.password, user.hashed_password):
+        # Log failed attempt
+        db.add(LoginAttempt(
+            email=request.email.lower(),
+            ip_address=client_ip,
+            success=False
+        ))
+        db.commit()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect password"
         )
+
+    # Clear failed attempts on successful login
+    db.query(LoginAttempt).filter(
+        LoginAttempt.email == request.email.lower()
+    ).delete()
+    
+    # Log successful attempt
+    db.add(LoginAttempt(
+        email=request.email.lower(),
+        ip_address=client_ip,
+        success=True
+    ))
 
     access_token = create_access_token({"sub": str(user.id), "role": user.role})
     refresh_token_str = create_refresh_token({"sub": str(user.id)})
@@ -208,3 +266,26 @@ def change_password(
 @router.get("/me", response_model=UserResponse)
 def get_me(current_user: User = Depends(get_current_user)):
     return current_user
+
+
+@router.get("/login-attempts")
+def get_login_attempts(
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """View recent login attempts (for security monitoring)."""
+    attempts = db.query(LoginAttempt).order_by(
+        desc(LoginAttempt.attempted_at)
+    ).limit(limit).all()
+    
+    return [
+        {
+            "id": a.id,
+            "email": a.email,
+            "ip_address": a.ip_address,
+            "success": a.success,
+            "attempted_at": a.attempted_at
+        }
+        for a in attempts
+    ]
