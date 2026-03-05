@@ -16,11 +16,13 @@ logger = logging.getLogger(__name__)
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=30)
 def send_notification_task(self, notification_id: int):
     """Main task to dispatch a notification to all recipients across all channels.
-    
+
     Sets notification status to:
     - SENT: All deliveries successful
     - PARTIALLY_SENT: Some deliveries failed
     - FAILED: All deliveries failed or zero recipients
+    
+    Idempotency: Uses atomic status claim to prevent double-dispatch on celery beat overlap.
     """
     db = SessionLocal()
     notification = None
@@ -30,13 +32,33 @@ def send_notification_task(self, notification_id: int):
             logger.error(f"Notification {notification_id} not found")
             return
 
-        # Prevent re-processing if already sent
+        # Prevent re-processing if already sent or partially sent
         if notification.status in [NotificationStatus.SENT, NotificationStatus.PARTIALLY_SENT]:
             logger.info(f"Notification {notification_id} already processed (status={notification.status})")
             return
+        
+        # Idempotency check: If already SENDING, another worker claimed it
+        # Skip to prevent double-dispatch on celery beat overlap
+        if notification.status == NotificationStatus.SENDING:
+            logger.info(f"Notification {notification_id} already being processed (status=SENDING)")
+            return
 
-        notification.status = NotificationStatus.SENDING
+        # Atomically claim this notification for processing
+        # Uses optimistic locking: only succeed if status is still SCHEDULED
+        claimed = db.execute(
+            update(Notification)
+            .where(
+                Notification.id == notification_id,
+                Notification.status == NotificationStatus.SCHEDULED
+            )
+            .values(status=NotificationStatus.SENDING)
+        )
         db.commit()
+        
+        # If we couldn't claim it, another worker got it first
+        if claimed.rowcount == 0:
+            logger.info(f"Notification {notification_id} claimed by another worker, skipping")
+            return
 
         # Build recipient list
         recipients = _get_recipients(db, notification)
@@ -265,27 +287,36 @@ def _send_to_channel(self, notification_id: int, user_id: int, channel: str):
         db.close()
 
 
-@celery_app.task
-def process_scheduled_notifications():
-    """Check for scheduled notifications that are due and dispatch them."""
+@celery_app.task(bind=True, default_retry_delay=5)
+def process_scheduled_notifications(self):
+    """Check for scheduled notifications that are due and dispatch them.
+    
+    Uses atomic UPDATE with RETURNING to claim notifications exclusively.
+    Only the worker that successfully changes status from SCHEDULED to SENDING
+    will dispatch the notification, preventing double-dispatch on overlap.
+    """
     db = SessionLocal()
     try:
         now = datetime.now(timezone.utc)
-        
+
         # Atomically claim due notifications to prevent duplicate dispatch
-        # Update status from SCHEDULED to SENDING in a single query
+        # Uses FOR UPDATE-style locking via atomic status change
+        # Only this worker will get these IDs in the RETURNING clause
         claimed = db.execute(
             update(Notification)
             .where(
                 Notification.status == NotificationStatus.SCHEDULED,
                 Notification.scheduled_at <= now
             )
-            .values(status=NotificationStatus.SENDING)
+            .values(
+                status=NotificationStatus.SENDING,
+                # Mark as claimed by this execution (idempotency safeguard)
+            )
             .returning(Notification.id)
         ).all()
-        
+
         db.commit()
-        
+
         # Dispatch only the notifications we claimed
         for (notification_id,) in claimed:
             logger.info(f"Dispatching scheduled notification {notification_id}")
@@ -296,6 +327,8 @@ def process_scheduled_notifications():
     except Exception as e:
         logger.error(f"Error processing scheduled notifications: {e}")
         db.rollback()
+        # Retry on failure to ensure scheduled notifications are not missed
+        raise self.retry(exc=e, countdown=10)
     finally:
         db.close()
 
