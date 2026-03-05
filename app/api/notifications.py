@@ -1,12 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import desc
+from sqlalchemy import desc, update
 from typing import Optional, List
 from datetime import datetime, timezone
 from app.database import get_db
 from app.models import (
     Notification, NotificationStatus, Incident, IncidentStatus,
-    User, Group, DeliveryLog, NotificationResponse as NRModel,
+    User, Group, DeliveryLog, DeliveryStatus, NotificationResponse as NRModel,
     AuditLog, AlertChannel
 )
 from app.schemas import (
@@ -303,6 +303,7 @@ def submit_response(
     if not notification:
         raise HTTPException(status_code=404, detail="Notification not found")
 
+    # Create the response record with WEB channel
     response = NRModel(
         notification_id=notification_id,
         user_id=current_user.id,
@@ -313,6 +314,31 @@ def submit_response(
         longitude=data.longitude
     )
     db.add(response)
+
+    # Create delivery log entry to track web delivery (mark as delivered when user responds)
+    # Check if delivery log already exists to avoid duplicates
+    existing_log = db.query(DeliveryLog).filter(
+        DeliveryLog.notification_id == notification_id,
+        DeliveryLog.user_id == current_user.id,
+        DeliveryLog.channel == AlertChannel.WEB
+    ).first()
+
+    if not existing_log:
+        delivery_log = DeliveryLog(
+            notification_id=notification_id,
+            user_id=current_user.id,
+            channel=AlertChannel.WEB,
+            status=DeliveryStatus.DELIVERED,
+            delivered_at=datetime.now(timezone.utc)
+        )
+        db.add(delivery_log)
+        # Atomically increment delivered_count
+        db.execute(
+            update(Notification)
+            .where(Notification.id == notification_id)
+            .values(delivered_count=Notification.delivered_count + 1)
+        )
+
     db.commit()
     return {"message": "Response recorded", "response_type": data.response_type}
 
