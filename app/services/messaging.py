@@ -137,6 +137,8 @@ class EmailService:
     def send_password_reset_email(self, to: str, reset_token: str, user_name: str) -> dict:
         reset_url = f"{settings.FRONTEND_URL}/reset-password?token={reset_token}"
         subject = "TM Alert - Password Reset Request"
+        # Escape user_name to prevent HTML injection
+        safe_user_name = _escape_xml(user_name)
         body_text = f"Hi {user_name},\n\nClick the link to reset your password:\n{reset_url}\n\nThis link expires in 1 hour.\n\nIf you didn't request this, ignore this email."
         body_html = f"""
         <html><body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
@@ -145,7 +147,7 @@ class EmailService:
         </div>
         <div style="padding: 30px;">
             <h2>Password Reset Request</h2>
-            <p>Hi {user_name},</p>
+            <p>Hi {safe_user_name},</p>
             <p>Someone requested a password reset for your TM Alert account.</p>
             <p style="text-align: center; margin: 30px 0;">
                 <a href="{reset_url}" style="background: #1e40af; color: white; padding: 12px 24px;
@@ -160,7 +162,11 @@ class EmailService:
         """Send welcome email with login credentials to newly imported users."""
         login_url = f"{settings.FRONTEND_URL}/#/login"
         subject = "Welcome to TM Alert - Your Login Credentials"
-        
+        # Escape user_name to prevent HTML injection
+        safe_user_name = _escape_xml(user_name)
+        # Escape password to prevent HTML injection (defense in depth)
+        safe_password = _escape_xml(password)
+
         body_text = f"""Hi {user_name},
 
 Welcome to TM Alert! You've been added to the Taylor Morrison emergency notification system.
@@ -190,9 +196,9 @@ Taylor Morrison"""
         </div>
         <div style="background: white; padding: 30px; margin: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
             <h2 style="color: #1e293b; margin-top: 0;">Welcome to TM Alert!</h2>
-            <p style="color: #475569;">Hi {user_name},</p>
+            <p style="color: #475569;">Hi {safe_user_name},</p>
             <p style="color: #475569;">You've been added to the Taylor Morrison emergency notification system. You'll receive critical emergency alerts via SMS, Email, Voice, and WhatsApp.</p>
-            
+
             <div style="background: #f8fafc; border: 2px solid #e2e8f0; border-radius: 8px; padding: 20px; margin: 25px 0;">
                 <h3 style="color: #1e40af; margin-top: 0; font-size: 16px;">📧 Your Login Credentials</h3>
                 <table style="width: 100%; margin: 15px 0;">
@@ -202,14 +208,14 @@ Taylor Morrison"""
                     </tr>
                     <tr>
                         <td style="padding: 8px 0; color: #64748b; font-weight: 600;">Temporary Password:</td>
-                        <td style="padding: 8px 0; font-family: monospace; background: #fef3c7; padding: 4px 8px; border-radius: 4px; color: #92400e;">{password}</td>
+                        <td style="padding: 8px 0; font-family: monospace; background: #fef3c7; padding: 4px 8px; border-radius: 4px; color: #92400e;">{safe_password}</td>
                     </tr>
                 </table>
                 <div style="text-align: center; margin-top: 20px;">
                     <a href="{login_url}" style="background: #1e40af; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">Login Now</a>
                 </div>
             </div>
-            
+
             <div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 15px; margin: 20px 0; border-radius: 4px;">
                 <p style="color: #92400e; margin: 0; font-weight: 600;">⚠️ Important Security Reminders:</p>
                 <ul style="color: #92400e; margin: 10px 0 0 0; padding-left: 20px; font-size: 14px;">
@@ -218,7 +224,7 @@ Taylor Morrison"""
                     <li>If you didn't expect this email, contact your administrator</li>
                 </ul>
             </div>
-            
+
             <p style="color: #64748b; font-size: 14px; margin-top: 25px;">Stay safe,<br/><strong>TM Alert Team</strong><br/>Taylor Morrison</p>
         </div>
         <div style="text-align: center; padding: 20px; color: #94a3b8; font-size: 12px;">
@@ -226,7 +232,7 @@ Taylor Morrison"""
             <p>&copy; 2024 Taylor Morrison. All rights reserved.</p>
         </div>
         </body></html>"""
-        
+
         return self.send_email(to, subject, body_text, body_html)
 
     def _text_to_html(self, text: str) -> str:
