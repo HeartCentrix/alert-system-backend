@@ -68,14 +68,15 @@ def get_map_data(
     current_user: User = Depends(get_current_user)
 ):
     """Return location data with employee counts for the audience map."""
+    from app.models import UserLocation, UserLocationStatus
     locations = db.query(Location).filter(Location.is_active == True).all()
 
     result = []
     for loc in locations:
-        user_count = db.query(User).filter(
-            User.location_id == loc.id,
-            User.is_active == True,
-            User.deleted_at == None
+        # Count users in user_locations table (many-to-many) for consistency
+        user_count = db.query(UserLocation).filter(
+            UserLocation.location_id == loc.id,
+            UserLocation.status == UserLocationStatus.ACTIVE
         ).count()
 
         result.append({
