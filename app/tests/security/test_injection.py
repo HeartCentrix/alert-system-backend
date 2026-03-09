@@ -9,6 +9,8 @@ Tests cover:
 - Command Injection
 - Path Traversal
 """
+import pytest
+from unittest.mock import patch, MagicMock
 
 
 # =============================================================================
@@ -146,7 +148,7 @@ class TestXSSPrevention:
                 }
             )
             if response.status_code == 200:
-                response.json()
+                data = response.json()
                 # Should store but not execute
                 # (XSS prevention is mainly frontend responsibility)
                 pass  # Backend stores as-is, frontend sanitizes
@@ -427,12 +429,20 @@ class TestSecurityHeaders:
 
     def test_security_headers_present(self, client):
         """Security headers should be present."""
-        client.get("/health")
+        response = client.get("/health")
         
         # Check for security headers
         # Note: FastAPI doesn't add these by default, should be added by reverse proxy
+        headers = response.headers
         
         # Document expected headers
+        expected_headers = [
+            "X-Content-Type-Options",  # Prevent MIME sniffing
+            "X-Frame-Options",  # Prevent clickjacking
+            "X-XSS-Protection",  # XSS filter
+            "Strict-Transport-Security",  # HSTS
+            "Content-Security-Policy",  # CSP
+        ]
         
         # These are typically added by reverse proxy (nginx, etc.)
         # Not the application's responsibility

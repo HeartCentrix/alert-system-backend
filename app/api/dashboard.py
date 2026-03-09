@@ -7,6 +7,7 @@ from app.models import (
     User, Group, Location, Notification, Incident,
     NotificationStatus, IncidentStatus
 )
+from app.schemas import DashboardStats
 from app.core.deps import get_current_user
 
 router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
@@ -24,9 +25,9 @@ def get_dashboard_stats(
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = now - timedelta(days=7)
 
-    total_users = db.query(User).filter(User.is_active.is_(True), User.deleted_at.is_(None)).count()
-    total_groups = db.query(Group).filter(Group.is_active.is_(True)).count()
-    total_locations = db.query(Location).filter(Location.is_active.is_(True)).count()
+    total_users = db.query(User).filter(User.is_active == True).count()
+    total_groups = db.query(Group).filter(Group.is_active == True).count()
+    total_locations = db.query(Location).filter(Location.is_active == True).count()
     active_incidents = db.query(Incident).filter(Incident.status == IncidentStatus.ACTIVE).count()
 
     # Count notifications that were actually dispatched today
@@ -77,7 +78,7 @@ def get_map_data(
 ):
     """Return location data with employee counts for the audience map."""
     from app.models import UserLocation, UserLocationStatus
-    locations = db.query(Location).filter(Location.is_active.is_(True)).all()
+    locations = db.query(Location).filter(Location.is_active == True).all()
 
     result = []
     for loc in locations:
@@ -101,9 +102,8 @@ def get_map_data(
 
     # Also return users without a location
     unassigned_count = db.query(User).filter(
-        User.location_id.is_(None),
-        User.is_active.is_(True),
-        User.deleted_at.is_(None)
+        User.location_id == None,
+        User.is_active == True
     ).count()
 
     return {

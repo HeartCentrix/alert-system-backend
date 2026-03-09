@@ -11,6 +11,7 @@ import logging
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
+from sqlalchemy import select, and_, or_
 
 from app.celery_app import celery_app
 from app.database import SessionLocal
@@ -22,6 +23,7 @@ from app.core.geofence import (
     check_geofence, check_geofences_batch, haversine_distance,
     get_geo_service, validate_coordinates
 )
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +67,7 @@ def check_user_geofence_task(self, user_id: int, latitude: float, longitude: flo
         
         # Get all active locations
         locations = db.query(Location).filter(
-            Location.is_active.is_(True),
+            Location.is_active == True,
             Location.latitude.isnot(None),
             Location.longitude.isnot(None)
         ).all()
@@ -180,7 +182,7 @@ def batch_geofence_check_task(
     try:
         # Get all active locations once (shared across all users)
         locations = db.query(Location).filter(
-            Location.is_active.is_(True),
+            Location.is_active == True,
             Location.latitude.isnot(None),
             Location.longitude.isnot(None)
         ).all()
@@ -438,7 +440,7 @@ def sync_all_locations_to_redis() -> Dict[str, Any]:
         r = redis.from_url(settings.REDIS_URL, decode_responses=True)
         
         locations = db.query(Location).filter(
-            Location.is_active.is_(True),
+            Location.is_active == True,
             Location.latitude.isnot(None),
             Location.longitude.isnot(None)
         ).all()
@@ -540,7 +542,7 @@ def periodic_geofence_check() -> Dict[str, Any]:
     try:
         # Get all active users that have a known location
         users_with_location = db.query(User).filter(
-            User.is_active.is_(True),
+            User.is_active == True,
             User.latitude.isnot(None),
             User.longitude.isnot(None)
         ).all()
@@ -559,7 +561,7 @@ def periodic_geofence_check() -> Dict[str, Any]:
 
         # Reuse batch logic inline to avoid serialization overhead
         locations = db.query(Location).filter(
-            Location.is_active.is_(True),
+            Location.is_active == True,
             Location.latitude.isnot(None),
             Location.longitude.isnot(None)
         ).all()

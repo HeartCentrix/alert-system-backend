@@ -10,19 +10,22 @@ Tests cover:
 - Edge cases
 """
 import pytest
-from pydantic import ValidationError
+from pydantic import ValidationError, EmailError
 from datetime import datetime, timezone
 
 from app.schemas import (
     LoginRequest,
+    TokenResponse,
     UserCreate,
+    UserUpdate,
+    UserResponse,
     PasswordResetRequest,
     PasswordResetConfirm,
     ChangePasswordRequest,
     NotificationCreate,
     IncidentCreate,
 )
-from app.models import UserRole, AlertChannel, IncidentSeverity, IncidentStatus
+from app.models import UserRole, AlertChannel, IncidentSeverity
 
 
 # =============================================================================

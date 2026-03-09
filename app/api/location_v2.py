@@ -12,8 +12,9 @@ import time
 import asyncio
 import logging
 from typing import Optional, List, Dict, Any
-from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
+from datetime import datetime, timezone
+from fastapi import APIRouter, HTTPException, Query, Request, BackgroundTasks
+from pydantic import BaseModel, Field, validator
 from app.config import settings
 from app.core.location_cache import get_location_cache, LocationCache
 from app.tasks import fetch_location_autocomplete_task
