@@ -79,6 +79,26 @@ def _ensure_user_location_columns():
         db.close()
 
 
+def _ensure_audit_log_user_email():
+    """Add user_email column to audit_logs table if it doesn't exist."""
+    db = SessionLocal()
+    try:
+        result = db.execute(
+            text("SELECT column_name FROM information_schema.columns WHERE table_name='audit_logs' AND column_name='user_email'")
+        ).fetchone()
+        if not result:
+            db.execute(text("ALTER TABLE audit_logs ADD COLUMN user_email VARCHAR(255)"))
+            db.commit()
+            logger.info("Added user_email column to audit_logs table")
+        else:
+            logger.info("audit_logs table already has user_email column")
+    except Exception as e:
+        logger.error(f"Error adding audit_logs user_email column: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Initialize Redis cache for location autocomplete
@@ -100,6 +120,10 @@ async def lifespan(app: FastAPI):
 
     # Ensure User table has latitude/longitude columns
     _ensure_user_location_columns()
+
+    # Ensure audit_logs table has user_email column
+    logger.info("Ensuring audit_logs table has user_email column...")
+    _ensure_audit_log_user_email()
 
     # Seed default super admin if no users exist
     db = SessionLocal()
