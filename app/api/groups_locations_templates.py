@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import or_
 from typing import Optional, List
 from app.database import get_db
-from app.models import Group, GroupType, Location, NotificationTemplate, User, AuditLog, UserLocation, UserLocationStatus
+from app.models import Group, GroupType, Location, NotificationTemplate, User, AuditLog, UserLocation, UserLocationStatus, UserRole
 from app.schemas import (
     GroupCreate, GroupUpdate, GroupResponse, GroupDetailResponse, GroupMemberAdd,
     LocationCreate, LocationUpdate, LocationResponse,
@@ -24,9 +24,17 @@ def list_groups(
     search: Optional[str] = None,
     type: Optional[GroupType] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_manager)
+    current_user: User = Depends(get_current_user)
 ):
     query = db.query(Group).filter(Group.is_active == True)
+    
+    # Filter groups based on user role:
+    # - Admin/Super Admin: see all groups
+    # - Manager: see only groups they are members of
+    # - Viewer: see only groups they are members of
+    if current_user.role not in [UserRole.SUPER_ADMIN, UserRole.ADMIN]:
+        query = query.join(Group.members).filter(User.id == current_user.id)
+    
     if search:
         query = query.filter(Group.name.ilike(f"%{search}%"))
     if type:
@@ -82,7 +90,7 @@ def create_group(
 def get_group(
     group_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_manager)
+    current_user: User = Depends(get_current_user)
 ):
     # Check both existence AND active status (prevent access to soft-deleted groups)
     group = db.query(Group).filter(
@@ -91,6 +99,17 @@ def get_group(
     ).first()
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
+    
+    # Filter access based on user role:
+    # - Admin/Super Admin: can view any group
+    # - Manager/Viewer: can only view groups they are members of
+    if current_user.role not in [UserRole.SUPER_ADMIN, UserRole.ADMIN]:
+        if current_user not in group.members:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only view groups you are a member of"
+            )
+    
     return group
 
 
@@ -168,11 +187,21 @@ def add_members(
     group_id: int,
     data: GroupMemberAdd,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_manager)
 ):
     group = db.query(Group).filter(Group.id == group_id).first()
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
+    
+    # Managers can only add members to groups they are part of
+    # Admin/Super Admin can add members to any group
+    if current_user.role not in [UserRole.SUPER_ADMIN, UserRole.ADMIN]:
+        if current_user not in group.members:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only add members to groups you are a member of"
+            )
+    
     users = db.query(User).filter(User.id.in_(data.user_ids)).all()
     existing_ids = {m.id for m in group.members}
     for u in users:
