@@ -323,15 +323,138 @@ class TestCommandInjection:
         csv_content = """first_name,last_name,email,phone,department,title,employee_id,role
 John,Doe,john@example.com,+1234567890,Engineering,Developer,EMP001,viewer
 ; rm -rf /,Test,test@example.com,+1234567890,IT,Admin,EMP002,admin"""
-        
+
         response = admin_client.post(
             "/api/v1/users/import/csv",
             content=csv_content,
             headers={"Content-Type": "text/csv"}
         )
-        
+
         # Should parse CSV safely
         assert response.status_code != 500
+
+
+# =============================================================================
+# CSV INJECTION (FORMULA INJECTION) TESTS
+# =============================================================================
+
+class TestCSVInjection:
+    """Test CSV injection (formula injection) prevention."""
+
+    def test_csv_injection_equals_sign(self, admin_client):
+        """CSV injection with = sign should be sanitized."""
+        csv_content = """first_name,last_name,email,phone,department,title,employee_id,role
+=cmd|'/C calc'!A0,Test,test1@example.com,+1234567890,IT,Admin,EMP001,admin"""
+
+        response = admin_client.post(
+            "/api/v1/users/import/csv",
+            content=csv_content,
+            headers={"Content-Type": "text/csv"}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["created"] == 1
+        # Verify the first_name was sanitized (should start with ')
+        assert "'" in data["created_users"][0]["first_name"]
+
+    def test_csv_injection_plus_sign(self, admin_client):
+        """CSV injection with + sign should be sanitized."""
+        csv_content = """first_name,last_name,email,phone,department,title,employee_id,role
++cmd|'/C calc'!A0,Test,test2@example.com,+1234567890,IT,Admin,EMP002,admin"""
+
+        response = admin_client.post(
+            "/api/v1/users/import/csv",
+            content=csv_content,
+            headers={"Content-Type": "text/csv"}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["created"] == 1
+        # Verify the first_name was sanitized (should start with ')
+        assert "'" in data["created_users"][0]["first_name"]
+
+    def test_csv_injection_minus_sign(self, admin_client):
+        """CSV injection with - sign should be sanitized."""
+        csv_content = """first_name,last_name,email,phone,department,title,employee_id,role
+-cmd|'/C calc'!A0,Test,test3@example.com,+1234567890,IT,Admin,EMP003,admin"""
+
+        response = admin_client.post(
+            "/api/v1/users/import/csv",
+            content=csv_content,
+            headers={"Content-Type": "text/csv"}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["created"] == 1
+        # Verify the first_name was sanitized (should start with ')
+        assert "'" in data["created_users"][0]["first_name"]
+
+    def test_csv_injection_at_sign(self, admin_client):
+        """CSV injection with @ sign should be sanitized."""
+        csv_content = """first_name,last_name,email,phone,department,title,employee_id,role
+@SUM(A1:A10),Test,test4@example.com,+1234567890,IT,Admin,EMP004,admin"""
+
+        response = admin_client.post(
+            "/api/v1/users/import/csv",
+            content=csv_content,
+            headers={"Content-Type": "text/csv"}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["created"] == 1
+        # Verify the first_name was sanitized (should start with ')
+        assert "'" in data["created_users"][0]["first_name"]
+
+    def test_csv_injection_department_field(self, admin_client):
+        """CSV injection in department field should be sanitized."""
+        csv_content = """first_name,last_name,email,phone,department,title,employee_id,role
+Normal,User,test5@example.com,+1234567890,=cmd|'/C calc'!A0,Developer,EMP005,viewer"""
+
+        response = admin_client.post(
+            "/api/v1/users/import/csv",
+            content=csv_content,
+            headers={"Content-Type": "text/csv"}
+        )
+
+        assert response.status_code == 200
+        # Should successfully import with sanitized department
+
+    def test_csv_injection_mime_type_validation(self, admin_client):
+        """CSV import should validate MIME type."""
+        csv_content = """first_name,last_name,email,role
+Test,User,test@example.com,viewer"""
+
+        # Try with wrong MIME type
+        response = admin_client.post(
+            "/api/v1/users/import/csv",
+            content=csv_content,
+            headers={"Content-Type": "text/plain"}
+        )
+
+        assert response.status_code == 400
+        assert "Invalid file type" in response.json()["detail"]
+
+    def test_csv_injection_normal_data_unchanged(self, admin_client):
+        """Normal data without formula characters should not be modified."""
+        csv_content = """first_name,last_name,email,phone,department,title,employee_id,role
+John,Doe,john.doe@example.com,+1234567890,Engineering,Software Developer,EMP006,viewer"""
+
+        response = admin_client.post(
+            "/api/v1/users/import/csv",
+            content=csv_content,
+            headers={"Content-Type": "text/csv"}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["created"] == 1
+        # Normal names should not have quotes added
+        assert data["created_users"][0]["first_name"] == "John"
+        assert data["created_users"][0]["last_name"] == "Doe"
 
     def test_command_in_location_name(self, authenticated_client):
         """Command injection in location name should fail."""

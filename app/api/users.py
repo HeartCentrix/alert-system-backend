@@ -342,14 +342,16 @@ async def import_users_csv(
 
     for i, row in enumerate(rows, start=2):
         try:
+            # Sanitize all text fields to prevent CSV injection
             email = row.get('email', '').strip().lower()
             if not email:
                 errors.append(f"Row {i}: Email is required")
                 failed += 1
                 continue
 
-            first_name = row.get('first_name', '').strip()
-            last_name = row.get('last_name', '').strip()
+            # Sanitize formula characters in all text fields
+            first_name = _sanitize_formula_characters(row.get('first_name', '').strip())
+            last_name = _sanitize_formula_characters(row.get('last_name', '').strip())
             if not first_name or not last_name:
                 errors.append(f"Row {i}: first_name and last_name are required")
                 failed += 1
@@ -377,13 +379,13 @@ async def import_users_csv(
                     failed += 1
                     continue
 
-                # Update user fields (changes are persisted on commit below)
+                # Update user fields with sanitization (changes are persisted on commit below)
                 existing.first_name = first_name
                 existing.last_name = last_name
-                existing.phone = row.get('phone', '').strip() or existing.phone
-                existing.department = row.get('department', '').strip() or existing.department
-                existing.title = row.get('title', '').strip() or existing.title
-                existing.employee_id = row.get('employee_id', '').strip() or existing.employee_id
+                existing.phone = _sanitize_formula_characters(row.get('phone', '').strip()) or existing.phone
+                existing.department = _sanitize_formula_characters(row.get('department', '').strip()) or existing.department
+                existing.title = _sanitize_formula_characters(row.get('title', '').strip()) or existing.title
+                existing.employee_id = _sanitize_formula_characters(row.get('employee_id', '').strip()) or existing.employee_id
                 updated += 1
 
                 # Track for batch commit
@@ -396,10 +398,10 @@ async def import_users_csv(
                     hashed_password=hash_password(default_password),
                     first_name=first_name,
                     last_name=last_name,
-                    phone=row.get('phone', '').strip(),
-                    department=row.get('department', '').strip(),
-                    title=row.get('title', '').strip(),
-                    employee_id=row.get('employee_id', '').strip() or None,
+                    phone=_sanitize_formula_characters(row.get('phone', '').strip()),
+                    department=_sanitize_formula_characters(row.get('department', '').strip()),
+                    title=_sanitize_formula_characters(row.get('title', '').strip()),
+                    employee_id=_sanitize_formula_characters(row.get('employee_id', '').strip()) or None,
                     role=role,
                     is_active=True
                 )
