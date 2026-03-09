@@ -10,12 +10,12 @@ Tests cover:
 """
 import pytest
 from datetime import datetime, timezone
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.exc import IntegrityError
 
 from app.models import (
     User, UserRole, Location, Group, Notification,
-    Incident, NotificationStatus, DeliveryLog, AlertChannel,
-    UserLocation, UserLocationAssignmentType, UserLocationStatus
+    NotificationStatus, DeliveryLog, AlertChannel,
+    UserLocation, UserLocationAssignmentType, UserLocationStatus, DeliveryStatus
 )
 from app.core.security import hash_password
 

@@ -10,7 +10,7 @@ Tests cover:
 - Idempotency
 """
 import pytest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 from datetime import datetime, timezone
 
 from app.tasks import (
@@ -21,8 +21,7 @@ from app.tasks import (
     _update_notification_status,
 )
 from app.models import (
-    Notification, NotificationStatus, DeliveryLog, DeliveryStatus,
-    User, Group, AlertChannel, UserRole
+    Notification, NotificationStatus, User, Group, AlertChannel
 )
 
 

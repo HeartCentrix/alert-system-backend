@@ -12,11 +12,11 @@ This module provides shared fixtures for all tests including:
 import os
 import pytest
 import asyncio
-from typing import Generator, Optional, AsyncGenerator
+from typing import Generator
 from datetime import datetime, timedelta, timezone
-from unittest.mock import Mock, MagicMock, AsyncMock, patch
+from unittest.mock import MagicMock, AsyncMock, patch
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import StaticPool
 

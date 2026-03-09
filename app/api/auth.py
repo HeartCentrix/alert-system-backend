@@ -60,7 +60,8 @@ def login(request: LoginRequest, req: Request, db: Session = Depends(get_db)):
                 )
     
     user = db.query(User).filter(
-        User.email == request.email
+        User.email == request.email,
+        User.deleted_at.is_(None)
     ).first()
 
     # Check if user exists
@@ -151,17 +152,13 @@ def refresh_token(request: RefreshRequest, db: Session = Depends(get_db)):
     # Check token in DB
     rt = db.query(RefreshToken).filter(
         RefreshToken.token == request.refresh_token,
-        RefreshToken.revoked == False
+        RefreshToken.revoked.is_(False)
     ).first()
 
     if not rt or rt.expires_at < datetime.now(timezone.utc):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token expired")
 
-    # Check if user exists and is active
-    user = db.query(User).filter(
-        User.id == rt.user_id,
-        User.is_active == True
-    ).first()
+    user = db.query(User).filter(User.id == rt.user_id, User.is_active.is_(True)).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
@@ -222,7 +219,8 @@ def forgot_password(request: PasswordResetRequest, req: Request, db: Session = D
     
     # Find user (case-insensitive email lookup)
     user = db.query(User).filter(
-        User.email == email_normalized
+        User.email == email_normalized,
+        User.deleted_at.is_(None)
     ).first()
     
     # Always return the same message to prevent email enumeration

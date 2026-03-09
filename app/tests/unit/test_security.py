@@ -20,7 +20,6 @@ from app.core.security import (
     ALGORITHM,
 )
 from app.config import settings
-from app.models import UserRole
 
 
 # =============================================================================

@@ -15,7 +15,7 @@ import redis.asyncio as redis
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
-from app.models import Location, User, UserLocation, UserLocationAssignmentType, UserLocationStatus, UserLocationHistory
+from app.models import Location, User, UserLocation, UserLocationAssignmentType, UserLocationStatus
 from app.config import settings
 
 
@@ -137,12 +137,12 @@ def calculate_distance_batch(
     """
     results = []
     user_lat_rad = math.radians(user_coords.latitude)
-    user_lon_rad = math.radians(user_coords.longitude)
+    math.radians(user_coords.longitude)
     
     for loc_id, loc_name, loc_lat, loc_lon, radius in locations:
         # Convert location coords to radians
         loc_lat_rad = math.radians(loc_lat)
-        loc_lon_rad = math.radians(loc_lon)
+        math.radians(loc_lon)
         
         # Calculate deltas
         delta_lat = math.radians(loc_lat - user_coords.latitude)

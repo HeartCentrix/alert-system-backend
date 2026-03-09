@@ -5,14 +5,9 @@ Run with: pytest app/tests/test_location_v2.py -v
 """
 import pytest
 import time
-from unittest.mock import patch, MagicMock, AsyncMock
-from datetime import datetime, timezone
+import asyncio
 from app.core.location_cache import (
-    LocationCache, 
-    normalize_query, 
-    generate_cache_key,
-    init_location_cache,
-    close_location_cache,
+    LocationCache,
 )
 
 
@@ -271,7 +266,6 @@ class TestPerformance:
     
     def test_cache_hit_latency(self, cache):
         """Test cache hit latency is under 10ms."""
-        import time
         
         async def run_test():
             # Warm up cache
@@ -288,7 +282,6 @@ class TestPerformance:
     
     def test_cache_normalization_speed(self):
         """Test query normalization is fast."""
-        import time
         
         iterations = 10000
         query = "  Empire State Building, New York, NY  "
