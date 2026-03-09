@@ -41,7 +41,7 @@ def list_users(
     role: Optional[UserRole] = None,
     is_active: Optional[bool] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_manager)
+    current_user: User = Depends(get_current_user)
 ):
     query = db.query(User)
 

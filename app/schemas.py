@@ -69,6 +69,20 @@ class UserUpdate(BaseModel):
     preferred_channels: Optional[List[AlertChannel]] = None
 
 
+class UserProfileUpdate(BaseModel):
+    """Schema for users to update their own profile.
+    
+    Restricts updating sensitive fields like role, is_active, employee_id.
+    """
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    phone: Optional[str] = None
+    department: Optional[str] = None
+    title: Optional[str] = None
+    location_id: Optional[int] = None
+    preferred_channels: Optional[List[AlertChannel]] = None
+
+
 class UserResponse(BaseModel):
     id: int
     email: str

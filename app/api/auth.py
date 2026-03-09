@@ -8,7 +8,8 @@ from app.database import get_db
 from app.models import User, RefreshToken, AuditLog, UserRole, LoginAttempt
 from app.schemas import (
     LoginRequest, TokenResponse, RefreshRequest, UserResponse,
-    PasswordResetRequest, PasswordResetConfirm, ChangePasswordRequest
+    PasswordResetRequest, PasswordResetConfirm, ChangePasswordRequest,
+    UserProfileUpdate
 )
 from app.core.security import (
     verify_password, hash_password, create_access_token,
@@ -294,6 +295,35 @@ def change_password(
 
 @router.get("/me", response_model=UserResponse)
 def get_me(current_user: User = Depends(get_current_user)):
+    return current_user
+
+
+@router.put("/me", response_model=UserResponse)
+def update_my_profile(
+    data: UserProfileUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update your own profile.
+    
+    Users can update their personal information but cannot modify:
+    - role (cannot escalate privileges)
+    - is_active (cannot reactivate deactivated accounts)
+    - employee_id (managed by admin only)
+    """
+    # Use exclude_unset=True to only update fields that were explicitly provided
+    for field, value in data.model_dump(exclude_unset=True).items():
+        setattr(current_user, field, value)
+
+    db.add(AuditLog(
+        user_id=current_user.id,
+        action="update_own_profile",
+        resource_type="user",
+        resource_id=current_user.id,
+        details={"updated_fields": list(data.model_dump(exclude_unset=True).keys())}
+    ))
+    db.commit()
+    db.refresh(current_user)
     return current_user
 
 
