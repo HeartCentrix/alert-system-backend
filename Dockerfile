@@ -15,13 +15,21 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# 1. Create a non-root user with fixed UID/GID
+RUN groupadd --gid 1001 appgroup && \
+    useradd --uid 1001 --gid appgroup --shell /bin/false --create-home appuser
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /install /usr/local
 
-COPY . .
+# 2. Copy application code and set ownership
+COPY --chown=appuser:appgroup . .
+
+# 3. Switch to non-root user BEFORE CMD
+USER appuser
 
 EXPOSE 8000
 

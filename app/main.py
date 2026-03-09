@@ -239,6 +239,8 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     # Only allow necessary headers
     allow_headers=["Authorization", "Content-Type", "Accept"],
+    # Expose Retry-After header for rate limiting countdown timer
+    expose_headers=["Retry-After"],
 )
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 

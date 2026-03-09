@@ -36,6 +36,23 @@ IP_RATE_LIMIT_MAX_ATTEMPTS = 20  # Max attempts per IP across all accounts
 IP_RATE_LIMIT_WINDOW_SECONDS = 600  # 10 minutes
 
 
+def format_lockout_time(seconds: int) -> str:
+    """Format lockout duration in human-readable format."""
+    if seconds < 60:
+        return f"{seconds} seconds"
+    elif seconds < 3600:
+        mins = seconds // 60
+        return f"{mins} minute{'s' if mins > 1 else ''}"
+    elif seconds < 86400:
+        hours = seconds // 3600
+        mins = (seconds % 3600) // 60
+        if mins > 0:
+            return f"{hours} hour{'s' if hours > 1 else ''} {mins} minute{'s' if mins > 1 else ''}"
+        return f"{hours} hour{'s' if hours > 1 else ''}"
+    days = seconds // 86400
+    return f"{days} day{'s' if days > 1 else ''}"
+
+
 def _get_redis_client() -> redis.Redis:
     """
     Get a synchronous Redis client for login rate limiting.
@@ -248,9 +265,10 @@ def login(request: LoginRequest, req: Request, db: Session = Depends(get_db)):
     # This prevents enumeration attacks and applies across ALL accounts
     ip_allowed, ip_retry_after = check_ip_rate_limit(client_ip)
     if not ip_allowed:
+        logger.warning(f"IP rate limit exceeded for {client_ip}, retry_after={ip_retry_after}s")
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Invalid credentials",
+            detail="Too many login attempts. Please try again later.",
             headers={"Retry-After": str(ip_retry_after)}
         )
 
@@ -268,9 +286,10 @@ def login(request: LoginRequest, req: Request, db: Session = Depends(get_db)):
         if not account_allowed:
             # Record this attempt for IP tracking
             record_ip_attempt(client_ip)
+            logger.warning(f"Account lockout for user {user.id}, retry_after={account_retry_after}s")
             raise HTTPException(
                 status_code=status.HTTP_423_LOCKED,
-                detail="Invalid credentials",
+                detail=f"Account temporarily locked. Try again in {format_lockout_time(account_retry_after)}.",
                 headers={"Retry-After": str(account_retry_after)}
             )
     
@@ -538,7 +557,7 @@ def get_login_attempts(
     current_user: User = Depends(require_admin)
 ):
     """View recent login attempts (for security monitoring).
-    
+
     SECURITY: Restricted to ADMIN role only (CWE-639 IDOR remediation).
     """
     attempts = db.query(LoginAttempt).order_by(
@@ -555,3 +574,23 @@ def get_login_attempts(
         }
         for a in attempts
     ]
+
+
+@router.post("/debug/reset-rate-limits")
+def reset_rate_limits(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Debug endpoint to reset all rate limits. ADMIN only.
+
+    Remove in production or restrict to super_admin only.
+    """
+    r = _get_redis_client()
+    
+    # Delete all lockout keys
+    keys = r.keys("lockout:*")
+    if keys:
+        r.delete(*keys)
+    
+    return {"message": f"Deleted {len(keys)} rate limit keys"}
