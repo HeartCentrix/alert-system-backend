@@ -2,7 +2,7 @@ import secrets
 import time
 import logging
 from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, func
 import redis
@@ -17,7 +17,7 @@ from app.core.security import (
     verify_password, hash_password, create_access_token,
     create_refresh_token, decode_token
 )
-from app.core.deps import get_current_user
+from app.core.deps import get_current_user, require_admin
 from app.services.messaging import email_service
 from app.config import settings
 
@@ -532,14 +532,18 @@ def update_my_profile(
 
 @router.get("/login-attempts")
 def get_login_attempts(
-    limit: int = 50,
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_admin)
 ):
-    """View recent login attempts (for security monitoring)."""
+    """View recent login attempts (for security monitoring).
+    
+    SECURITY: Restricted to ADMIN role only (CWE-639 IDOR remediation).
+    """
     attempts = db.query(LoginAttempt).order_by(
         desc(LoginAttempt.attempted_at)
-    ).limit(limit).all()
+    ).offset(offset).limit(limit).all()
 
     return [
         {
