@@ -4,7 +4,6 @@ Unit Tests for Messaging Services
 Tests cover:
 - Twilio SMS service
 - Twilio Voice service
-- Twilio WhatsApp service
 - AWS SES Email service
 - Webhook services (Slack, Teams)
 - Mock mode behavior
@@ -75,23 +74,10 @@ class TestTwilioService:
             assert result["status"] == "sent"
 
     def test_send_whatsapp_success(self, mock_twilio: MagicMock):
-        """WhatsApp message sending should succeed."""
+        """WhatsApp has been removed."""
         result = twilio_service.send_whatsapp("+1234567890", "Test WhatsApp message")
-        assert result["status"] == "sent"
-        assert "sid" in result
-        mock_twilio.send_whatsapp.assert_called_once()
-
-    def test_send_whatsapp_formats_number(self, mock_twilio: MagicMock):
-        """WhatsApp should format phone number correctly."""
-        twilio_service.send_whatsapp("+1234567890", "Test")
-        # Should prepend whatsapp: if not present
-        call_args = mock_twilio.send_whatsapp.call_args
-        assert call_args[0][0] == "+1234567890"
-
-    def test_send_whatsapp_already_formatted(self, mock_twilio: MagicMock):
-        """WhatsApp with already formatted number should work."""
-        result = twilio_service.send_whatsapp("whatsapp:+1234567890", "Test")
-        assert result["status"] == "sent"
+        assert result["status"] == "failed"
+        assert "disabled" in result["error"]
 
     def test_voice_call_success(self, mock_twilio: MagicMock):
         """Voice call should succeed."""
@@ -362,23 +348,19 @@ class TestMessagingIntegration:
         # SMS
         sms_result = twilio_service.send_sms("+1234567890", "Alert!")
         assert sms_result["status"] == "sent"
-        
+
         # Email
         email_result = email_service.send_email("test@example.com", "Alert!", "Body")
         assert email_result["status"] == "sent"
-        
-        # WhatsApp
-        wa_result = twilio_service.send_whatsapp("+1234567890", "Alert!")
-        assert wa_result["status"] == "sent"
-        
+
         # Voice
         voice_result = twilio_service.make_voice_call("+1234567890", "Alert!")
         assert voice_result["status"] == "initiated"
-        
+
         # Slack
         slack_result = webhook_service.send_slack("https://hooks.slack.com/test", "Alert!", "Title")
         assert slack_result["status"] == "sent"
-        
+
         # Teams
         teams_result = webhook_service.send_teams("https://webhook.test", "Alert!", "Title")
         assert teams_result["status"] == "sent"

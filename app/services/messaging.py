@@ -79,20 +79,9 @@ class TwilioService:
             return {"error": str(e), "status": "failed"}
 
     def send_whatsapp(self, to: str, body: str) -> dict:
-        if not self.client:
-            logger.warning(f"[MOCK WHATSAPP] To: {to} | Body: {body[:50]}...")
-            return {"sid": "MOCK_WA_SID", "status": "sent", "mock": True}
-        try:
-            whatsapp_to = f"whatsapp:{to}" if not to.startswith("whatsapp:") else to
-            message = self.client.messages.create(
-                body=body,
-                from_=settings.TWILIO_WHATSAPP_FROM,
-                to=whatsapp_to
-            )
-            return {"sid": message.sid, "status": message.status}
-        except Exception as e:
-            logger.error(f"WhatsApp failed to {to}: {e}")
-            return {"error": str(e), "status": "failed"}
+        """WhatsApp sending has been removed."""
+        logger.warning(f"WhatsApp sending is disabled. To: {to} | Body: {body[:50]}...")
+        return {"error": "WhatsApp is disabled", "status": "failed"}
 
 
 # ─── EMAIL SERVICE (AWS SES) ──────────────────────────────────────────────────
@@ -193,7 +182,7 @@ IMPORTANT SECURITY NOTES:
 - This is a temporary password - do not share it with anyone
 - If you didn't expect this email, contact your administrator
 
-TM Alert sends you critical emergency notifications via SMS, Email, Voice, and WhatsApp.
+TM Alert sends you critical emergency notifications via SMS, Email, and Voice.
 
 Stay safe,
 TM Alert Team
@@ -208,7 +197,7 @@ Taylor Morrison"""
         <div style="background: white; padding: 30px; margin: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
             <h2 style="color: #1e293b; margin-top: 0;">Welcome to TM Alert!</h2>
             <p style="color: #475569;">Hi {safe_user_name},</p>
-            <p style="color: #475569;">You've been added to the Taylor Morrison emergency notification system. You'll receive critical emergency alerts via SMS, Email, Voice, and WhatsApp.</p>
+            <p style="color: #475569;">You've been added to the Taylor Morrison emergency notification system. You'll receive critical emergency alerts via SMS, Email, and Voice.</p>
 
             <div style="background: #f8fafc; border: 2px solid #e2e8f0; border-radius: 8px; padding: 20px; margin: 25px 0;">
                 <h3 style="color: #1e40af; margin-top: 0; font-size: 16px;">📧 Your Login Credentials</h3>

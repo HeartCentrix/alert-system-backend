@@ -510,9 +510,8 @@ def mock_twilio() -> Generator[MagicMock, None, None]:
     """Mock Twilio service."""
     twilio_mock = MagicMock()
     twilio_mock.send_sms = MagicMock(return_value={"sid": "MOCK_SID", "status": "sent"})
-    twilio_mock.send_whatsapp = MagicMock(return_value={"sid": "MOCK_WA_SID", "status": "sent"})
     twilio_mock.make_voice_call = MagicMock(return_value={"sid": "MOCK_VOICE_SID", "status": "initiated"})
-    
+
     with patch("app.tasks.twilio_service", twilio_mock):
         with patch("app.services.messaging.twilio_service", twilio_mock):
             yield twilio_mock

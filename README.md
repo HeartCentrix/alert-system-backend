@@ -6,7 +6,7 @@
 ## Overview
 
 TM Alert is a web-based emergency notification platform that enables Taylor Morrison to send
-multi-channel alerts (SMS, Email, Voice, WhatsApp, Teams, Slack) to employees during
+multi-channel alerts (SMS, Email, Voice, Teams, Slack) to employees during
 emergencies, with two-way safety check-in responses.
 
 ---
@@ -17,7 +17,7 @@ emergencies, with two-way safety check-in responses.
 - **Database**: PostgreSQL 16
 - **Cache / Queue Broker**: Redis 7
 - **Background Tasks**: Celery
-- **SMS / Voice / WhatsApp**: Twilio
+- **SMS / Voice**: Twilio
 - **Email**: AWS SES
 - **Auth**: JWT (email + password)
 

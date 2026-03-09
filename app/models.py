@@ -51,7 +51,6 @@ class AlertChannel(str, enum.Enum):
     SMS = "sms"
     EMAIL = "email"
     VOICE = "voice"
-    WHATSAPP = "whatsapp"
     SLACK = "slack"
     TEAMS = "teams"
     WEB = "web"
@@ -106,7 +105,6 @@ class User(Base):
     first_name = Column(String(100), nullable=False)
     last_name = Column(String(100), nullable=False)
     phone = Column(String(20))
-    whatsapp_number = Column(String(20))
     department = Column(String(100))
     title = Column(String(100))
     employee_id = Column(String(50), unique=True)
@@ -231,7 +229,7 @@ class Notification(Base):
     title = Column(String(500), nullable=False)
     message = Column(Text, nullable=False)
     subject = Column(String(500))  # for email
-    channels = Column(JSON, nullable=False)  # ["sms","email","voice","whatsapp","slack","teams"]
+    channels = Column(JSON, nullable=False)  # ["sms","email","voice","slack","teams"]
     status = Column(Enum(NotificationStatus), default=NotificationStatus.DRAFT)
     target_all = Column(Boolean, default=False)
     scheduled_at = Column(DateTime(timezone=True))

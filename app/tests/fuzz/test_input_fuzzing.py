@@ -185,7 +185,7 @@ class TestNotificationFuzzing:
     @given(
         # Fuzz channels field
         channels=st.one_of(
-            st.lists(st.sampled_from(["sms", "email", "voice", "whatsapp"])),
+            st.lists(st.sampled_from(["sms", "email", "voice"])),
             st.just([]),
             st.just(["invalid"]),
             st.none(),

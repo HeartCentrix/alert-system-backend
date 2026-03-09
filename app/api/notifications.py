@@ -295,10 +295,10 @@ def get_delivery_logs(
     current_user: User = Depends(get_current_user)
 ):
     """Get delivery logs for a notification with optional filtering.
-    
+
     Args:
         notification_id: ID of the notification
-        channel: Filter by delivery channel (sms, email, voice, whatsapp, web)
+        channel: Filter by delivery channel (sms, email, voice, web)
         status: Filter by delivery status (pending, sent, delivered, failed, bounced)
     """
     query = db.query(DeliveryLog).filter(DeliveryLog.notification_id == notification_id)

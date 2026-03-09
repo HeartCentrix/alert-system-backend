@@ -222,15 +222,6 @@ class TestSendToChannel:
         # Verify voice call was made
         mock_twilio.make_voice_call.assert_called()
 
-    def test_send_whatsapp_channel(
-        self, db_session, test_user, test_notification, mock_twilio
-    ):
-        """WhatsApp channel should send correctly."""
-        _send_to_channel(test_notification.id, test_user.id, AlertChannel.WHATSAPP)
-        
-        # Verify WhatsApp was sent
-        mock_twilio.send_whatsapp.assert_called()
-
     def test_send_channel_idempotency(
         self, db_session, test_user, test_notification, mock_twilio
     ):

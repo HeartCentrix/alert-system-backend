@@ -121,16 +121,15 @@ class TestUserCreate:
             first_name="Test",
             last_name="User",
             phone="+1234567890",
-            whatsapp_number="+0987654321",
             department="Engineering",
             title="Developer",
             employee_id="EMP001",
             role=UserRole.MANAGER,
             location_id=1,
-            preferred_channels=["sms", "email", "whatsapp"]
+            preferred_channels=["sms", "email"]
         )
         assert user.role == UserRole.MANAGER
-        assert user.preferred_channels == ["sms", "email", "whatsapp"]
+        assert user.preferred_channels == ["sms", "email"]
 
     def test_user_create_invalid_email(self):
         """Invalid email should fail."""
