@@ -18,6 +18,9 @@ router = APIRouter(prefix="/users", tags=["Users / People"])
 # Maximum allowed CSV file size: 5MB
 MAX_CSV_FILE_SIZE = 5 * 1024 * 1024
 
+# Maximum allowed CSV rows per import request
+MAX_CSV_ROWS = 1000
+
 
 def _prevent_privilege_escalation(current_user: User, target_role: Optional[UserRole]):
     """Prevent ADMIN users from creating or updating SUPER_ADMIN users.
@@ -29,6 +32,30 @@ def _prevent_privilege_escalation(current_user: User, target_role: Optional[User
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only SUPER_ADMIN can create or update SUPER_ADMIN users"
         )
+
+
+def _sanitize_formula_characters(value: str) -> str:
+    """
+    Sanitize formula characters to prevent CSV injection attacks.
+    
+    CSV injection (DDE/Formula injection) occurs when spreadsheet applications
+    interpret cell values starting with =, +, -, or @ as formulas.
+    This can lead to data exfiltration or remote code execution.
+    
+    Mitigation: Prefix dangerous characters with a single quote (') which forces
+    the spreadsheet to treat the value as a string literal.
+    
+    OWASP Reference: https://owasp.org/www-community/attacks/CSV_Injection
+    """
+    if not value:
+        return value
+    
+    # Check if value starts with formula-triggering characters
+    if value and value[0] in ['=', '+', '-', '@']:
+        # Prefix with single quote to escape formula interpretation
+        return "'" + value
+    
+    return value
 
 
 @router.get("", response_model=UserListResponse)
@@ -274,8 +301,17 @@ async def import_users_csv(
 
     Sends welcome emails with login credentials to newly created users.
     """
+    # Validate file extension
     if not file.filename.endswith('.csv'):
         raise HTTPException(status_code=400, detail="File must be a CSV")
+
+    # Validate MIME type (not just extension) to prevent file type spoofing
+    allowed_mime_types = ['text/csv', 'application/vnd.ms-excel', 'application/csv']
+    if file.content_type and file.content_type not in allowed_mime_types:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid file type. Expected CSV (text/csv), got {file.content_type}"
+        )
 
     # Validate file size to prevent DoS attacks (max 5MB)
     content = await file.read()
@@ -284,7 +320,19 @@ async def import_users_csv(
             status_code=413,
             detail=f"File size exceeds maximum allowed size of {MAX_CSV_FILE_SIZE // (1024 * 1024)}MB"
         )
+    
+    # Parse CSV content
     reader = csv.DictReader(io.StringIO(content.decode('utf-8-sig')))
+    
+    # Convert to list to validate row count
+    rows = list(reader)
+    
+    # Validate row count (max 1,000 rows per request)
+    if len(rows) > MAX_CSV_ROWS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"CSV file exceeds maximum allowed rows of {MAX_CSV_ROWS}. Please split your import into smaller batches."
+        )
 
     created, updated, failed = 0, 0, 0
     errors = []
@@ -292,7 +340,7 @@ async def import_users_csv(
     email_failures = []
     valid_users = []  # Track successfully processed users for batch commit
 
-    for i, row in enumerate(reader, start=2):
+    for i, row in enumerate(rows, start=2):
         try:
             email = row.get('email', '').strip().lower()
             if not email:
