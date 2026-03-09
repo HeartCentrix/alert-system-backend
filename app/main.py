@@ -110,41 +110,57 @@ async def lifespan(app: FastAPI):
         logger.info("Location cache initialized")
     except Exception as e:
         logger.error(f"Failed to initialize location cache: {e}")
-    
+
     # Create all DB tables on startup
     logger.info("Creating database tables...")
-    Base.metadata.create_all(bind=engine)
-    logger.info("Database tables ready")
+    try:
+        Base.metadata.create_all(bind=engine)
+        logger.info("Database tables ready")
+    except Exception as e:
+        logger.error(f"Failed to create database tables: {e}")
 
     # Ensure alertchannel enum has 'web' value
     logger.info("Ensuring alertchannel enum has 'web' value...")
-    ensure_alertchannel_enum()
+    try:
+        ensure_alertchannel_enum()
+    except Exception as e:
+        logger.error(f"Failed to ensure alertchannel enum: {e}")
 
     # Ensure User table has latitude/longitude columns
-    _ensure_user_location_columns()
+    try:
+        _ensure_user_location_columns()
+    except Exception as e:
+        logger.error(f"Failed to ensure user location columns: {e}")
 
     # Ensure audit_logs table has user_email column
     logger.info("Ensuring audit_logs table has user_email column...")
-    _ensure_audit_log_user_email()
+    try:
+        _ensure_audit_log_user_email()
+    except Exception as e:
+        logger.error(f"Failed to ensure audit_logs user_email column: {e}")
 
     # Seed default super admin if no users exist
-    db = SessionLocal()
     try:
-        if db.query(User).count() == 0:
-            admin = User(
-                email="admin@tmalert.com",
-                hashed_password=hash_password("Admin@123456"),
-                first_name="Super",
-                last_name="Admin",
-                role=UserRole.SUPER_ADMIN,
-                is_active=True
-            )
-            db.add(admin)
-            db.commit()
-            logger.info("Default admin created: admin@tmalert.com / Admin@123456")
-    finally:
-        db.close()
+        db = SessionLocal()
+        try:
+            if db.query(User).count() == 0:
+                admin = User(
+                    email="admin@tmalert.com",
+                    hashed_password=hash_password("Admin@123456"),
+                    first_name="Super",
+                    last_name="Admin",
+                    role=UserRole.SUPER_ADMIN,
+                    is_active=True
+                )
+                db.add(admin)
+                db.commit()
+                logger.info("Default admin created: admin@tmalert.com / Admin@123456")
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"Failed to seed default admin: {e}")
 
+    logger.info("Application startup complete")
     yield
     
     # Cleanup: close Redis cache connection
