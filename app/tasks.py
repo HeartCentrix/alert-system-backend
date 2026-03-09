@@ -433,6 +433,10 @@ def _get_recipients(db, notification: Notification) -> List[User]:
             f = group.dynamic_filter
             if f.get("department"):
                 query = query.filter(User.department == f["department"])
+            if f.get("title"):
+                query = query.filter(User.title == f["title"])
+            if f.get("role"):
+                query = query.filter(User.role == f["role"])
             if f.get("location_id"):
                 query = query.filter(User.location_id == f["location_id"])
             users = query.all()

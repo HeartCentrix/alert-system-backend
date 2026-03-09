@@ -66,15 +66,37 @@ def create_group(
         dynamic_filter=data.dynamic_filter,
         created_by_id=current_user.id
     )
-    if data.member_ids:
+    
+    # For dynamic groups, auto-populate members based on dynamic_filter
+    if data.type == GroupType.DYNAMIC and data.dynamic_filter:
+        query = db.query(User).filter(User.is_active == True)
+        f = data.dynamic_filter
+        if f.get("department"):
+            query = query.filter(User.department == f["department"])
+        if f.get("title"):
+            query = query.filter(User.title == f["title"])
+        if f.get("role"):
+            query = query.filter(User.role == f["role"])
+        if f.get("location_id"):
+            query = query.filter(User.location_id == f["location_id"])
+        members = query.all()
+        group.members = members
+    elif data.member_ids:
+        # For static groups, use provided member_ids
         members = db.query(User).filter(User.id.in_(data.member_ids)).all()
         group.members = members
+    
     db.add(group)
     db.add(AuditLog(
         user_id=current_user.id,
         user_email=current_user.email,
         action="create_group",
-        resource_type="group"
+        resource_type="group",
+        details={
+            "group_name": group.name,
+            "group_type": data.type.value,
+            "member_count": len(group.members)
+        }
     ))
     db.commit()
     db.refresh(group)
@@ -127,17 +149,31 @@ def update_group(
     ).first()
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
-    
+
     # Handle member_ids separately (M2M relationship can't be set via setattr)
     member_ids = data.member_ids
     update_data = data.model_dump(exclude_unset=True, exclude={'member_ids'})
-    
+
     # Update regular fields
     for field, value in update_data.items():
         setattr(group, field, value)
-    
-    # Update members if provided (replace entire member list)
-    if member_ids is not None:
+
+    # For dynamic groups, refresh members when dynamic_filter or type changes
+    if group.type == GroupType.DYNAMIC and group.dynamic_filter:
+        query = db.query(User).filter(User.is_active == True)
+        f = group.dynamic_filter
+        if f.get("department"):
+            query = query.filter(User.department == f["department"])
+        if f.get("title"):
+            query = query.filter(User.title == f["title"])
+        if f.get("role"):
+            query = query.filter(User.role == f["role"])
+        if f.get("location_id"):
+            query = query.filter(User.location_id == f["location_id"])
+        members = query.all()
+        group.members = members
+    # Update members if provided (replace entire member list) - for static groups
+    elif member_ids is not None:
         # Validate all user IDs exist
         valid_users = db.query(User).filter(
             User.id.in_(member_ids)
@@ -150,10 +186,10 @@ def update_group(
                 status_code=400,
                 detail=f"Invalid user IDs: {list(invalid_ids)}."
             )
-        
+
         # Replace members list
         group.members = valid_users
-    
+
     db.commit()
     db.refresh(group)
     return GroupResponse(
@@ -230,6 +266,93 @@ def remove_member(
         group.members.remove(user)
         db.commit()
     return {"message": "Member removed"}
+
+
+@groups_router.post("/preview")
+def preview_dynamic_group(
+    data: GroupCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Preview which users will be included in a dynamic group based on the filter criteria.
+    
+    This endpoint helps users see the matching members before creating a dynamic group.
+    """
+    if data.type != GroupType.DYNAMIC:
+        raise HTTPException(
+            status_code=400,
+            detail="Preview is only available for dynamic groups"
+        )
+    
+    if not data.dynamic_filter:
+        raise HTTPException(
+            status_code=400,
+            detail="dynamic_filter is required for preview"
+        )
+    
+    query = db.query(User).filter(User.is_active == True)
+    f = data.dynamic_filter
+    
+    if f.get("department"):
+        query = query.filter(User.department == f["department"])
+    if f.get("title"):
+        query = query.filter(User.title == f["title"])
+    if f.get("role"):
+        query = query.filter(User.role == f["role"])
+    if f.get("location_id"):
+        query = query.filter(User.location_id == f["location_id"])
+    
+    members = query.all()
+    
+    return {
+        "member_count": len(members),
+        "members": [
+            {
+                "id": m.id,
+                "email": m.email,
+                "first_name": m.first_name,
+                "last_name": m.last_name,
+                "full_name": f"{m.first_name} {m.last_name}",
+                "department": m.department,
+                "title": m.title,
+                "role": m.role.value if m.role else None
+            }
+            for m in members
+        ]
+    }
+
+
+@groups_router.get("/filters/options")
+def get_filter_options(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get unique values for dynamic group filter options.
+    
+    Returns unique departments, titles, and roles that can be used to create dynamic groups.
+    """
+    # Get unique departments
+    departments = db.query(User.department).filter(
+        User.department.isnot(None),
+        User.is_active == True
+    ).distinct().all()
+    
+    # Get unique titles
+    titles = db.query(User.title).filter(
+        User.title.isnot(None),
+        User.is_active == True
+    ).distinct().all()
+    
+    # Get all available roles
+    roles = [role.value for role in UserRole]
+    
+    return {
+        "departments": [d[0] for d in departments if d[0]],
+        "titles": [t[0] for t in titles if t[0]],
+        "roles": roles
+    }
 
 
 # ─── LOCATIONS ────────────────────────────────────────────────────────────────
