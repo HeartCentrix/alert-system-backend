@@ -16,7 +16,9 @@ Security:
 import logging
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session, aliased
+from sqlalchemy import select, func, and_, or_
 from sqlalchemy import func, and_
 from typing import Optional, List
 from time import time as current_time
@@ -27,11 +29,12 @@ from app.schemas import (
     UserLocationAssign, UserLocationRemove, UserLocationGeofenceUpdate,
     UserLocationResponse, UserLocationHistoryResponse,
     LocationMemberListResponse, UserLocationHistoryListResponse,
-    UserGeofenceStatus, GeofenceCheckResult
+    UserGeofenceStatus, GeofenceCheckResult, LocationOverlapInfo
 )
 from app.core.deps import get_current_user, require_admin, require_manager
 from app.core.geofence import (
-    check_geofence, validate_coordinates
+    check_geofence, validate_coordinates, validate_geofence_radius,
+    check_location_overlap, get_geo_service
 )
 from app.location_tasks import check_user_geofence_task
 
@@ -105,6 +108,7 @@ def assign_user_to_location(
     - Rate limiting
     """
     # Rate limiting
+    client_ip = request.client.host
     allowed, retry_after = _assignment_limiter.is_allowed(f"assign:{current_user.id}")
     if not allowed:
         raise HTTPException(
@@ -112,12 +116,12 @@ def assign_user_to_location(
             detail=f"Too many assignment requests. Try again in {retry_after} seconds.",
             headers={"Retry-After": str(retry_after)}
         )
-    
+
     # Validate user exists
     user = db.query(User).filter(
         User.id == data.user_id,
-        User.is_active,
-        User.deleted_at is None
+        User.is_active == True,
+        User.deleted_at == None
     ).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found or inactive")
@@ -125,7 +129,7 @@ def assign_user_to_location(
     # Validate location exists
     location = db.query(Location).filter(
         Location.id == data.location_id,
-        Location.is_active
+        Location.is_active == True
     ).first()
     if not location:
         raise HTTPException(status_code=404, detail="Location not found or inactive")
@@ -329,6 +333,7 @@ def update_user_geofence(
     4. Return current status
     """
     # Rate limiting
+    client_ip = request.client.host
     allowed, retry_after = _geofence_update_limiter.is_allowed(f"geofence:{current_user.id}")
     if not allowed:
         raise HTTPException(
@@ -336,23 +341,23 @@ def update_user_geofence(
             detail=f"Too many location updates. Try again in {retry_after} seconds.",
             headers={"Retry-After": str(retry_after)}
         )
-    
+
     # Validate coordinates
     is_valid, error = validate_coordinates(data.latitude, data.longitude)
     if not is_valid:
         raise HTTPException(status_code=400, detail=error)
-    
+
     # Update user's primary location fields
     current_user.latitude = data.latitude
     current_user.longitude = data.longitude
     current_user.updated_at = datetime.now(timezone.utc)
-    
+
     # Trigger async geofence check
     check_user_geofence_task.delay(current_user.id, data.latitude, data.longitude)
-    
+
     # Get current locations for immediate response
     locations = db.query(Location).filter(
-        Location.is_active,
+        Location.is_active == True,
         Location.latitude.isnot(None),
         Location.longitude.isnot(None)
     ).all()
@@ -751,3 +756,5 @@ def _build_history_response(db: Session, history: UserLocationHistory) -> UserLo
         distance_from_center_miles=history.distance_from_center_miles,
         created_at=history.created_at
     )
+# Import UserRole for the IDOR check
+from app.models import UserRole

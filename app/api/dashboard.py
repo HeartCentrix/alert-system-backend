@@ -21,9 +21,9 @@ def get_dashboard_stats(
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = now - timedelta(days=7)
 
-    total_users = db.query(User).filter(User.is_active, User.deleted_at is None).count()
-    total_groups = db.query(Group).filter(Group.is_active).count()
-    total_locations = db.query(Location).filter(Location.is_active).count()
+    total_users = db.query(User).filter(User.is_active.is_(True), User.deleted_at.is_(None)).count()
+    total_groups = db.query(Group).filter(Group.is_active.is_(True)).count()
+    total_locations = db.query(Location).filter(Location.is_active.is_(True)).count()
     active_incidents = db.query(Incident).filter(Incident.status == IncidentStatus.ACTIVE).count()
 
     # Count notifications that were actually dispatched today
@@ -68,7 +68,7 @@ def get_map_data(
 ):
     """Return location data with employee counts for the audience map."""
     from app.models import UserLocation, UserLocationStatus
-    locations = db.query(Location).filter(Location.is_active).all()
+    locations = db.query(Location).filter(Location.is_active.is_(True)).all()
 
     result = []
     for loc in locations:
@@ -92,14 +92,14 @@ def get_map_data(
 
     # Also return users without a location
     unassigned_count = db.query(User).filter(
-        User.location_id is None,
-        User.is_active,
-        User.deleted_at is None
+        User.location_id.is_(None),
+        User.is_active.is_(True),
+        User.deleted_at.is_(None)
     ).count()
 
     return {
         "locations": result,
-        "total_users": sum(loc["user_count"] for loc in result) + unassigned_count,
+        "total_users": sum(l["user_count"] for l in result) + unassigned_count,
         "unassigned_users": unassigned_count
     }
 
@@ -111,6 +111,7 @@ def get_notification_activity(
     current_user: User = Depends(get_current_user)
 ):
     """Daily notification counts for the last N days."""
+    from sqlalchemy import cast, Date
     start = datetime.now(timezone.utc) - timedelta(days=days)
 
     results = db.query(

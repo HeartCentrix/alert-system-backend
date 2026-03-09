@@ -303,14 +303,14 @@ def _get_recipients(db, notification: Notification) -> List[User]:
 
     if notification.target_all:
         users = db.query(User).filter(
-            User.is_active,
-            User.deleted_at is None
+            User.is_active.is_(True),
+            User.deleted_at.is_(None)
         ).all()
         return users
 
     for group in notification.target_groups:
         if group.type == "dynamic" and group.dynamic_filter:
-            query = db.query(User).filter(User.is_active, User.deleted_at is None)
+            query = db.query(User).filter(User.is_active.is_(True), User.deleted_at.is_(None))
             f = group.dynamic_filter
             if f.get("department"):
                 query = query.filter(User.department == f["department"])
@@ -332,8 +332,8 @@ def _get_recipients(db, notification: Notification) -> List[User]:
 
     return db.query(User).filter(
         User.id.in_(recipient_ids),
-        User.is_active,
-        User.deleted_at is None
+        User.is_active.is_(True),
+        User.deleted_at.is_(None)
     ).all()
 
 

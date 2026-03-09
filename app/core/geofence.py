@@ -10,9 +10,12 @@ Production-ready geofencing system with:
 import math
 from typing import List, Tuple, Optional, Dict, Any
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import redis.asyncio as redis
+from sqlalchemy.orm import Session
+from sqlalchemy import select
 
-from app.models import Location, UserLocationAssignmentType, UserLocationStatus
+from app.models import Location, User, UserLocation, UserLocationAssignmentType, UserLocationStatus
 from app.config import settings
 
 

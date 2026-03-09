@@ -1,4 +1,4 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings
 from typing import Optional
 
 
@@ -38,11 +38,9 @@ class Settings(BaseSettings):
     SLACK_DEFAULT_WEBHOOK_URL: str = ""
     TEAMS_DEFAULT_WEBHOOK_URL: str = ""
 
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        case_sensitive=True,
-        extra="ignore"
-    )
+    class Config:
+        env_file = ".env"
+        case_sensitive = True
 
 
 settings = Settings()
