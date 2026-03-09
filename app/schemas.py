@@ -108,6 +108,13 @@ class CSVImportResponse(BaseModel):
     created_users: List[dict] = []  # [{email, first_name, last_name}, ...]
 
 
+class UserBulkDeleteResponse(BaseModel):
+    deleted: int
+    failed: int
+    deleted_ids: List[int]
+    failed_ids: List[int]
+
+
 # ─── LOCATION ─────────────────────────────────────────────────────────────────
 
 class LocationCreate(BaseModel):

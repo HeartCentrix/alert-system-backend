@@ -521,21 +521,20 @@ class TestGetCurrentUserEndpoint:
         
         assert response.status_code == 401
 
-    def test_get_me_deleted_user(
+    def test_get_me_inactive_user(
         self, client: pytest.TestClient, test_user: User, db_session
     ):
-        """Deleted user token should fail."""
-        # Soft delete the user
-        from datetime import datetime, timezone
-        test_user.deleted_at = datetime.now(timezone.utc)
+        """Inactive user token should fail."""
+        # Deactivate the user
+        test_user.is_active = False
         db_session.commit()
-        
-        # Create new token for deleted user
+
+        # Create new token for inactive user
         token = create_access_token({"sub": str(test_user.id), "role": test_user.role.value})
-        
+
         response = client.get(
             "/api/v1/auth/me",
             headers={"Authorization": f"Bearer {token}"}
         )
-        
+
         assert response.status_code == 401

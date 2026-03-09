@@ -116,16 +116,15 @@ def update_group(
     if member_ids is not None:
         # Validate all user IDs exist
         valid_users = db.query(User).filter(
-            User.id.in_(member_ids),
-            User.deleted_at == None
+            User.id.in_(member_ids)
         ).all()
         valid_ids = {u.id for u in valid_users}
         invalid_ids = set(member_ids) - valid_ids
-        
+
         if invalid_ids:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid user IDs: {list(invalid_ids)}. Users must exist and not be deleted."
+                detail=f"Invalid user IDs: {list(invalid_ids)}."
             )
         
         # Replace members list

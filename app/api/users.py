@@ -3,11 +3,11 @@ import csv
 import logging
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
-from typing import Optional
+from sqlalchemy import or_, func
+from typing import Optional, List
 from app.database import get_db
 from app.models import User, UserRole, AuditLog
-from app.schemas import UserCreate, UserUpdate, UserResponse, UserListResponse, CSVImportResponse
+from app.schemas import UserCreate, UserUpdate, UserResponse, UserListResponse, CSVImportResponse, UserBulkDeleteResponse
 from app.core.security import hash_password
 from app.core.deps import get_current_user, require_admin, require_manager
 
@@ -21,7 +21,7 @@ MAX_CSV_FILE_SIZE = 5 * 1024 * 1024
 
 def _prevent_privilege_escalation(current_user: User, target_role: Optional[UserRole]):
     """Prevent ADMIN users from creating or updating SUPER_ADMIN users.
-    
+
     Only SUPER_ADMIN can assign SUPER_ADMIN role to other users.
     """
     if target_role == UserRole.SUPER_ADMIN and current_user.role != UserRole.SUPER_ADMIN:
@@ -43,7 +43,7 @@ def list_users(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_manager)
 ):
-    query = db.query(User).filter(User.deleted_at == None)
+    query = db.query(User)
 
     if search:
         query = query.filter(or_(
@@ -75,11 +75,11 @@ def create_user(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    if db.query(User).filter(User.email == data.email, User.deleted_at == None).first():
+    if db.query(User).filter(User.email == data.email).first():
         raise HTTPException(status_code=400, detail="Email already registered")
 
     if data.employee_id:
-        if db.query(User).filter(User.employee_id == data.employee_id, User.deleted_at == None).first():
+        if db.query(User).filter(User.employee_id == data.employee_id).first():
             raise HTTPException(status_code=400, detail="Employee ID already exists")
 
     # Prevent privilege escalation: ADMIN cannot create SUPER_ADMIN users
@@ -124,7 +124,7 @@ def get_user(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_manager)
 ):
-    user = db.query(User).filter(User.id == user_id, User.deleted_at == None).first()
+    user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return user
@@ -137,7 +137,6 @@ def update_user(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    # Check for user including soft-deleted
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -152,11 +151,6 @@ def update_user(
     # Prevent privilege escalation: ADMIN cannot escalate user to SUPER_ADMIN
     if data.role is not None:
         _prevent_privilege_escalation(current_user, data.role)
-    
-    # Auto-restore soft-deleted user
-    if user.deleted_at is not None:
-        user.deleted_at = None
-        user.is_active = True
 
     # Check for duplicate employee_id if it's being updated
     if data.employee_id is not None:
@@ -164,12 +158,11 @@ def update_user(
         if employee_id_value:
             existing = db.query(User).filter(
                 User.employee_id == employee_id_value,
-                User.deleted_at == None,
                 User.id != user_id  # Exclude current user from check
             ).first()
             if existing:
                 raise HTTPException(
-                    status_code=400, 
+                    status_code=400,
                     detail=f"Employee ID '{employee_id_value}' already assigned to another user"
                 )
 
@@ -192,18 +185,72 @@ def delete_user(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    user = db.query(User).filter(User.id == user_id, User.deleted_at == None).first()
+    """Permanently delete a user (hard delete). Only ADMIN and SUPER_ADMIN can delete."""
+    user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     if user.id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot delete yourself")
 
-    from datetime import datetime, timezone
-    user.deleted_at = datetime.now(timezone.utc)
-    user.is_active = False
-    db.add(AuditLog(user_id=current_user.id, action="delete_user", resource_type="user", resource_id=user_id))
+    db.delete(user)
+    db.add(AuditLog(
+        user_id=current_user.id,
+        action="delete_user",
+        resource_type="user",
+        resource_id=user_id,
+        details={"deleted_email": user.email, "deleted_name": user.full_name}
+    ))
     db.commit()
-    return {"message": "User deleted successfully"}
+    return {"message": "User permanently deleted"}
+
+
+@router.post("/bulk-delete")
+def bulk_delete_users(
+    user_ids: List[int],
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """
+    Permanently delete multiple users at once (hard delete).
+    Only ADMIN and SUPER_ADMIN can perform bulk deletion.
+    
+    - Prevents deleting yourself
+    - Returns summary of deleted and failed user IDs
+    """
+    if not user_ids:
+        raise HTTPException(status_code=400, detail="No user IDs provided")
+    
+    if current_user.id in user_ids:
+        raise HTTPException(status_code=400, detail="Cannot delete yourself")
+    
+    # Fetch all users to delete
+    users = db.query(User).filter(User.id.in_(user_ids)).all()
+    found_ids = {u.id for u in users}
+    
+    # Check for non-existent users
+    not_found_ids = set(user_ids) - found_ids
+    
+    # Delete users
+    deleted_count = 0
+    for user in users:
+        db.add(AuditLog(
+            user_id=current_user.id,
+            action="delete_user",
+            resource_type="user",
+            resource_id=user.id,
+            details={"deleted_email": user.email, "deleted_name": user.full_name}
+        ))
+        db.delete(user)
+        deleted_count += 1
+    
+    db.commit()
+    
+    return UserBulkDeleteResponse(
+        deleted=deleted_count,
+        failed=len(not_found_ids),
+        deleted_ids=list(found_ids),
+        failed_ids=list(not_found_ids)
+    )
 
 
 @router.post("/import/csv", response_model=CSVImportResponse)
@@ -225,7 +272,7 @@ async def import_users_csv(
     file.seek(0, 2)  # Seek to end of file
     file_size = file.tell()
     file.seek(0)  # Reset to beginning
-    
+
     if file_size > MAX_CSV_FILE_SIZE:
         raise HTTPException(
             status_code=413,
@@ -256,9 +303,8 @@ async def import_users_csv(
                 failed += 1
                 continue
 
-            # Check for existing user (including soft-deleted)
+            # Check for existing user
             existing = db.query(User).filter(User.email == email).first()
-            is_restored = False
 
             role_str = row.get('role', 'viewer').strip().lower()
             try:
@@ -279,13 +325,6 @@ async def import_users_csv(
                     failed += 1
                     continue
 
-                # Restore soft-deleted user
-                if existing.deleted_at is not None:
-                    existing.deleted_at = None
-                    existing.is_active = True
-                    is_restored = True
-                    logger.info(f"Restoring soft-deleted user: {email}")
-
                 # Update user fields (changes are persisted on commit below)
                 existing.first_name = first_name
                 existing.last_name = last_name
@@ -294,9 +333,7 @@ async def import_users_csv(
                 existing.title = row.get('title', '').strip() or existing.title
                 existing.employee_id = row.get('employee_id', '').strip() or existing.employee_id
                 updated += 1
-                if is_restored:
-                    logger.info(f"Successfully restored soft-deleted user: {email}")
-                
+
                 # Track for batch commit
                 valid_users.append(("updated", existing))
             else:
@@ -368,7 +405,7 @@ async def import_users_csv(
     # Track email sending results for audit log
     emails_sent = 0
     emails_failed = 0
-    
+
     # Send welcome emails to newly created users (after commit)
     from app.services.messaging import email_service
     for user_data in created_users:
@@ -429,7 +466,6 @@ def get_departments(db: Session = Depends(get_db), current_user: User = Depends(
     """Get all unique departments for filtering."""
     results = db.query(User.department).filter(
         User.department != None,
-        User.department != "",
-        User.deleted_at == None
+        User.department != ""
     ).distinct().all()
     return [r[0] for r in results if r[0]]

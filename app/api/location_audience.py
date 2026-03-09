@@ -119,8 +119,7 @@ def assign_user_to_location(
     # Validate user exists
     user = db.query(User).filter(
         User.id == data.user_id,
-        User.is_active == True,
-        User.deleted_at == None
+        User.is_active == True
     ).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found or inactive")
@@ -440,10 +439,7 @@ def get_location_members(
             assigner_user
         ).join(
             member_user,
-            and_(
-                UserLocation.user_id == member_user.id,
-                member_user.deleted_at.is_(None)  # Exclude deleted users at SQL level
-            )
+            UserLocation.user_id == member_user.id
         ).outerjoin(
             assigner_user,
             UserLocation.assigned_by_id == assigner_user.id
@@ -461,10 +457,7 @@ def get_location_members(
         # This avoids ORDER BY affecting the count and ensures no ambiguity
         count_query = db.query(func.count(UserLocation.id)).join(
             member_user,
-            and_(
-                UserLocation.user_id == member_user.id,
-                member_user.deleted_at.is_(None)
-            )
+            UserLocation.user_id == member_user.id
         ).filter(
             UserLocation.location_id == location_id
         )

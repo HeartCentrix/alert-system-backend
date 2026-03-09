@@ -25,7 +25,7 @@ def get_dashboard_stats(
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = now - timedelta(days=7)
 
-    total_users = db.query(User).filter(User.is_active == True, User.deleted_at == None).count()
+    total_users = db.query(User).filter(User.is_active == True).count()
     total_groups = db.query(Group).filter(Group.is_active == True).count()
     total_locations = db.query(Location).filter(Location.is_active == True).count()
     active_incidents = db.query(Incident).filter(Incident.status == IncidentStatus.ACTIVE).count()
@@ -103,8 +103,7 @@ def get_map_data(
     # Also return users without a location
     unassigned_count = db.query(User).filter(
         User.location_id == None,
-        User.is_active == True,
-        User.deleted_at == None
+        User.is_active == True
     ).count()
 
     return {

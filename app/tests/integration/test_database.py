@@ -76,17 +76,15 @@ class TestUserDatabaseOperations:
         assert test_user.phone == "+9999999999"
         assert test_user.department == "Engineering"
 
-    def test_soft_delete_user(self, db_session, test_user):
-        """Test soft delete (deleted_at field)."""
-        test_user.deleted_at = datetime.now(timezone.utc)
+    def test_hard_delete_user(self, db_session, test_user):
+        """Test hard delete - user is permanently removed from database."""
+        user_id = test_user.id
+        db_session.delete(test_user)
         db_session.commit()
-        
-        db_session.refresh(test_user)
-        assert test_user.deleted_at is not None
-        
-        # User should still exist in DB
-        user = db_session.query(User).filter(User.id == test_user.id).first()
-        assert user is not None
+
+        # User should no longer exist in DB
+        user = db_session.query(User).filter(User.id == user_id).first()
+        assert user is None
 
     def test_user_employee_id_unique(self, db_session):
         """Test employee ID uniqueness."""
