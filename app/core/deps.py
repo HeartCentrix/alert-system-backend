@@ -27,8 +27,7 @@ def get_current_user(
 
     user = db.query(User).filter(
         User.id == int(user_id),
-        User.is_active.is_(True),
-        User.deleted_at.is_(None)
+        User.is_active == True
     ).first()
 
     if not user:

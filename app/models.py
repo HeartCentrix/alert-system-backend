@@ -262,7 +262,8 @@ class DeliveryLog(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     notification_id = Column(Integer, ForeignKey("notifications.id", ondelete="CASCADE"), nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    user_email = Column(String(255), nullable=True)  # Preserved after user deletion
     channel = Column(Enum(AlertChannel), nullable=False)
     status = Column(Enum(DeliveryStatus), default=DeliveryStatus.PENDING)
     external_id = Column(String(200))  # Twilio SID, SES MessageId, etc.
@@ -282,7 +283,8 @@ class NotificationResponse(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     notification_id = Column(Integer, ForeignKey("notifications.id", ondelete="CASCADE"), nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    user_email = Column(String(255), nullable=True)  # Preserved after user deletion
     channel = Column(Enum(AlertChannel))
     response_type = Column(Enum(ResponseType), nullable=False)
     message = Column(Text)
@@ -303,7 +305,8 @@ class IncomingMessage(Base):
     to_number = Column(String(20))
     body = Column(Text)
     channel = Column(Enum(AlertChannel), default=AlertChannel.SMS)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    user_email = Column(String(255), nullable=True)  # Preserved after user deletion
     notification_id = Column(Integer, ForeignKey("notifications.id"), nullable=True)
     is_processed = Column(Boolean, default=False)
     received_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -316,7 +319,8 @@ class AuditLog(Base):
     __tablename__ = "audit_logs"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    user_email = Column(String(255), nullable=True)  # Preserved after user deletion
     action = Column(String(200), nullable=False)
     resource_type = Column(String(100))
     resource_id = Column(Integer)

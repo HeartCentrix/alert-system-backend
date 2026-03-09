@@ -12,9 +12,10 @@ Tests cover:
 """
 import pytest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch, MagicMock
 
 from app.models import User, UserRole, RefreshToken
-from app.core.security import hash_password, create_access_token
+from app.core.security import hash_password, create_access_token, create_refresh_token
 
 
 # =============================================================================

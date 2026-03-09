@@ -14,10 +14,6 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql://postgres:password@localhost:5432/tm_alert"
     REDIS_URL: str = "redis://localhost:6379/0"
 
-    # Test environment variables (optional, used in CI/testing)
-    TEST_DATABASE_URL: Optional[str] = None
-    TEST_REDIS_URL: Optional[str] = None
-
     TWILIO_ACCOUNT_SID: str = ""
     TWILIO_AUTH_TOKEN: str = ""
     TWILIO_FROM_NUMBER: str = ""

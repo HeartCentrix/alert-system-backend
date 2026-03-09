@@ -43,7 +43,7 @@ def list_users(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_manager)
 ):
-    query = db.query(User).filter(User.deleted_at.is_(None))
+    query = db.query(User)
 
     if search:
         query = query.filter(or_(
@@ -75,11 +75,11 @@ def create_user(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    if db.query(User).filter(User.email == data.email, User.deleted_at.is_(None)).first():
+    if db.query(User).filter(User.email == data.email).first():
         raise HTTPException(status_code=400, detail="Email already registered")
 
     if data.employee_id:
-        if db.query(User).filter(User.employee_id == data.employee_id, User.deleted_at.is_(None)).first():
+        if db.query(User).filter(User.employee_id == data.employee_id).first():
             raise HTTPException(status_code=400, detail="Employee ID already exists")
 
     # Prevent privilege escalation: ADMIN cannot create SUPER_ADMIN users
@@ -124,7 +124,7 @@ def get_user(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_manager)
 ):
-    user = db.query(User).filter(User.id == user_id, User.deleted_at.is_(None)).first()
+    user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return user
@@ -158,7 +158,6 @@ def update_user(
         if employee_id_value:
             existing = db.query(User).filter(
                 User.employee_id == employee_id_value,
-                User.deleted_at.is_(None),
                 User.id != user_id  # Exclude current user from check
             ).first()
             if existing:
@@ -174,7 +173,12 @@ def update_user(
             value = None
         setattr(user, field, value)
 
-    db.add(AuditLog(user_id=current_user.id, action="update_user", resource_type="user", resource_id=user_id))
+    db.add(AuditLog(
+        user_id=current_user.id,
+        action="update_user",
+        resource_type="user",
+        resource_id=user_id
+    ))
     db.commit()
     db.refresh(user)
     return user
@@ -186,7 +190,8 @@ def delete_user(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    user = db.query(User).filter(User.id == user_id, User.deleted_at.is_(None)).first()
+    """Permanently delete a user (hard delete). Only ADMIN and SUPER_ADMIN can delete."""
+    user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     if user.id == current_user.id:
@@ -229,10 +234,11 @@ def bulk_delete_users(
     
     # Check for non-existent users
     not_found_ids = set(user_ids) - found_ids
-    
-    # Delete users
+
+    # Delete users (related records will have user_id set to NULL via ON DELETE SET NULL)
     deleted_count = 0
     for user in users:
+        # Log the deletion action
         db.add(AuditLog(
             user_id=current_user.id,
             action="delete_user",
@@ -242,7 +248,7 @@ def bulk_delete_users(
         ))
         db.delete(user)
         deleted_count += 1
-    
+
     db.commit()
     
     return UserBulkDeleteResponse(
@@ -269,17 +275,12 @@ async def import_users_csv(
         raise HTTPException(status_code=400, detail="File must be a CSV")
 
     # Validate file size to prevent DoS attacks (max 5MB)
-    file.seek(0, 2)  # Seek to end of file
-    file_size = file.tell()
-    file.seek(0)  # Reset to beginning
-
-    if file_size > MAX_CSV_FILE_SIZE:
+    content = await file.read()
+    if len(content) > MAX_CSV_FILE_SIZE:
         raise HTTPException(
             status_code=413,
             detail=f"File size exceeds maximum allowed size of {MAX_CSV_FILE_SIZE // (1024 * 1024)}MB"
         )
-
-    content = await file.read()
     reader = csv.DictReader(io.StringIO(content.decode('utf-8-sig')))
 
     created, updated, failed = 0, 0, 0
@@ -465,8 +466,7 @@ async def import_users_csv(
 def get_departments(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Get all unique departments for filtering."""
     results = db.query(User.department).filter(
-        User.department.isnot(None),
-        User.department != "",
-        User.deleted_at.is_(None)
+        User.department != None,
+        User.department != ""
     ).distinct().all()
     return [r[0] for r in results if r[0]]

@@ -194,9 +194,11 @@ def _send_to_channel(self, notification_id: int, user_id: int, channel: str):
         total_channels = len(notification.channels)
 
         # Create delivery log entry at the start to track this attempt
+        user = db.query(User).filter(User.id == user_id).first()
         log = DeliveryLog(
             notification_id=notification_id,
             user_id=user_id,
+            user_email=user.email if user else None,
             channel=channel,
             status=DeliveryStatus.PENDING,
             sent_at=datetime.now(timezone.utc)
@@ -440,14 +442,13 @@ def _get_recipients(db, notification: Notification) -> List[User]:
 
     if notification.target_all:
         users = db.query(User).filter(
-            User.is_active.is_(True),
-            User.deleted_at.is_(None)
+            User.is_active == True
         ).all()
         return users
 
     for group in notification.target_groups:
         if group.type == "dynamic" and group.dynamic_filter:
-            query = db.query(User).filter(User.is_active.is_(True), User.deleted_at.is_(None))
+            query = db.query(User).filter(User.is_active == True)
             f = group.dynamic_filter
             if f.get("department"):
                 query = query.filter(User.department == f["department"])
@@ -469,8 +470,7 @@ def _get_recipients(db, notification: Notification) -> List[User]:
 
     return db.query(User).filter(
         User.id.in_(recipient_ids),
-        User.is_active.is_(True),
-        User.deleted_at.is_(None)
+        User.is_active == True
     ).all()
 
 

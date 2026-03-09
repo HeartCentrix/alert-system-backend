@@ -9,12 +9,14 @@ Tests cover:
 - Token reuse prevention
 - Role manipulation attempts
 """
+import pytest
 from datetime import datetime, timedelta, timezone
 from jose import jwt
+from unittest.mock import patch
 
 from app.core.security import ALGORITHM, create_access_token, decode_token
 from app.config import settings
-from app.models import UserRole, User
+from app.models import UserRole
 
 
 # =============================================================================
@@ -104,6 +106,7 @@ class TestAlgorithmConfusion:
         """RS256 tokens should be rejected (we only support HS256)."""
         # We can't easily create RS256 tokens without keys,
         # but we verify our decode only accepts HS256
+        payload = {"sub": "1", "alg": "RS256"}
         
         # Any non-HS256 token will fail with our secret
         result = decode_token("fake.token.here")

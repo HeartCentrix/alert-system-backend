@@ -1,6 +1,5 @@
 import logging
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
-from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 from typing import Optional, List
@@ -27,7 +26,7 @@ def list_groups(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_manager)
 ):
-    query = db.query(Group).filter(Group.is_active.is_(True))
+    query = db.query(Group).filter(Group.is_active == True)
     if search:
         query = query.filter(Group.name.ilike(f"%{search}%"))
     if type:
@@ -63,7 +62,12 @@ def create_group(
         members = db.query(User).filter(User.id.in_(data.member_ids)).all()
         group.members = members
     db.add(group)
-    db.add(AuditLog(user_id=current_user.id, action="create_group", resource_type="group"))
+    db.add(AuditLog(
+        user_id=current_user.id,
+        user_email=current_user.email,
+        action="create_group",
+        resource_type="group"
+    ))
     db.commit()
     db.refresh(group)
     return GroupResponse(
@@ -117,8 +121,7 @@ def update_group(
     if member_ids is not None:
         # Validate all user IDs exist
         valid_users = db.query(User).filter(
-            User.id.in_(member_ids),
-            User.deleted_at.is_(None)
+            User.id.in_(member_ids)
         ).all()
         valid_ids = {u.id for u in valid_users}
         invalid_ids = set(member_ids) - valid_ids
@@ -210,7 +213,7 @@ def list_locations(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    locations = db.query(Location).filter(Location.is_active.is_(True)).order_by(Location.name).all()
+    locations = db.query(Location).filter(Location.is_active == True).order_by(Location.name).all()
     result = []
     for loc in locations:
         # Count users in user_locations table (many-to-many)
@@ -266,7 +269,7 @@ def create_location(
     
     # Check for overlaps with existing locations
     existing_locations = db.query(Location).filter(
-        Location.is_active.is_(True),
+        Location.is_active == True,
         Location.latitude.isnot(None),
         Location.longitude.isnot(None)
     ).all()
@@ -292,10 +295,11 @@ def create_location(
         is_active=True
     )
     db.add(location)
-    
+
     # Audit log
     db.add(AuditLog(
         user_id=current_user.id,
+        user_email=current_user.email,
         action="create_location",
         resource_type="location",
         details={
@@ -377,7 +381,7 @@ def update_location(
         data.geofence_radius_miles is not None):
         
         existing_locations = db.query(Location).filter(
-            Location.is_active.is_(True),
+            Location.is_active == True,
             Location.latitude.isnot(None),
             Location.longitude.isnot(None),
             Location.id != location_id  # Exclude self
@@ -402,6 +406,7 @@ def update_location(
     # Audit log
     db.add(AuditLog(
         user_id=current_user.id,
+        user_email=current_user.email,
         action="update_location",
         resource_type="location",
         resource_id=location_id,
@@ -463,7 +468,7 @@ def list_templates(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    query = db.query(NotificationTemplate).filter(NotificationTemplate.is_active.is_(True))
+    query = db.query(NotificationTemplate).filter(NotificationTemplate.is_active == True)
     if category:
         query = query.filter(NotificationTemplate.category == category)
     return query.order_by(NotificationTemplate.name).all()
@@ -532,12 +537,3 @@ def delete_template(
     template.is_active = False
     db.commit()
     return {"message": "Template deleted"}
-
-
-@templates_router.get("/categories")
-def get_categories(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    results = db.query(NotificationTemplate.category).filter(
-        NotificationTemplate.category.isnot(None),
-        NotificationTemplate.is_active.is_(True)
-    ).distinct().all()
-    return [r[0] for r in results if r[0]]
