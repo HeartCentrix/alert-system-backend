@@ -28,6 +28,7 @@ from app.api.webhooks import router as webhooks_router
 from app.api.dashboard import router as dashboard_router
 from app.api.location_v2 import router as location_router
 from app.api.location_audience import router as location_audience_router
+from app.api.docs import router as docs_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -192,9 +193,9 @@ app = FastAPI(
     description="Emergency Notification System for Taylor Morrison",
     version="1.0.0",
     lifespan=lifespan,
-    docs_url="/api/docs",
-    redoc_url="/api/redoc",
-    openapi_url="/api/openapi.json"
+    docs_url=None,  # Disable default - using protected custom endpoint
+    redoc_url=None,  # Disable default - using protected custom endpoint
+    openapi_url=None  # Disable default - using protected custom endpoint
 )
 
 # ─── MIDDLEWARE ───────────────────────────────────────────────────────────────
@@ -256,6 +257,7 @@ app.include_router(webhooks_router, prefix=API_PREFIX)
 app.include_router(dashboard_router, prefix=API_PREFIX)
 app.include_router(location_router, prefix=API_PREFIX)
 app.include_router(location_audience_router, prefix=API_PREFIX)
+app.include_router(docs_router, prefix=API_PREFIX)
 
 
 # ─── HEALTH CHECK ─────────────────────────────────────────────────────────────

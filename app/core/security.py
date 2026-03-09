@@ -30,12 +30,29 @@ def create_refresh_token(data: dict) -> str:
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
     to_encode.update({"exp": expire, "type": "refresh"})
-    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=ALGORITHM)
+    return jwt.encode(to_encode, settings.REFRESH_SECRET_KEY, algorithm=ALGORITHM)
 
 
-def decode_token(token: str) -> Optional[dict]:
+def decode_token(token: str, token_type: str = "access") -> Optional[dict]:
+    """
+    Decode and validate a JWT token.
+
+    Args:
+        token: The JWT token to decode
+        token_type: Expected token type ('access' or 'refresh')
+
+    Returns:
+        Decoded payload if valid, None otherwise
+    """
     try:
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGORITHM])
+        # Use appropriate secret key based on token type
+        secret_key = settings.SECRET_KEY if token_type == "access" else settings.REFRESH_SECRET_KEY
+        payload = jwt.decode(token, secret_key, algorithms=[ALGORITHM])
+
+        # Verify token type matches
+        if payload.get("type") != token_type:
+            return None
+
         return payload
     except JWTError:
         return None
