@@ -15,7 +15,13 @@ REQUIRED_HEADERS = {
     "x-content-type-options": "nosniff",
     "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
     "referrer-policy": "strict-origin-when-cross-origin",
-    "content-security-policy": "default-src 'self'",
+    "content-security-policy": (
+        "default-src 'self'; "
+        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "img-src 'self' data:; "
+        "font-src 'self' https://cdn.jsdelivr.net"
+    ),
     "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=()",
     "cache-control": "no-store",
 }

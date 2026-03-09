@@ -26,8 +26,14 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         # Control referrer leakage — send origin only on cross-origin
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
 
-        # Baseline CSP — restrict to same-origin resources
-        response.headers["Content-Security-Policy"] = "default-src 'self'"
+        # CSP — allow same-origin plus CDN resources for Swagger/OpenAPI docs
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+            "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+            "img-src 'self' data:; "
+            "font-src 'self' https://cdn.jsdelivr.net"
+        )
 
         # Disable browser features the API does not use
         response.headers["Permissions-Policy"] = (
