@@ -152,6 +152,49 @@ class TestUserCreate:
             )
         assert "length" in str(exc_info.value).lower() or "8" in str(exc_info.value)
 
+    def test_user_create_password_missing_uppercase(self):
+        """Password without uppercase should fail."""
+        with pytest.raises(ValidationError) as exc_info:
+            UserCreate(
+                email="test@example.com",
+                password="lowercase123!",  # No uppercase
+                first_name="Test",
+                last_name="User"
+            )
+        assert "uppercase" in str(exc_info.value).lower()
+
+    def test_user_create_password_missing_digit(self):
+        """Password without digit should fail."""
+        with pytest.raises(ValidationError) as exc_info:
+            UserCreate(
+                email="test@example.com",
+                password="NoDigitsHere!",  # No digit
+                first_name="Test",
+                last_name="User"
+            )
+        assert "digit" in str(exc_info.value).lower()
+
+    def test_user_create_password_missing_symbol(self):
+        """Password without symbol should fail."""
+        with pytest.raises(ValidationError) as exc_info:
+            UserCreate(
+                email="test@example.com",
+                password="NoSymbol123",  # No symbol
+                first_name="Test",
+                last_name="User"
+            )
+        assert "special character" in str(exc_info.value).lower() or "symbol" in str(exc_info.value).lower()
+
+    def test_user_create_password_valid_strong(self):
+        """Strong password meeting all requirements should pass."""
+        user = UserCreate(
+            email="test@example.com",
+            password="SecureP@ss123",  # Has uppercase, digit, symbol, 8+ chars
+            first_name="Test",
+            last_name="User"
+        )
+        assert user.password == "SecureP@ss123"
+
     def test_user_create_valid_roles(self):
         """All valid roles should be accepted."""
         for role in UserRole:
@@ -256,11 +299,29 @@ class TestPasswordReset:
 
     def test_password_reset_confirm_short_password(self):
         """Short new password should fail."""
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError) as exc_info:
             PasswordResetConfirm(
                 token="reset_token_123",
                 new_password="short"
             )
+        assert "length" in str(exc_info.value).lower() or "8" in str(exc_info.value)
+
+    def test_password_reset_confirm_password_missing_requirements(self):
+        """Password missing complexity requirements should fail."""
+        with pytest.raises(ValidationError) as exc_info:
+            PasswordResetConfirm(
+                token="reset_token_123",
+                new_password="alllowercase123!"  # No uppercase
+            )
+        assert "uppercase" in str(exc_info.value).lower()
+
+    def test_password_reset_confirm_password_valid(self):
+        """Strong password should pass validation."""
+        confirm = PasswordResetConfirm(
+            token="reset_token_123",
+            new_password="SecureP@ss123"
+        )
+        assert confirm.new_password == "SecureP@ss123"
 
     def test_password_reset_confirm_empty_token(self):
         """Empty token should be allowed (validated by business logic)."""
@@ -289,11 +350,29 @@ class TestChangePassword:
 
     def test_change_password_short_new_password(self):
         """Short new password should fail."""
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError) as exc_info:
             ChangePasswordRequest(
                 current_password="OldPassword123!",
                 new_password="short"
             )
+        assert "length" in str(exc_info.value).lower() or "8" in str(exc_info.value)
+
+    def test_change_password_new_password_missing_requirements(self):
+        """New password missing complexity requirements should fail."""
+        with pytest.raises(ValidationError) as exc_info:
+            ChangePasswordRequest(
+                current_password="OldPassword123!",
+                new_password="nouppercase123!"  # No uppercase
+            )
+        assert "uppercase" in str(exc_info.value).lower()
+
+    def test_change_password_new_password_valid(self):
+        """Strong new password should pass validation."""
+        request = ChangePasswordRequest(
+            current_password="OldPassword123!",
+            new_password="NewSecureP@ss123"
+        )
+        assert request.new_password == "NewSecureP@ss123"
 
     def test_change_password_same_password(self):
         """Same current and new password should be allowed (validated by business logic)."""

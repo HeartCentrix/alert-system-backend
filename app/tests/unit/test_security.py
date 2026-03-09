@@ -6,6 +6,7 @@ Tests cover:
 - JWT token creation and validation
 - Token expiration handling
 - Token tampering detection
+- Password strength validation
 """
 import pytest
 from datetime import datetime, timedelta, timezone
@@ -17,6 +18,7 @@ from app.core.security import (
     create_access_token,
     create_refresh_token,
     decode_token,
+    validate_password_strength,
     ALGORITHM,
 )
 from app.config import settings
@@ -103,6 +105,78 @@ class TestPasswordHashing:
         hashed = hash_password(password)
         assert verify_password(password, hashed) is True
         assert verify_password("TestPassword", hashed) is False
+
+
+# =============================================================================
+# PASSWORD STRENGTH VALIDATION TESTS
+# =============================================================================
+
+class TestPasswordStrengthValidation:
+    """Test password strength validation requirements."""
+
+    def test_valid_strong_password(self):
+        """Strong password should pass validation."""
+        password = "SecureP@ssw0rd123"
+        is_valid, error = validate_password_strength(password)
+        assert is_valid is True
+        assert error == ""
+
+    def test_password_too_short(self):
+        """Password under 8 characters should fail."""
+        password = "Abc1!"
+        is_valid, error = validate_password_strength(password)
+        assert is_valid is False
+        assert "at least 8 characters" in error
+
+    def test_password_exactly_8_chars_with_requirements(self):
+        """Password with exactly 8 chars meeting all requirements should pass."""
+        password = "Abc123!@"
+        is_valid, error = validate_password_strength(password)
+        assert is_valid is True
+        assert error == ""
+
+    def test_password_missing_uppercase(self):
+        """Password without uppercase should fail."""
+        password = "securepass123!"
+        is_valid, error = validate_password_strength(password)
+        assert is_valid is False
+        assert "uppercase" in error
+
+    def test_password_missing_digit(self):
+        """Password without digit should fail."""
+        password = "SecurePassword!"
+        is_valid, error = validate_password_strength(password)
+        assert is_valid is False
+        assert "digit" in error
+
+    def test_password_missing_symbol(self):
+        """Password without symbol should fail."""
+        password = "SecurePass123"
+        is_valid, error = validate_password_strength(password)
+        assert is_valid is False
+        assert "special character" in error
+
+    def test_password_with_various_symbols(self):
+        """Password with various special characters should pass."""
+        symbols = "!@#$%^&*(),.?\":{}|<>_\-+=\[\]\\;'`~"
+        password = f"SecureP1{symbols[:5]}"
+        is_valid, error = validate_password_strength(password)
+        assert is_valid is True
+        assert error == ""
+
+    def test_password_all_lowercase(self):
+        """All lowercase password should fail all requirements except length."""
+        password = "abcdefgh"
+        is_valid, error = validate_password_strength(password)
+        assert is_valid is False
+        assert "uppercase" in error
+
+    def test_password_common_weak_password(self):
+        """Common weak passwords should be rejected by zxcvbn."""
+        weak_passwords = ["password", "12345678", "qwerty123"]
+        for weak_pwd in weak_passwords:
+            is_valid, error = validate_password_strength(weak_pwd)
+            assert is_valid is False
 
 
 # =============================================================================

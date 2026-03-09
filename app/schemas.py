@@ -32,19 +32,35 @@ class PasswordResetRequest(BaseModel):
 
 class PasswordResetConfirm(BaseModel):
     token: str
-    new_password: str = Field(min_length=8)
+    new_password: str
+
+    @validator("new_password")
+    def validate_password(cls, v):
+        from app.core.security import validate_password_strength
+        is_valid, error = validate_password_strength(v)
+        if not is_valid:
+            raise ValueError(error)
+        return v
 
 
 class ChangePasswordRequest(BaseModel):
     current_password: str
-    new_password: str = Field(min_length=8)
+    new_password: str
+
+    @validator("new_password")
+    def validate_password(cls, v):
+        from app.core.security import validate_password_strength
+        is_valid, error = validate_password_strength(v)
+        if not is_valid:
+            raise ValueError(error)
+        return v
 
 
 # ─── USER ─────────────────────────────────────────────────────────────────────
 
 class UserCreate(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=8)
+    password: str
     first_name: str
     last_name: str
     phone: Optional[str] = None
@@ -54,6 +70,14 @@ class UserCreate(BaseModel):
     role: UserRole = UserRole.VIEWER
     location_id: Optional[int] = None
     preferred_channels: List[AlertChannel] = [AlertChannel.SMS, AlertChannel.EMAIL]
+
+    @validator("password")
+    def validate_password(cls, v):
+        from app.core.security import validate_password_strength
+        is_valid, error = validate_password_strength(v)
+        if not is_valid:
+            raise ValueError(error)
+        return v
 
 
 class UserUpdate(BaseModel):
