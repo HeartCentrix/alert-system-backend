@@ -365,15 +365,15 @@ class NotificationDetailResponse(NotificationResponse):
 
 class DeliveryLogResponse(BaseModel):
     id: int
-    user_id: Optional[int]
-    user_email: Optional[str]
-    user_name: Optional[str]
+    user_id: Optional[int] = None
+    user_email: Optional[str] = None
+    user_name: Optional[str] = None
     channel: AlertChannel
     status: DeliveryStatus
-    to_address: Optional[str]
-    error_message: Optional[str]
-    sent_at: Optional[datetime]
-    delivered_at: Optional[datetime]
+    to_address: Optional[str] = None
+    error_message: Optional[str] = None
+    sent_at: Optional[datetime] = None
+    delivered_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
