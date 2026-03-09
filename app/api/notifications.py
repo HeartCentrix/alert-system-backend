@@ -163,10 +163,34 @@ def list_notifications(
     # Get total count
     total = query.count()
     
-    # Get paginated results
+    # Get paginated results and convert to dict
     items = query.order_by(desc(Notification.created_at)).offset((page - 1) * page_size).limit(page_size).all()
     
-    return {"items": items, "total": total, "page": page, "page_size": page_size}
+    # Convert SQLAlchemy models to dict for JSON serialization
+    items_data = []
+    for item in items:
+        items_data.append({
+            "id": item.id,
+            "incident_id": item.incident_id,
+            "title": item.title,
+            "message": item.message,
+            "subject": item.subject,
+            "channels": item.channels,
+            "status": item.status.value if item.status else None,
+            "target_all": item.target_all,
+            "scheduled_at": item.scheduled_at.isoformat() if item.scheduled_at else None,
+            "sent_at": item.sent_at.isoformat() if item.sent_at else None,
+            "total_recipients": item.total_recipients,
+            "sent_count": item.sent_count,
+            "delivered_count": item.delivered_count,
+            "failed_count": item.failed_count,
+            "response_required": item.response_required,
+            "response_deadline_minutes": item.response_deadline_minutes,
+            "created_by_id": item.created_by_id,
+            "created_at": item.created_at.isoformat() if item.created_at else None,
+        })
+    
+    return {"items": items_data, "total": total, "page": page, "page_size": page_size}
 
 
 @notifications_router.post("", response_model=NotificationResponse, status_code=201)
