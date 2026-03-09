@@ -62,7 +62,12 @@ def create_group(
         members = db.query(User).filter(User.id.in_(data.member_ids)).all()
         group.members = members
     db.add(group)
-    db.add(AuditLog(user_id=current_user.id, action="create_group", resource_type="group"))
+    db.add(AuditLog(
+        user_id=current_user.id,
+        user_email=current_user.email,
+        action="create_group",
+        resource_type="group"
+    ))
     db.commit()
     db.refresh(group)
     return GroupResponse(
@@ -290,10 +295,11 @@ def create_location(
         is_active=True
     )
     db.add(location)
-    
+
     # Audit log
     db.add(AuditLog(
         user_id=current_user.id,
+        user_email=current_user.email,
         action="create_location",
         resource_type="location",
         details={
@@ -400,6 +406,7 @@ def update_location(
     # Audit log
     db.add(AuditLog(
         user_id=current_user.id,
+        user_email=current_user.email,
         action="update_location",
         resource_type="location",
         resource_id=location_id,

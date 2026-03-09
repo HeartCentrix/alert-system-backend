@@ -240,7 +240,12 @@ def send_notification(
         raise HTTPException(status_code=400, detail=f"Cannot send notification in {notification.status} state")
 
     send_notification_task.delay(notification_id)
-    db.add(AuditLog(user_id=current_user.id, action="send_notification", resource_type="notification", resource_id=notification_id))
+    db.add(AuditLog(
+        user_id=current_user.id,
+        action="send_notification",
+        resource_type="notification",
+        resource_id=notification_id
+    ))
     db.commit()
     db.refresh(notification)
     return notification
@@ -379,6 +384,7 @@ def submit_response(
         delivery_log = DeliveryLog(
             notification_id=notification_id,
             user_id=current_user.id,
+            user_email=current_user.email,
             channel=AlertChannel.WEB,
             status=DeliveryStatus.DELIVERED,
             delivered_at=datetime.now(timezone.utc)

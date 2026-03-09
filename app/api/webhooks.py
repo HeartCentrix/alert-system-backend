@@ -170,6 +170,7 @@ async def sms_inbound(
         body=Body,
         channel=AlertChannel.SMS,
         user_id=user.id if user else None,
+        user_email=user.email if user else None,
         notification_id=notification.id if notification else None,
         is_processed=True,
     )
@@ -180,6 +181,7 @@ async def sms_inbound(
         resp = NotificationResponse(
             notification_id=notification.id,
             user_id=user.id if user else None,
+            user_email=user.email if user else None,
             channel=AlertChannel.SMS,
             response_type=response_type,
             message=Body if response_type == ResponseType.CUSTOM else None,
@@ -365,6 +367,7 @@ async def voice_response(
             body=f"Keypress: {Digits}" if Digits else "Voice call response",
             channel=AlertChannel.VOICE,
             user_id=user.id if user else None,
+            user_email=user.email if user else None,
             notification_id=latest_log.notification_id if latest_log else None,
             is_processed=True,
         )
@@ -376,6 +379,7 @@ async def voice_response(
             resp = NotificationResponse(
                 notification_id=latest_log.notification_id,
                 user_id=user.id if user else None,
+                user_email=user.email if user else None,
                 channel=AlertChannel.VOICE,
                 response_type=response_type,
                 from_number=From,

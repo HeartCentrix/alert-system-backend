@@ -177,10 +177,11 @@ def assign_user_to_location(
         reason=data.notes
     )
     db.add(history)
-    
+
     # Audit log
     db.add(AuditLog(
         user_id=current_user.id,
+        user_email=current_user.email,
         action="assign_user_to_location",
         resource_type="user_location",
         resource_id=assignment.id,
@@ -275,10 +276,11 @@ def remove_user_from_location(
         reason=data.reason
     )
     db.add(history)
-    
+
     # Audit log
     db.add(AuditLog(
         user_id=current_user.id,
+        user_email=current_user.email,
         action="remove_user_from_location",
         resource_type="user_location",
         resource_id=assignment.id,

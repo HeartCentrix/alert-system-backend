@@ -194,9 +194,11 @@ def _send_to_channel(self, notification_id: int, user_id: int, channel: str):
         total_channels = len(notification.channels)
 
         # Create delivery log entry at the start to track this attempt
+        user = db.query(User).filter(User.id == user_id).first()
         log = DeliveryLog(
             notification_id=notification_id,
             user_id=user_id,
+            user_email=user.email if user else None,
             channel=channel,
             status=DeliveryStatus.PENDING,
             sent_at=datetime.now(timezone.utc)

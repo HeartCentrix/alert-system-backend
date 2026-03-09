@@ -328,7 +328,8 @@ class NotificationDetailResponse(NotificationResponse):
 
 class DeliveryLogResponse(BaseModel):
     id: int
-    user_id: int
+    user_id: Optional[int]
+    user_email: Optional[str]
     user_name: Optional[str]
     channel: AlertChannel
     status: DeliveryStatus
@@ -360,6 +361,7 @@ class NotificationResponseOut(BaseModel):
     id: int
     notification_id: int
     user_id: Optional[int]
+    user_email: Optional[str]
     user_name: Optional[str]
     channel: Optional[AlertChannel]
     response_type: ResponseType
@@ -393,6 +395,7 @@ class IncomingMessageResponse(BaseModel):
     body: Optional[str]
     channel: AlertChannel
     user_id: Optional[int]
+    user_email: Optional[str]
     user_name: Optional[str]
     notification_id: Optional[int]
     is_processed: bool

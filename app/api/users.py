@@ -173,7 +173,12 @@ def update_user(
             value = None
         setattr(user, field, value)
 
-    db.add(AuditLog(user_id=current_user.id, action="update_user", resource_type="user", resource_id=user_id))
+    db.add(AuditLog(
+        user_id=current_user.id,
+        action="update_user",
+        resource_type="user",
+        resource_id=user_id
+    ))
     db.commit()
     db.refresh(user)
     return user
@@ -229,10 +234,11 @@ def bulk_delete_users(
     
     # Check for non-existent users
     not_found_ids = set(user_ids) - found_ids
-    
-    # Delete users
+
+    # Delete users (related records will have user_id set to NULL via ON DELETE SET NULL)
     deleted_count = 0
     for user in users:
+        # Log the deletion action
         db.add(AuditLog(
             user_id=current_user.id,
             action="delete_user",
@@ -242,7 +248,7 @@ def bulk_delete_users(
         ))
         db.delete(user)
         deleted_count += 1
-    
+
     db.commit()
     
     return UserBulkDeleteResponse(
@@ -269,17 +275,12 @@ async def import_users_csv(
         raise HTTPException(status_code=400, detail="File must be a CSV")
 
     # Validate file size to prevent DoS attacks (max 5MB)
-    file.seek(0, 2)  # Seek to end of file
-    file_size = file.tell()
-    file.seek(0)  # Reset to beginning
-
-    if file_size > MAX_CSV_FILE_SIZE:
+    content = await file.read()
+    if len(content) > MAX_CSV_FILE_SIZE:
         raise HTTPException(
             status_code=413,
             detail=f"File size exceeds maximum allowed size of {MAX_CSV_FILE_SIZE // (1024 * 1024)}MB"
         )
-
-    content = await file.read()
     reader = csv.DictReader(io.StringIO(content.decode('utf-8-sig')))
 
     created, updated, failed = 0, 0, 0
