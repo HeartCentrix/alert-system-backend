@@ -1,4 +1,5 @@
 from celery import Celery
+from celery.schedules import crontab
 from app.config import settings
 
 # Railway public Redis requires SSL - handle both rediss:// and redis://
@@ -18,6 +19,7 @@ celery_app = Celery(
     include=["app.tasks", "app.location_tasks", "app.core.location_cache"]
 )
 
+# Use Redis as the beat scheduler backend to avoid file permission issues
 celery_app.conf.update(
     task_serializer="json",
     accept_content=["json"],
@@ -29,6 +31,8 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     broker_use_ssl=ssl_opts if ssl_opts else None,
     redis_backend_use_ssl=ssl_opts if ssl_opts else None,
+    beat_scheduler="celery.beat:PersistentScheduler",  # Use persistent scheduler
+    beat_schedule_filename="/tmp/celerybeat-schedule",  # Use /tmp to avoid permission issues
     beat_schedule={
         "process-scheduled-notifications": {
             "task": "app.tasks.process_scheduled_notifications",

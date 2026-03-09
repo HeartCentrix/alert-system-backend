@@ -136,6 +136,38 @@ def _ensure_audit_log_user_email():
         db.close()
 
 
+def _ensure_delivery_log_user_email():
+    """Add user_email column to delivery_logs and notification_responses tables if they don't exist."""
+    db = SessionLocal()
+    try:
+        # Check delivery_logs
+        result = db.execute(
+            text("SELECT column_name FROM information_schema.columns WHERE table_name='delivery_logs' AND column_name='user_email'")
+        ).fetchone()
+        if not result:
+            db.execute(text("ALTER TABLE delivery_logs ADD COLUMN user_email VARCHAR(255)"))
+            db.commit()
+            logger.info("Added user_email column to delivery_logs table")
+        else:
+            logger.info("delivery_logs table already has user_email column")
+
+        # Check notification_responses
+        result = db.execute(
+            text("SELECT column_name FROM information_schema.columns WHERE table_name='notification_responses' AND column_name='user_email'")
+        ).fetchone()
+        if not result:
+            db.execute(text("ALTER TABLE notification_responses ADD COLUMN user_email VARCHAR(255)"))
+            db.commit()
+            logger.info("Added user_email column to notification_responses table")
+        else:
+            logger.info("notification_responses table already has user_email column")
+    except Exception as e:
+        logger.error(f"Error adding delivery_log/user_email columns: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Initialize Redis cache for location autocomplete
@@ -173,6 +205,13 @@ async def lifespan(app: FastAPI):
         _ensure_audit_log_user_email()
     except Exception as e:
         logger.error(f"Failed to ensure audit_logs user_email column: {e}")
+
+    # Ensure delivery_logs and notification_responses tables have user_email column
+    logger.info("Ensuring delivery_logs and notification_responses tables have user_email column...")
+    try:
+        _ensure_delivery_log_user_email()
+    except Exception as e:
+        logger.error(f"Failed to ensure delivery_logs/notification_responses user_email column: {e}")
 
     # Seed default super admin if no users exist
     try:

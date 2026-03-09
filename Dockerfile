@@ -28,7 +28,10 @@ COPY --from=builder /install /usr/local
 # 2. Copy application code and set ownership
 COPY --chown=appuser:appgroup . .
 
-# 3. Switch to non-root user BEFORE CMD
+# 3. Create tmp directory for celerybeat schedule with proper permissions
+RUN mkdir -p /tmp && chown appuser:appgroup /tmp
+
+# 4. Switch to non-root user BEFORE CMD
 USER appuser
 
 EXPOSE 8000
