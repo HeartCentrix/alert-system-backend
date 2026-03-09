@@ -7,8 +7,12 @@ import logging
 from sqlalchemy import text
 from app.config import settings
 from sqlalchemy import text
-from app.database import engine, Base, SessionLocal
-from app.models import User, UserRole, AlertChannel
+from app.database import engine, Base, SessionLocal, ensure_column_exists
+from app.models import (
+    User, UserRole, AlertChannel, Location, Group, NotificationTemplate,
+    Incident, Notification, DeliveryLog, NotificationResponse, IncomingMessage,
+    AuditLog, RefreshToken, LoginAttempt, UserLocation, UserLocationHistory
+)
 from app.core.security import hash_password
 from app.core.location_cache import init_location_cache, close_location_cache
 from app.api.auth import router as auth_router
@@ -60,21 +64,52 @@ def ensure_alertchannel_enum():
 
 def _ensure_user_location_columns():
     """Add latitude/longitude columns to users table if they don't exist."""
-    db = SessionLocal()
     try:
-        result = db.execute(
-            text("SELECT column_name FROM information_schema.columns WHERE table_name='users' AND column_name='latitude'")
-        ).fetchone()
-        if not result:
-            db.execute(text("ALTER TABLE users ADD COLUMN latitude DOUBLE PRECISION"))
-            db.execute(text("ALTER TABLE users ADD COLUMN longitude DOUBLE PRECISION"))
-            db.commit()
-            logger.info("Added latitude/longitude columns to users table")
-        else:
-            logger.info("Users table already has latitude/longitude columns")
+        ensure_column_exists('users', 'latitude', 'DOUBLE PRECISION', nullable=True)
+        ensure_column_exists('users', 'longitude', 'DOUBLE PRECISION', nullable=True)
     except Exception as e:
         logger.error(f"Error adding user location columns: {e}")
+
+
+def _ensure_audit_logs_table():
+    """Ensure audit_logs table exists with proper schema."""
+    db = SessionLocal()
+    try:
+        # Check if table exists
+        result = db.execute(
+            text("""
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_name = 'audit_logs'
+            """)
+        ).fetchone()
+        
+        if result:
+            logger.info("audit_logs table already exists")
+            return
+        
+        # Create audit_logs table
+        db.execute(text("""
+            CREATE TABLE audit_logs (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                user_email VARCHAR(255),
+                action VARCHAR(200) NOT NULL,
+                resource_type VARCHAR(100),
+                resource_id INTEGER,
+                details JSONB,
+                ip_address VARCHAR(45),
+                user_agent VARCHAR(500),
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        db.commit()
+        logger.info("Created audit_logs table")
+        
+    except Exception as e:
+        logger.error(f"Error ensuring audit_logs table: {e}")
         db.rollback()
+        raise
     finally:
         db.close()
 
@@ -100,6 +135,9 @@ async def lifespan(app: FastAPI):
 
     # Ensure User table has latitude/longitude columns
     _ensure_user_location_columns()
+
+    # Ensure audit_logs table exists
+    _ensure_audit_logs_table()
 
     # Seed default super admin if no users exist
     db = SessionLocal()
