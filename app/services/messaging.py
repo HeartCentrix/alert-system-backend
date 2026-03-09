@@ -78,11 +78,6 @@ class TwilioService:
             logger.error(f"Voice call failed to {to}: {e}")
             return {"error": str(e), "status": "failed"}
 
-    def send_whatsapp(self, to: str, body: str) -> dict:
-        """WhatsApp sending has been removed."""
-        logger.warning(f"WhatsApp sending is disabled. To: {to} | Body: {body[:50]}...")
-        return {"error": "WhatsApp is disabled", "status": "failed"}
-
 
 # ─── EMAIL SERVICE (AWS SES) ──────────────────────────────────────────────────
 

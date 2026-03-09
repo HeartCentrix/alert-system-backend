@@ -73,12 +73,6 @@ class TestTwilioService:
             result = twilio_service.send_sms(number, "Test")
             assert result["status"] == "sent"
 
-    def test_send_whatsapp_success(self, mock_twilio: MagicMock):
-        """WhatsApp has been removed."""
-        result = twilio_service.send_whatsapp("+1234567890", "Test WhatsApp message")
-        assert result["status"] == "failed"
-        assert "disabled" in result["error"]
-
     def test_voice_call_success(self, mock_twilio: MagicMock):
         """Voice call should succeed."""
         result = twilio_service.make_voice_call("+1234567890", "Emergency message")
