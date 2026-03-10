@@ -44,4 +44,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
 
+        # Prevent speculative DNS resolution of hostnames in response bodies
+        response.headers["X-DNS-Prefetch-Control"] = "off"
+
         return response

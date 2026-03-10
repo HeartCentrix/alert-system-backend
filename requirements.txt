@@ -1,5 +1,9 @@
 # =============================================================================
 # TM Alert - Full Requirements (CI/CD + Development)
+# 
+# SECURITY: For production deployments, generate hash-verified requirements:
+#   pip-compile --generate-hashes requirements.txt -o requirements-locked.txt
+#   pip install --require-hashes -r requirements-locked.txt
 # =============================================================================
 
 # Core
