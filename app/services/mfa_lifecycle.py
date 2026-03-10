@@ -24,6 +24,7 @@ from app.core.security import (
     can_user_reset_mfa,
     get_mfa_policy_info,
     get_recovery_code_regeneration_policy,
+    encrypt_mfa_secret,
 )
 from app.services.mfa_recovery import (
     generate_recovery_codes,
@@ -102,9 +103,10 @@ class MFAService:
         secret = generate_mfa_secret()
         qr_code_uri = generate_mfa_qr_code_uri(user.email, secret)
 
-        # Store secret but do NOT enable MFA yet
+        # Encrypt and store secret (do NOT enable MFA yet)
         # MFA will be enabled only after OTP verification
-        user.mfa_secret = secret
+        encrypted_secret = encrypt_mfa_secret(secret)
+        user.mfa_secret = encrypted_secret
         user.mfa_enabled = False  # Explicitly ensure not enabled
 
         # Invalidate any existing recovery codes from previous enrollment
@@ -301,8 +303,9 @@ class MFAService:
         secret = generate_mfa_secret()
         qr_code_uri = generate_mfa_qr_code_uri(user.email, secret)
 
-        # Store new secret (pending enrollment)
-        user.mfa_secret = secret
+        # Encrypt and store new secret (pending enrollment)
+        encrypted_secret = encrypt_mfa_secret(secret)
+        user.mfa_secret = encrypted_secret
 
         # Audit log
         self.db.add(AuditLog(

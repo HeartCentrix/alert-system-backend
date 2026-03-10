@@ -10,7 +10,7 @@ Tests cover:
 """
 import pytest
 from datetime import datetime, timedelta, timezone
-from jose import jwt
+import jwt
 
 from app.core.security import (
     hash_password,
@@ -271,7 +271,7 @@ class TestRefreshTokenCreation:
     def test_create_refresh_token_has_type_refresh(self):
         """Refresh token should have type 'refresh'."""
         token = create_refresh_token({"sub": "1"})
-        decoded = decode_token(token)
+        decoded = decode_token(token, token_type="refresh")
         assert decoded is not None
         assert decoded["type"] == "refresh"
 
@@ -279,10 +279,10 @@ class TestRefreshTokenCreation:
         """Refresh token should have longer expiry than access token."""
         access_token = create_access_token({"sub": "1"})
         refresh_token = create_refresh_token({"sub": "1"})
-        
-        access_decoded = decode_token(access_token)
-        refresh_decoded = decode_token(refresh_token)
-        
+
+        access_decoded = decode_token(access_token, token_type="access")
+        refresh_decoded = decode_token(refresh_token, token_type="refresh")
+
         assert access_decoded is not None
         assert refresh_decoded is not None
         assert refresh_decoded["exp"] > access_decoded["exp"]
@@ -291,7 +291,7 @@ class TestRefreshTokenCreation:
         """Refresh token should contain the subject."""
         user_id = "456"
         token = create_refresh_token({"sub": user_id})
-        decoded = decode_token(token)
+        decoded = decode_token(token, token_type="refresh")
         assert decoded is not None
         assert decoded["sub"] == user_id
 
@@ -318,7 +318,7 @@ class TestTokenDecoding:
         """Valid refresh token should decode successfully."""
         data = {"sub": "789", "extra": "data"}
         token = create_refresh_token(data)
-        decoded = decode_token(token)
+        decoded = decode_token(token, token_type="refresh")
         assert decoded is not None
         assert decoded["sub"] == "789"
         assert decoded["type"] == "refresh"

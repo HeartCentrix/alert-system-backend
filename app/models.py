@@ -112,7 +112,7 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     is_verified = Column(Boolean, default=False)
     mfa_enabled = Column(Boolean, default=False)
-    mfa_secret = Column(String(32))
+    mfa_secret = Column(String(255))  # Increased from 32 to store Fernet-encrypted secrets
     avatar_url = Column(String(500))
     preferred_channels = Column(JSON, default=["sms", "email"])
     latitude = Column(Float, nullable=True)   # Last known latitude

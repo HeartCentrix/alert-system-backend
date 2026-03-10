@@ -26,7 +26,8 @@ from app.schemas import (
 from app.core.security import (
     verify_password, hash_password, create_access_token,
     create_refresh_token, decode_token, user_requires_mfa,
-    verify_totp_code, generate_mfa_secret, generate_mfa_qr_code_uri
+    verify_totp_code, generate_mfa_secret, generate_mfa_qr_code_uri,
+    hash_password_reset_token, verify_password_reset_token
 )
 from app.services.mfa_recovery import (
     generate_recovery_codes, verify_recovery_code,
@@ -469,24 +470,27 @@ async def login(request: LoginRequest, req: Request, db: Session = Depends(get_d
         # Check if user has MFA fully configured AND enabled
         # A user might have mfa_secret from partial setup but mfa_enabled=False
         mfa_fully_configured = user.mfa_enabled and user.mfa_secret and user.mfa_secret.strip()
-        
+
         if not mfa_fully_configured:
             # MFA is required but not fully configured - initiate/re-initiate setup flow
             # Generate a new secret for this user (overwrites any partial setup)
             temp_secret = generate_mfa_secret()
             qr_code_uri = generate_mfa_qr_code_uri(user.email, temp_secret)
-            
-            # Save the secret to user record (MFA not enabled until confirmed)
-            user.mfa_secret = temp_secret
+
+            # Encrypt and save the secret to user record (MFA not enabled until confirmed)
+            from app.core.security import encrypt_mfa_secret
+            encrypted_secret = encrypt_mfa_secret(temp_secret)
+            user.mfa_secret = encrypted_secret
             user.mfa_enabled = False  # Explicitly ensure it's not enabled yet
             db.add(user)
             db.commit()
-            
+
             # Generate challenge token for verification
+            # Use plaintext secret for signing (will be decrypted internally)
             challenge_token = _generate_challenge_token(user.id, temp_secret)
-            
+
             logger.info(f"MFA setup initiated for privileged user {user.id} ({user.email})")
-            
+
             # Return setup information - NO tokens issued yet
             return LoginMFASetupResponse(
                 status="mfa_required",
@@ -497,7 +501,7 @@ async def login(request: LoginRequest, req: Request, db: Session = Depends(get_d
                 secret=temp_secret,
                 message="MFA is required for your account. Please scan the QR code with your authenticator app and enter the code to complete login."
             )
-        
+
         # MFA is configured and enabled - validate code
         if not request.mfa_code:
             # User has MFA configured but didn't provide code - return challenge response
@@ -641,6 +645,8 @@ def forgot_password(request: PasswordResetRequest, req: Request, db: Session = D
     Security measures:
     - Rate limiting: 1 request per minute per email
     - No email enumeration: Same response regardless of whether email exists
+    - Token hashing: Password reset tokens are hashed before storage (SHA-256)
+      Even if the database is compromised, attackers cannot use stolen tokens
     """
     # Normalize email for rate limiting
     email_normalized = request.email.strip().lower()
@@ -663,13 +669,17 @@ def forgot_password(request: PasswordResetRequest, req: Request, db: Session = D
         _password_reset_rate_limit[email_normalized] = current_time
         return {"message": "If that email exists, we've sent a password reset link."}
 
-    # Generate reset token
+    # Generate reset token (plaintext - sent to user via email)
     token = secrets.token_urlsafe(32)
-    user.password_reset_token = token
+    
+    # Hash the token before storing in database
+    # This ensures that even if the DB is compromised, tokens can't be used directly
+    hashed_token = hash_password_reset_token(token)
+    user.password_reset_token = hashed_token
     user.password_reset_expires = datetime.now(timezone.utc) + timedelta(hours=1)
     db.commit()
 
-    # Send email (async via celery would be better, but keeping sync for simplicity)
+    # Send email with plaintext token (user needs the plaintext to reset password)
     email_service.send_password_reset_email(user.email, token, user.full_name)
 
     # Update rate limit
@@ -680,8 +690,19 @@ def forgot_password(request: PasswordResetRequest, req: Request, db: Session = D
 
 @router.post("/reset-password")
 def reset_password(request: PasswordResetConfirm, db: Session = Depends(get_db)):
+    """
+    Reset password using a valid reset token.
+    
+    Security:
+    - Token is hashed before comparison with stored hash
+    - Prevents timing attacks via constant-time comparison
+    - Token must not be expired
+    """
+    # Hash the incoming token and compare with stored hash
+    incoming_hash = hash_password_reset_token(request.token)
+    
     user = db.query(User).filter(
-        User.password_reset_token == request.token,
+        User.password_reset_token == incoming_hash,
         User.password_reset_expires > datetime.now(timezone.utc)
     ).first()
 

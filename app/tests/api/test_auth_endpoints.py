@@ -182,9 +182,9 @@ class TestRefreshTokenEndpoint:
     def test_refresh_expired_token(self, client: TestClient):
         """Expired refresh token should return 401."""
         # Create expired token
-        from jose import jwt
+        import jwt
         from app.config import settings
-        
+
         payload = {
             "sub": "1",
             "exp": datetime.now(timezone.utc) - timedelta(days=1),

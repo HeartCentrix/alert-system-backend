@@ -1,9 +1,11 @@
 # =============================================================================
 # TM Alert - Full Requirements (CI/CD + Development)
-# 
-# SECURITY: For production deployments, generate hash-verified requirements:
-#   pip-compile --generate-hashes requirements.txt -o requirements-locked.txt
+#
+# SECURITY: For production deployments, use hash-verified requirements:
 #   pip install --require-hashes -r requirements-locked.txt
+#
+# To regenerate requirements-locked.txt with updated hashes:
+#   pip-compile --generate-hashes requirements.txt -o requirements-locked.txt
 # =============================================================================
 
 # Core
@@ -25,7 +27,7 @@ redis==5.0.4
 celery==5.4.0
 
 # Authentication
-python-jose[cryptography]==3.3.0
+PyJWT==2.8.0
 passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 pyotp==2.9.0

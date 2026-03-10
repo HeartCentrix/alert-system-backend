@@ -25,10 +25,14 @@ def send_notification_task(self, notification_id: int, triggered_by_user_id: int
     - FAILED: All deliveries failed or zero recipients
 
     Idempotency: Uses atomic status claim to prevent double-dispatch on celery beat overlap.
+    
+    Audit Trail:
+    - triggered_by_user_id and triggered_by_email track who initiated the notification
+    - Audit log entry created on task execution for full traceability
     """
     db = SessionLocal()
     notification = None
-    
+
     # Log who triggered this task for forensic traceability
     if triggered_by_user_id:
         logger.info(

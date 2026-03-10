@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     # RFC 6238 recommends at most one time step; 0 is preferred for security
     MFA_TOTP_VALID_WINDOW: int = 0
 
+    # MFA encryption key for encrypting MFA secrets at rest (Fernet key)
+    # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    MFA_ENCRYPTION_KEY: str = ""
+
     class Config:
         env_file = ".env"
         case_sensitive = True

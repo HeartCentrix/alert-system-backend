@@ -286,8 +286,8 @@ def super_admin_auth_tokens(super_admin_user: User) -> dict:
 def expired_token() -> str:
     """Generate an expired access token."""
     from app.core.security import ALGORITHM
-    from jose import jwt
-    
+    import jwt
+
     payload = {
         "sub": "1",
         "role": "viewer",

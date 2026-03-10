@@ -670,9 +670,10 @@ def admin_reset_user_mfa(
     )
 
     # Generate new pending enrollment
-    from app.core.security import generate_mfa_secret
+    from app.core.security import generate_mfa_secret, encrypt_mfa_secret
     new_secret = generate_mfa_secret()
-    target_user.mfa_secret = new_secret
+    encrypted_secret = encrypt_mfa_secret(new_secret)
+    target_user.mfa_secret = encrypted_secret
     # Note: mfa_enabled remains False - user must complete enrollment
 
     # Audit log

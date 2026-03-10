@@ -425,6 +425,72 @@ async def limit_request_size(request: Request, call_next):
 
     return await call_next(request)
 
+
+# Response size limit middleware
+@app.middleware("http")
+async def limit_response_size(request: Request, call_next):
+    """
+    Middleware to limit response body size.
+
+    Prevents DoS attacks via oversized responses and protects against
+    malicious admins creating scenarios that return very large responses
+    (e.g., requesting all delivery logs for a mass notification).
+
+    Returns 500 Internal Server Error if response exceeds limits.
+
+    Handles:
+    - Regular responses (checked after generation)
+    - Streaming responses (checked during streaming)
+    """
+    from fastapi.responses import JSONResponse, StreamingResponse
+
+    MAX_RESPONSE_SIZE = 5 * 1024 * 1024  # 5MB max response body size
+
+    response = await call_next(request)
+
+    # For regular responses, check Content-Length if available
+    content_length = response.headers.get("content-length")
+    if content_length:
+        try:
+            size = int(content_length)
+            if size > MAX_RESPONSE_SIZE:
+                logger.warning(
+                    f"Response size {size} bytes exceeds limit {MAX_RESPONSE_SIZE} bytes "
+                    f"for {request.method} {request.url.path}"
+                )
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "detail": "Response too large. Please use pagination or filters to reduce the response size."
+                    }
+                )
+        except (ValueError, TypeError):
+            pass
+
+    # For streaming responses, wrap the body iterator to count bytes
+    if isinstance(response, StreamingResponse):
+        original_body = response.body_iterator
+        sent_bytes = 0
+
+        async def counting_iterator():
+            nonlocal sent_bytes
+            async for chunk in original_body:
+                sent_bytes += len(chunk)
+                if sent_bytes > MAX_RESPONSE_SIZE:
+                    logger.warning(
+                        f"Streaming response size {sent_bytes} bytes exceeds limit "
+                        f"{MAX_RESPONSE_SIZE} bytes for {request.method} {request.url.path}"
+                    )
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Response too large. Please use pagination or filters to reduce the response size."
+                    )
+                yield chunk
+
+        response.body_iterator = counting_iterator()
+
+    return response
+
 # ─── ROUTES ───────────────────────────────────────────────────────────────────
 
 API_PREFIX = "/api/v1"
