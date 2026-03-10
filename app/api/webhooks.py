@@ -20,6 +20,7 @@ from app.schemas import IncomingMessageResponse
 from datetime import datetime, timezone
 import logging
 from xml.sax.saxutils import escape as xml_escape
+from urllib.parse import parse_qs
 from twilio.request_validator import RequestValidator
 
 router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
@@ -51,8 +52,17 @@ def validate_twilio_request(request: Request, body: bytes) -> bool:
     # Reconstruct the URL (Twilio signs the full URL including query params)
     url = str(request.url)
     
+    # Parse raw body bytes into a dict of str->str params
+    # Twilio's RequestValidator.validate() expects a dict, not raw bytes
+    params = {}
+    if body:
+        body_str = body.decode("utf-8")
+        parsed = parse_qs(body_str, keep_blank_values=True)
+        # parse_qs returns lists; Twilio expects single string values
+        params = {k: v[0] for k, v in parsed.items()}
+    
     # Validate the signature
-    is_valid = validator.validate(url, body, signature)
+    is_valid = validator.validate(url, params, signature)
     
     if not is_valid:
         logger.warning(f"Invalid Twilio signature for URL: {url}")
@@ -129,12 +139,14 @@ async def sms_inbound(
     if not validate_twilio_request(request, body_bytes):
         raise HTTPException(status_code=401, detail="Invalid Twilio signature")
 
-    # Parse form data from the already-read body
-    form_data = await request.form()
-    From = form_data.get("From", "")
-    To = form_data.get("To", "")
-    Body = form_data.get("Body", "")
-    MessageSid = form_data.get("MessageSid", "")
+    # Parse form data from the raw body bytes (stream already consumed above)
+    body_str = body_bytes.decode("utf-8")
+    form_data = parse_qs(body_str, keep_blank_values=True)
+    # parse_qs returns lists, extract single values
+    From = form_data.get("From", [""])[0]
+    To = form_data.get("To", [""])[0]
+    Body = form_data.get("Body", [""])[0]
+    MessageSid = form_data.get("MessageSid", [""])[0]
 
     logger.info(f"Inbound SMS from {From}: {Body}")
 
@@ -222,11 +234,12 @@ async def sms_status_callback(
     if not validate_twilio_request(request, body_bytes):
         raise HTTPException(status_code=401, detail="Invalid Twilio signature")
 
-    # Parse form data from the already-read body
-    form_data = await request.form()
-    MessageSid = form_data.get("MessageSid", "")
-    MessageStatus = form_data.get("MessageStatus", "")
-    To = form_data.get("To", "")
+    # Parse form data from the raw body bytes (stream already consumed above)
+    body_str = body_bytes.decode("utf-8")
+    form_data = parse_qs(body_str, keep_blank_values=True)
+    MessageSid = form_data.get("MessageSid", [""])[0]
+    MessageStatus = form_data.get("MessageStatus", [""])[0]
+    To = form_data.get("To", [""])[0]
     
     logger.info(f"SMS status update: {MessageSid} -> {MessageStatus}")
 
@@ -268,13 +281,14 @@ async def voice_status_callback(
     if not validate_twilio_request(request, body_bytes):
         raise HTTPException(status_code=401, detail="Invalid Twilio signature")
 
-    # Parse form data from the already-read body
-    form_data = await request.form()
-    CallSid = form_data.get("CallSid", "")
-    CallStatus = form_data.get("CallStatus", "")
-    To = form_data.get("To", "")
-    From = form_data.get("From", "")
-    Duration = form_data.get("Duration", "")
+    # Parse form data from the raw body bytes (stream already consumed above)
+    body_str = body_bytes.decode("utf-8")
+    form_data = parse_qs(body_str, keep_blank_values=True)
+    CallSid = form_data.get("CallSid", [""])[0]
+    CallStatus = form_data.get("CallStatus", [""])[0]
+    To = form_data.get("To", [""])[0]
+    From = form_data.get("From", [""])[0]
+    Duration = form_data.get("Duration", [""])[0]
 
     logger.info(f"Voice status: {CallSid} -> {CallStatus}, Duration: {Duration}s")
 
@@ -326,11 +340,12 @@ async def voice_response(
         raise HTTPException(status_code=401, detail="Invalid Twilio signature")
 
     try:
-        # Parse form data from the already-read body
-        form_data = await request.form()
-        Digits = form_data.get("Digits", "")
-        CallSid = form_data.get("CallSid", "")
-        From = form_data.get("From", "")
+        # Parse form data from the raw body bytes (stream already consumed above)
+        body_str = body_bytes.decode("utf-8")
+        form_data = parse_qs(body_str, keep_blank_values=True)
+        Digits = form_data.get("Digits", [""])[0]
+        CallSid = form_data.get("CallSid", [""])[0]
+        From = form_data.get("From", [""])[0]
         
         logger.info(f"Parsed form data - From: {From}, Digits: '{Digits}', CallSid: {CallSid}")
 
