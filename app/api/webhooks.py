@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request, Form, Depends, HTTPException
+from fastapi import APIRouter, Request, Depends, HTTPException
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, update
@@ -121,18 +121,21 @@ def _find_user_by_phone(db: Session, phone_number: str) -> Optional[User]:
 @router.post("/sms/inbound")
 async def sms_inbound(
     request: Request,
-    From: str = Form(...),
-    To: str = Form(...),
-    Body: str = Form(""),
-    MessageSid: str = Form(""),
     db: Session = Depends(get_db),
 ):
     """Handle inbound SMS from Twilio - employees replying SAFE/HELP/1/2"""
-    # Validate Twilio signature
+    # Read body FIRST (before any form parsing) to avoid "Stream consumed" error
     body_bytes = await request.body()
     if not validate_twilio_request(request, body_bytes):
         raise HTTPException(status_code=401, detail="Invalid Twilio signature")
-    
+
+    # Parse form data from the already-read body
+    form_data = await request.form()
+    From = form_data.get("From", "")
+    To = form_data.get("To", "")
+    Body = form_data.get("Body", "")
+    MessageSid = form_data.get("MessageSid", "")
+
     logger.info(f"Inbound SMS from {From}: {Body}")
 
     body_clean = Body.strip().upper()
@@ -211,16 +214,19 @@ async def sms_inbound(
 @router.post("/sms/status")
 async def sms_status_callback(
     request: Request,
-    MessageSid: str = Form(""),
-    MessageStatus: str = Form(""),
-    To: str = Form(""),
     db: Session = Depends(get_db),
 ):
     """Twilio delivery status callback for outbound SMS."""
-    # Validate Twilio signature
+    # Read body FIRST (before any form parsing) to avoid "Stream consumed" error
     body_bytes = await request.body()
     if not validate_twilio_request(request, body_bytes):
         raise HTTPException(status_code=401, detail="Invalid Twilio signature")
+
+    # Parse form data from the already-read body
+    form_data = await request.form()
+    MessageSid = form_data.get("MessageSid", "")
+    MessageStatus = form_data.get("MessageStatus", "")
+    To = form_data.get("To", "")
     
     logger.info(f"SMS status update: {MessageSid} -> {MessageStatus}")
 
@@ -254,21 +260,21 @@ async def sms_status_callback(
 @router.post("/voice/status")
 async def voice_status_callback(
     request: Request,
-    CallSid: str = Form(""),
-    CallStatus: str = Form(""),
-    To: str = Form(""),
-    From: str = Form(""),
-    Duration: str = Form(""),
     db: Session = Depends(get_db),
 ):
     """Twilio call status callback for outbound voice calls."""
-    # Validate Twilio signature - body already consumed by Form()
-    # Reconstruct body from form data for signature validation
-    form_data = f"CallSid={CallSid}&CallStatus={CallStatus}&To={To}&From={From}&Duration={Duration}"
-    body_bytes = form_data.encode()
-    
+    # Read body FIRST (before any form parsing) to avoid "Stream consumed" error
+    body_bytes = await request.body()
     if not validate_twilio_request(request, body_bytes):
         raise HTTPException(status_code=401, detail="Invalid Twilio signature")
+
+    # Parse form data from the already-read body
+    form_data = await request.form()
+    CallSid = form_data.get("CallSid", "")
+    CallStatus = form_data.get("CallStatus", "")
+    To = form_data.get("To", "")
+    From = form_data.get("From", "")
+    Duration = form_data.get("Duration", "")
 
     logger.info(f"Voice status: {CallSid} -> {CallStatus}, Duration: {Duration}s")
 
@@ -311,22 +317,16 @@ async def voice_status_callback(
 @router.post("/voice/response")
 async def voice_response(
     request: Request,
-    Digits: str = Form(""),
-    CallSid: str = Form(""),
-    From: str = Form(""),
     db: Session = Depends(get_db),
 ):
     """Handle keypress response from voice calls - 1=Safe, 2=Help."""
-    # Validate Twilio signature
+    # Read body FIRST (before any form parsing) to avoid "Stream consumed" error
     body_bytes = await request.body()
     if not validate_twilio_request(request, body_bytes):
         raise HTTPException(status_code=401, detail="Invalid Twilio signature")
-    
-    logger.info(f"=== VOICE WEBHOOK CALLED ===")
-    logger.info(f"From: {From}, Digits: '{Digits}', CallSid: {CallSid}")
 
     try:
-        # Parse form data explicitly
+        # Parse form data from the already-read body
         form_data = await request.form()
         Digits = form_data.get("Digits", "")
         CallSid = form_data.get("CallSid", "")
