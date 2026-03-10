@@ -40,13 +40,25 @@ class LocationCache:
     def __init__(self, redis_url: str):
         """
         Initialize Redis cache connection.
-        
+
         Args:
             redis_url: Redis connection URL (e.g., redis://localhost:6379/0)
+        
+        Security: Redis connections use TLS with full certificate verification
+        when using rediss:// scheme (ssl_cert_reqs=CERT_REQUIRED).
         """
         self.redis_url = redis_url
         self._redis: Optional[redis.Redis] = None
-    
+        # Build SSL options for TLS connections
+        # SECURITY: Require TLS with full certificate verification (CERT_REQUIRED)
+        self.ssl_opts = {}
+        import ssl
+        if redis_url.startswith("rediss://"):
+            self.ssl_opts = {
+                "ssl_cert_reqs": ssl.CERT_REQUIRED,
+                "ssl_check_hostname": True,
+            }
+
     async def connect(self) -> None:
         """Establish Redis connection."""
         if self._redis is None:
@@ -56,6 +68,7 @@ class LocationCache:
                 decode_responses=True,
                 socket_connect_timeout=5,
                 socket_timeout=5,
+                **self.ssl_opts
             )
             logger.info("Redis cache connected")
     

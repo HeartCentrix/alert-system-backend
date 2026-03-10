@@ -1,6 +1,7 @@
 from celery import Celery
 from celery.schedules import crontab
 from app.config import settings
+import ssl
 
 # Railway public Redis requires SSL - handle both rediss:// and redis://
 redis_url = settings.REDIS_URL
@@ -8,9 +9,14 @@ broker_url = redis_url
 backend_url = redis_url
 
 # Build SSL options if using rediss://
+# SECURITY: Require TLS with full certificate verification (CERT_REQUIRED)
+# Self-signed or unverified certificates are NOT accepted
 ssl_opts = {}
 if redis_url.startswith("rediss://"):
-    ssl_opts = {"ssl_cert_reqs": None}
+    ssl_opts = {
+        "ssl_cert_reqs": ssl.CERT_REQUIRED,  # Enforce certificate verification
+        "ssl_check_hostname": True,  # Verify hostname matches certificate
+    }
 
 celery_app = Celery(
     "tm_alert",

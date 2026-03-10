@@ -7,17 +7,32 @@ Stores two counter types:
   - Notification-level: tracks notification dispatch rate per user
 
 All keys have TTL auto-expiry so counters self-clean.
+
+Security: Redis connections use TLS with full certificate verification
+when using rediss:// scheme (ssl_cert_reqs=CERT_REQUIRED).
 """
 
 import redis.asyncio as redis
+import ssl
 from datetime import timedelta
 from app.config import settings
+
+# Build SSL options for TLS connections
+# SECURITY: Require TLS with full certificate verification (CERT_REQUIRED)
+# Self-signed or unverified certificates are NOT accepted
+ssl_opts = {}
+if settings.REDIS_URL.startswith("rediss://"):
+    ssl_opts = {
+        "ssl_cert_reqs": ssl.CERT_REQUIRED,
+        "ssl_check_hostname": True,
+    }
 
 # Connection pool — shared across the application
 _pool = redis.ConnectionPool.from_url(
     settings.REDIS_URL,
     max_connections=20,
     decode_responses=True,
+    **ssl_opts,
 )
 
 
