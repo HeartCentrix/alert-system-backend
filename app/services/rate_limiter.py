@@ -1,22 +1,38 @@
 """
-Redis-backed rate limiting for login attempts.
+Redis-backed rate limiting for login attempts and notification dispatch.
 
 Stores two counter types:
   - Account-level: tracks per-user failed attempts (keyed by user ID)
   - IP-level: tracks per-IP failed attempts (keyed by IP address)
+  - Notification-level: tracks notification dispatch rate per user
 
 All keys have TTL auto-expiry so counters self-clean.
+
+Security: Redis connections use TLS with full certificate verification
+when using rediss:// scheme (ssl_cert_reqs=CERT_REQUIRED).
 """
 
 import redis.asyncio as redis
+import ssl
 from datetime import timedelta
 from app.config import settings
+
+# Build SSL options for TLS connections
+# SECURITY: Require TLS with full certificate verification (CERT_REQUIRED)
+# Self-signed or unverified certificates are NOT accepted
+ssl_opts = {}
+if settings.REDIS_URL.startswith("rediss://"):
+    ssl_opts = {
+        "ssl_cert_reqs": ssl.CERT_REQUIRED,
+        "ssl_check_hostname": True,
+    }
 
 # Connection pool — shared across the application
 _pool = redis.ConnectionPool.from_url(
     settings.REDIS_URL,
     max_connections=20,
     decode_responses=True,
+    **ssl_opts,
 )
 
 
@@ -45,6 +61,11 @@ def _ip_lock_key(ip: str) -> str:
 
 def _device_key(fingerprint: str) -> str:
     return f"login:fail:device:{fingerprint}"
+
+
+def _notification_key(user_id: int) -> str:
+    """Key for notification dispatch rate limiting."""
+    return f"notification:dispatch:user:{user_id}"
 
 
 # ──────────────────────────────────────────────
@@ -174,3 +195,75 @@ async def get_device_failure_count(fingerprint: str) -> int:
     r = _get_client()
     count = await r.get(_device_key(fingerprint))
     return int(count) if count else 0
+
+
+# ──────────────────────────────────────────────
+# Notification dispatch rate limiting
+# ──────────────────────────────────────────────
+# Constants
+NOTIFICATION_RATE_LIMIT_MAX = 10  # Max notifications per minute
+NOTIFICATION_RATE_LIMIT_WINDOW = 60  # 60 seconds window
+
+
+async def check_notification_rate_limit(user_id: int) -> tuple[bool, int]:
+    """
+    Check if user has exceeded notification dispatch rate limit.
+
+    Args:
+        user_id: ID of the user creating the notification
+
+    Returns:
+        Tuple of (is_allowed, retry_after_seconds)
+        - is_allowed: True if user can send notification
+        - retry_after_seconds: Seconds until rate limit resets (0 if allowed)
+    """
+    r = _get_client()
+    key = _notification_key(user_id)
+
+    count = await r.get(key)
+    if count is None:
+        return True, 0
+
+    count = int(count)
+    if count >= NOTIFICATION_RATE_LIMIT_MAX:
+        # Get TTL for retry-after header
+        ttl = await r.ttl(key)
+        return False, ttl if ttl > 0 else NOTIFICATION_RATE_LIMIT_WINDOW
+
+    return True, 0
+
+
+async def record_notification_dispatch(user_id: int) -> int:
+    """
+    Record a notification dispatch for rate limiting.
+
+    Args:
+        user_id: ID of the user creating the notification
+
+    Returns:
+        The new dispatch count within the current window
+    """
+    r = _get_client()
+    key = _notification_key(user_id)
+
+    count = await r.incr(key)
+    if count == 1:
+        # First dispatch in window, set TTL
+        await r.expire(key, timedelta(seconds=NOTIFICATION_RATE_LIMIT_WINDOW))
+
+    return count
+
+
+async def get_notification_dispatch_count(user_id: int) -> int:
+    """Get current notification dispatch count for a user."""
+    r = _get_client()
+    key = _notification_key(user_id)
+    count = await r.get(key)
+    return int(count) if count else 0
+
+
+async def clear_notification_limit(user_id: int):
+    """Clear notification rate limit for a user (admin use only)."""
+    r = _get_client()
+    key = _notification_key(user_id)
+    await r.delete(key)

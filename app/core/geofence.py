@@ -265,14 +265,24 @@ class RedisGeoService:
         self.redis_url = redis_url
         self._redis: Optional[redis.Redis] = None
         self.GEO_INDEX_KEY = "geo:locations:index"
-    
+        # Build SSL options for TLS connections
+        # SECURITY: Require TLS with full certificate verification (CERT_REQUIRED)
+        self.ssl_opts = {}
+        if redis_url.startswith("rediss://"):
+            import ssl
+            self.ssl_opts = {
+                "ssl_cert_reqs": ssl.CERT_REQUIRED,
+                "ssl_check_hostname": True,
+            }
+
     async def connect(self) -> None:
         """Initialize Redis connection."""
         if not self._redis:
             self._redis = redis.from_url(
                 self.redis_url,
                 encoding="utf-8",
-                decode_responses=True
+                decode_responses=True,
+                **self.ssl_opts
             )
     
     async def close(self) -> None:

@@ -167,12 +167,26 @@ def _get_redis_client() -> redis.Redis:
     Get a synchronous Redis client for login rate limiting.
     Uses sync client because login is a sync function.
     Fails closed (raises exception) if Redis is unavailable.
+    
+    Security: Redis connections use TLS with full certificate verification
+    when using rediss:// scheme (ssl_cert_reqs=CERT_REQUIRED).
     """
+    # Build SSL options for TLS connections
+    # SECURITY: Require TLS with full certificate verification (CERT_REQUIRED)
+    ssl_opts = {}
+    import ssl
+    if settings.REDIS_URL.startswith("rediss://"):
+        ssl_opts = {
+            "ssl_cert_reqs": ssl.CERT_REQUIRED,
+            "ssl_check_hostname": True,
+        }
+    
     return redis.from_url(
         settings.REDIS_URL,
         decode_responses=True,
         socket_connect_timeout=5,
         socket_timeout=5,
+        **ssl_opts
     )
 
 

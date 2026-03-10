@@ -433,31 +433,7 @@ app.include_router(docs_router, prefix=API_PREFIX)
 
 @app.get("/health", tags=["Health"])
 def health_check():
-    """Public health check — used by Railway healthcheck probe.
-    
-    Returns minimal response with no environment details.
-    For detailed diagnostics, use GET /health/detail (requires admin auth).
-    """
-    return {"status": "ok"}
-
-
-@app.get("/health/detail", tags=["Health"])
-def health_check_detail(current_user=Depends(require_admin)):
-    """Detailed health check — requires ADMIN or SUPER_ADMIN role.
-    
-    Returns application metadata useful for ops dashboards and debugging.
-    Protected because it reveals environment, version, and infrastructure info
-    that attackers could use for fingerprinting.
-    """
-    import sys
-
-    return {
-        "status": "ok",
-        "app": settings.APP_NAME,
-        "env": settings.APP_ENV,
-        "version": app.version,
-        "python_version": sys.version.split()[0],
-    }
+    return {"status": "healthy"}
 
 
 @app.get("/", tags=["Root"])

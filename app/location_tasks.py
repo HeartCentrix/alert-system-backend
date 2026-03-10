@@ -402,14 +402,26 @@ def _sync_user_to_redis(self, user_id: int, latitude: float, longitude: float) -
     Sync user location to Redis for fast lookups.
 
     Stores user's current location with TTL for automatic cleanup.
+    
+    Security: Redis connections use TLS with full certificate verification
+    when using rediss:// scheme (ssl_cert_reqs=CERT_REQUIRED).
     """
     try:
         import redis
+        import ssl
         from app.config import settings
-        
+
+        # Build SSL options for TLS connections
+        ssl_opts = {}
+        if settings.REDIS_URL.startswith("rediss://"):
+            ssl_opts = {
+                "ssl_cert_reqs": ssl.CERT_REQUIRED,
+                "ssl_check_hostname": True,
+            }
+
         # Use synchronous Redis client for Celery task
-        r = redis.from_url(settings.REDIS_URL, decode_responses=True)
-        
+        r = redis.from_url(settings.REDIS_URL, decode_responses=True, **ssl_opts)
+
         # Store user location with 24 hour TTL
         key = f"user:location:{user_id}"
         r.setex(
@@ -417,7 +429,7 @@ def _sync_user_to_redis(self, user_id: int, latitude: float, longitude: float) -
             86400,  # 24 hours
             f"{latitude},{longitude}"
         )
-        
+
         return True
     except Exception as e:
         logger.error(f"Redis user sync failed: {e}")
@@ -430,14 +442,26 @@ def sync_all_locations_to_redis() -> Dict[str, Any]:
     Sync all active locations to Redis GEO index.
 
     Run this periodically or after bulk location changes.
+    
+    Security: Redis connections use TLS with full certificate verification
+    when using rediss:// scheme (ssl_cert_reqs=CERT_REQUIRED).
     """
     db = SessionLocal()
     try:
         import redis
+        import ssl
         from app.config import settings
-        
+
+        # Build SSL options for TLS connections
+        ssl_opts = {}
+        if settings.REDIS_URL.startswith("rediss://"):
+            ssl_opts = {
+                "ssl_cert_reqs": ssl.CERT_REQUIRED,
+                "ssl_check_hostname": True,
+            }
+
         # Use synchronous Redis client for Celery task
-        r = redis.from_url(settings.REDIS_URL, decode_responses=True)
+        r = redis.from_url(settings.REDIS_URL, decode_responses=True, **ssl_opts)
         
         locations = db.query(Location).filter(
             Location.is_active == True,

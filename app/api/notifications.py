@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Response
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, update
 from typing import Optional, List
@@ -7,7 +7,7 @@ from app.database import get_db
 from app.models import (
     Notification, NotificationStatus, Incident, IncidentStatus, IncidentSeverity,
     User, Group, DeliveryLog, DeliveryStatus, NotificationResponse as NRModel,
-    AuditLog, AlertChannel
+    AuditLog, AlertChannel, UserRole
 )
 from app.schemas import (
     NotificationCreate, NotificationResponse, NotificationDetailResponse,
@@ -17,6 +17,11 @@ from app.schemas import (
 from app.core.deps import get_current_user, require_admin, require_manager
 from app.tasks import send_notification_task
 from app.services.messaging import _is_safe_url
+from app.services.rate_limiter import (
+    check_notification_rate_limit,
+    record_notification_dispatch,
+    NOTIFICATION_RATE_LIMIT_MAX,
+)
 
 # ─── INCIDENT STATUS TRANSITIONS ──────────────────────────────────────────────
 
@@ -154,15 +159,34 @@ def list_notifications(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    """List notifications with optional filtering.
+    
+    Access Control:
+        - Manager and Admin roles: Can see all notifications
+        - Viewer role: Can only see notifications where they are recipients
+    """
     query = db.query(Notification)
+    
+    # Viewer-role users can only see notifications where they are recipients
+    if current_user.role == UserRole.VIEWER:
+        # Show notifications where: target_all=True OR user is in target_users OR user is in target_groups
+        from sqlalchemy import or_
+        query = query.filter(
+            or_(
+                Notification.target_all == True,
+                Notification.target_users.any(User.id == current_user.id),
+                Notification.target_groups.any(Group.members.any(User.id == current_user.id))
+            )
+        )
+    
     if incident_id:
         query = query.filter(Notification.incident_id == incident_id)
     if status:
         query = query.filter(Notification.status == status)
-    
+
     # Get total count
     total = query.count()
-    
+
     # Get paginated results and convert to dict
     items = query.order_by(desc(Notification.created_at)).offset((page - 1) * page_size).limit(page_size).all()
     
@@ -194,11 +218,20 @@ def list_notifications(
 
 
 @notifications_router.post("", response_model=NotificationResponse, status_code=201)
-def create_notification(
+async def create_notification(
     data: NotificationCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_manager)
 ):
+    # Rate limiting: Check if user has exceeded notification dispatch limit
+    is_allowed, retry_after = await check_notification_rate_limit(current_user.id)
+    if not is_allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit exceeded. Maximum {NOTIFICATION_RATE_LIMIT_MAX} notifications per minute.",
+            headers={"Retry-After": str(retry_after)}
+        )
+
     # Validate at least one recipient method
     if not data.target_all and not data.target_group_ids and not data.target_user_ids:
         raise HTTPException(status_code=400, detail="Must specify recipients: target_all, groups, or users")
@@ -252,6 +285,9 @@ def create_notification(
     db.commit()
     db.refresh(notification)
 
+    # Record this dispatch for rate limiting
+    await record_notification_dispatch(current_user.id)
+
     # Send immediately if not scheduled (task will change status to SENT when complete)
     if not data.scheduled_at:
         send_notification_task.delay(notification.id)
@@ -260,12 +296,24 @@ def create_notification(
 
 
 @notifications_router.post("/{notification_id}/send", response_model=NotificationResponse)
-def send_notification(
+async def send_notification(
     notification_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_manager)
 ):
-    """Manually trigger a draft notification."""
+    """Manually trigger a draft notification.
+    
+    Rate Limit: Maximum 10 notifications per minute per user.
+    """
+    # Rate limiting: Check if user has exceeded notification dispatch limit
+    is_allowed, retry_after = await check_notification_rate_limit(current_user.id)
+    if not is_allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit exceeded. Maximum {NOTIFICATION_RATE_LIMIT_MAX} notifications per minute.",
+            headers={"Retry-After": str(retry_after)}
+        )
+
     notification = db.query(Notification).filter(Notification.id == notification_id).first()
     if not notification:
         raise HTTPException(status_code=404, detail="Notification not found")
@@ -273,6 +321,10 @@ def send_notification(
         raise HTTPException(status_code=400, detail=f"Cannot send notification in {notification.status} state")
 
     send_notification_task.delay(notification_id)
+    
+    # Record this dispatch for rate limiting
+    await record_notification_dispatch(current_user.id)
+    
     db.add(AuditLog(
         user_id=current_user.id,
         user_email=current_user.email,
@@ -307,9 +359,29 @@ def get_notification(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    """Get notification details.
+    
+    Access Control:
+        - Manager and Admin roles: Can see all notifications
+        - Viewer role: Can only see notifications where they are recipients
+    """
     notification = db.query(Notification).filter(Notification.id == notification_id).first()
     if not notification:
         raise HTTPException(status_code=404, detail="Notification not found")
+    
+    # Viewer-role users can only see notifications where they are recipients
+    if current_user.role == UserRole.VIEWER:
+        from sqlalchemy import or_
+        is_recipient = (
+            notification.target_all or
+            any(u.id == current_user.id for u in notification.target_users) or
+            any(g.members and any(m.id == current_user.id for m in g.members) for g in notification.target_groups)
+        )
+        if not is_recipient:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied. You can only view notifications where you are a recipient."
+            )
 
     delivery_stats = _get_delivery_stats(db, notification_id)
     response_stats = _get_response_stats(db, notification_id)
@@ -370,21 +442,13 @@ def get_responses(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Get responses for a notification.
+    """Get notification responses.
 
     Args:
         notification_id: ID of the notification
-        limit: Maximum number of results (1-1000, default 100)
-        offset: Number of results to skip (default 0)
     """
-    responses = (
-        db.query(NRModel)
-        .filter(NRModel.notification_id == notification_id)
-        .order_by(desc(NRModel.id))
-        .offset(offset)
-        .limit(limit)
-        .all()
-    )
+    query = db.query(NRModel).filter(NRModel.notification_id == notification_id)
+    responses = query.all()
     result = []
     for r in responses:
         result.append(NotificationResponseOut(

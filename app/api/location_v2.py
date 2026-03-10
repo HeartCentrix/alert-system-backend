@@ -140,15 +140,6 @@ class LocationAutocompleteResponse(BaseModel):
     query_time_ms: float
 
 
-class LocationHealthResponse(BaseModel):
-    """Health check response."""
-    service: str
-    configured: bool
-    redis_connected: bool
-    cache_keys: int
-    celery_available: bool
-
-
 # ─── HELPER FUNCTIONS ─────────────────────────────────────────────────────────
 
 def validate_query(q: str) -> tuple[bool, Optional[str]]:
@@ -378,41 +369,13 @@ async def autocomplete(
     )
 
 
-@router.get("/health", response_model=LocationHealthResponse)
+@router.get("/health")
 async def health_check():
     """
-    Check location service health and cache status.
+    Check location service health.
+    Returns minimal information to avoid disclosing internal details.
     """
-    cache = None
-    redis_connected = False
-    cache_keys = 0
-    
-    try:
-        cache = get_location_cache()
-        redis_connected = cache.is_connected
-        if redis_connected:
-            stats = await cache.get_stats()
-            cache_keys = stats.get("location_cache_keys", 0)
-    except Exception as e:
-        logger.error(f"Health check cache error: {e}")
-    
-    # Check Celery availability
-    celery_available = False
-    try:
-        from app.celery_app import celery_app
-        inspect = celery_app.control.inspect()
-        ping_result = inspect.ping()
-        celery_available = bool(ping_result and len(ping_result) > 0)
-    except Exception as e:
-        logger.debug(f"Celery health check failed: {e}")
-    
-    return LocationHealthResponse(
-        service="locationiq",
-        configured=bool(settings.LOCATIONIQ_API_KEY),
-        redis_connected=redis_connected,
-        cache_keys=cache_keys,
-        celery_available=celery_available,
-    )
+    return {"status": "healthy"}
 
 
 @router.delete("/cache")

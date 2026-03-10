@@ -260,10 +260,5 @@ async def autocomplete(
 
 @router.get("/health")
 async def health_check():
-    """Check if location service is configured and available."""
-    configured = bool(settings.LOCATIONIQ_API_KEY)
-    return {
-        "service": "locationiq",
-        "configured": configured,
-        "cache_size": len(_location_cache),
-    }
+    """Check if location service is available."""
+    return {"status": "healthy"}
