@@ -48,10 +48,18 @@ def validate_twilio_request(request: Request, body: bytes) -> bool:
     if not signature:
         logger.warning("Missing X-Twilio-Signature header")
         return False
-    
-    # Reconstruct the URL (Twilio signs the full URL including query params)
-    url = str(request.url)
-    
+
+    # Reconstruct the URL that Twilio actually signed.
+    # Behind a reverse proxy (Railway, Heroku, etc.) request.url shows http://
+    # but Twilio was given the public https:// URL via BACKEND_URL.
+    # We must validate against the URL Twilio signed, not the internal proxy URL.
+    if settings.BACKEND_URL:
+        url = settings.BACKEND_URL.rstrip("/") + request.url.path
+        if request.url.query:
+            url += f"?{request.url.query}"
+    else:
+        url = str(request.url)
+
     # Parse raw body bytes into a dict of str->str params
     # Twilio's RequestValidator.validate() expects a dict, not raw bytes
     params = {}
@@ -60,13 +68,15 @@ def validate_twilio_request(request: Request, body: bytes) -> bool:
         parsed = parse_qs(body_str, keep_blank_values=True)
         # parse_qs returns lists; Twilio expects single string values
         params = {k: v[0] for k, v in parsed.items()}
-    
+
     # Validate the signature
     is_valid = validator.validate(url, params, signature)
-    
+
     if not is_valid:
         logger.warning(f"Invalid Twilio signature for URL: {url}")
-    
+        logger.warning(f"BACKEND_URL setting: {settings.BACKEND_URL}")
+        logger.warning(f"Request path: {request.url.path}, Query: {request.url.query}")
+
     return is_valid
 
 
