@@ -1248,9 +1248,18 @@ async def verify_mfa_and_complete_login(
     - Failed attempts counted toward rate limiting
     """
     import base64
-    
+
     client_ip = _get_client_ip(req)
-    
+
+    # Check IP-based rate limit FIRST (before processing challenge token)
+    # This prevents brute-force attacks on the TOTP code (6 digits = 1M combinations)
+    if await is_ip_locked(client_ip):
+        logger.warning(f"IP lockout for {client_ip} at MFA verify")
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed attempts. Please try again later.",
+        )
+
     # Decode challenge token to get user info
     try:
         padded = request.challenge_token + '=' * (4 - len(request.challenge_token) % 4)
@@ -1433,6 +1442,15 @@ async def verify_recovery_code_and_login(
     import base64
     
     client_ip = _get_client_ip(req)
+    
+    # Check IP-based rate limit FIRST (before processing challenge token)
+    # This prevents brute-force attacks on recovery codes
+    if await is_ip_locked(client_ip):
+        logger.warning(f"IP lockout for {client_ip} at recovery code verify")
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed attempts. Please try again later.",
+        )
     
     # Decode challenge token to get user info (same as MFA verify)
     try:
