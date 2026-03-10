@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from contextlib import asynccontextmanager
@@ -22,6 +22,7 @@ from app.models import (
 )
 from app.core.security import hash_password
 from app.core.location_cache import init_location_cache, close_location_cache
+from app.core.deps import require_admin
 from app.api.auth import router as auth_router
 from app.api.users import router as users_router
 from app.api.groups_locations_templates import (
@@ -432,18 +433,33 @@ app.include_router(docs_router, prefix=API_PREFIX)
 
 @app.get("/health", tags=["Health"])
 def health_check():
+    """Public health check — used by Railway healthcheck probe.
+    
+    Returns minimal response with no environment details.
+    For detailed diagnostics, use GET /health/detail (requires admin auth).
+    """
+    return {"status": "ok"}
+
+
+@app.get("/health/detail", tags=["Health"])
+def health_check_detail(current_user=Depends(require_admin)):
+    """Detailed health check — requires ADMIN or SUPER_ADMIN role.
+    
+    Returns application metadata useful for ops dashboards and debugging.
+    Protected because it reveals environment, version, and infrastructure info
+    that attackers could use for fingerprinting.
+    """
+    import sys
+
     return {
-        "status": "healthy",
+        "status": "ok",
         "app": settings.APP_NAME,
         "env": settings.APP_ENV,
-        "version": "1.0.0"
+        "version": app.version,
+        "python_version": sys.version.split()[0],
     }
 
 
 @app.get("/", tags=["Root"])
 def root():
-    return {
-        "message": "TM Alert API",
-        "docs": "/api/docs",
-        "version": "1.0.0"
-    }
+    return {"status": "ok"}
