@@ -27,7 +27,8 @@ from app.core.security import (
     verify_password, hash_password, create_access_token,
     create_refresh_token, decode_token, user_requires_mfa,
     verify_totp_code, generate_mfa_secret, generate_mfa_qr_code_uri,
-    hash_password_reset_token, verify_password_reset_token
+    hash_password_reset_token, verify_password_reset_token,
+    decrypt_mfa_secret,
 )
 from app.services.mfa_recovery import (
     generate_recovery_codes, verify_recovery_code,
@@ -519,9 +520,10 @@ async def login(request: LoginRequest, req: Request, db: Session = Depends(get_d
         # MFA is configured and enabled - validate code
         if not request.mfa_code:
             # User has MFA configured but didn't provide code - return challenge response
-            challenge_token = _generate_challenge_token(user.id, user.mfa_secret)
+            _plain_secret_for_challenge = decrypt_mfa_secret(user.mfa_secret) or user.mfa_secret
+            challenge_token = _generate_challenge_token(user.id, _plain_secret_for_challenge)
             logger.info(f"MFA challenge issued for user {user.id} ({user.email})")
-            
+
             return LoginMFAChallengeResponse(
                 status="mfa_required",
                 mfa_required=True,
@@ -531,7 +533,8 @@ async def login(request: LoginRequest, req: Request, db: Session = Depends(get_d
             )
 
         # Verify the TOTP code
-        if not verify_totp_code(user.mfa_secret, request.mfa_code):
+        _plain_secret_for_totp = decrypt_mfa_secret(user.mfa_secret) or user.mfa_secret
+        if not verify_totp_code(_plain_secret_for_totp, request.mfa_code):
             # Invalid MFA code - record as failed attempt
             count = await redis_record_failed_login(user.id)
             await record_ip_failure(client_ip)
@@ -1294,9 +1297,11 @@ async def verify_mfa_and_complete_login(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials or MFA code"
         )
-    
+
     # Verify challenge token signature using user's mfa_secret
-    is_valid, _ = _verify_challenge_token(request.challenge_token, user.mfa_secret or "")
+    # Must decrypt the secret since it's stored encrypted in the database
+    _plain_secret_for_verify = decrypt_mfa_secret(user.mfa_secret or "") or user.mfa_secret or ""
+    is_valid, _ = _verify_challenge_token(request.challenge_token, _plain_secret_for_verify)
     if not is_valid:
         logger.warning(f"Invalid challenge token signature for user {user_id}")
         raise HTTPException(
@@ -1319,8 +1324,9 @@ async def verify_mfa_and_complete_login(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials or MFA code"
         )
-    
-    if not verify_totp_code(user.mfa_secret, request.code):
+
+    _plain_secret_for_totp_verify = decrypt_mfa_secret(user.mfa_secret) or user.mfa_secret
+    if not verify_totp_code(_plain_secret_for_totp_verify, request.code):
         # Invalid MFA code - record as failed attempt
         try:
             count = await redis_record_failed_login(user.id)
