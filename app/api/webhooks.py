@@ -15,6 +15,7 @@ from app.models import (
     AlertChannel,
     DeliveryLog,
     DeliveryStatus,
+    UserRole,
 )
 from app.schemas import IncomingMessageResponse
 from datetime import datetime, timezone
@@ -455,11 +456,23 @@ def get_incoming_messages(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """View incoming messages (authenticated users only)."""
-    # Query with user relationship to include user_name in response
-    messages = (
+    """View incoming messages (authenticated users only).
+    
+    Access Control:
+        - Manager and Admin roles: Can see all incoming messages
+        - Viewer role: Can only see their own incoming messages
+    """
+    query = (
         db.query(IncomingMessage)
         .outerjoin(User, IncomingMessage.user_id == User.id)
+    )
+    
+    # Viewer-role users can only see their own incoming messages
+    if current_user.role == UserRole.VIEWER:
+        query = query.filter(IncomingMessage.user_id == current_user.id)
+    
+    messages = (
+        query
         .order_by(desc(IncomingMessage.received_at))
         .limit(limit)
         .all()

@@ -7,7 +7,7 @@ from app.database import get_db
 from app.models import (
     Notification, NotificationStatus, Incident, IncidentStatus, IncidentSeverity,
     User, Group, DeliveryLog, DeliveryStatus, NotificationResponse as NRModel,
-    AuditLog, AlertChannel
+    AuditLog, AlertChannel, UserRole
 )
 from app.schemas import (
     NotificationCreate, NotificationResponse, NotificationDetailResponse,
@@ -154,15 +154,34 @@ def list_notifications(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    """List notifications with optional filtering.
+    
+    Access Control:
+        - Manager and Admin roles: Can see all notifications
+        - Viewer role: Can only see notifications where they are recipients
+    """
     query = db.query(Notification)
+    
+    # Viewer-role users can only see notifications where they are recipients
+    if current_user.role == UserRole.VIEWER:
+        # Show notifications where: target_all=True OR user is in target_users OR user is in target_groups
+        from sqlalchemy import or_
+        query = query.filter(
+            or_(
+                Notification.target_all == True,
+                Notification.target_users.any(User.id == current_user.id),
+                Notification.target_groups.any(Group.members.any(User.id == current_user.id))
+            )
+        )
+    
     if incident_id:
         query = query.filter(Notification.incident_id == incident_id)
     if status:
         query = query.filter(Notification.status == status)
-    
+
     # Get total count
     total = query.count()
-    
+
     # Get paginated results and convert to dict
     items = query.order_by(desc(Notification.created_at)).offset((page - 1) * page_size).limit(page_size).all()
     
@@ -307,9 +326,29 @@ def get_notification(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    """Get notification details.
+    
+    Access Control:
+        - Manager and Admin roles: Can see all notifications
+        - Viewer role: Can only see notifications where they are recipients
+    """
     notification = db.query(Notification).filter(Notification.id == notification_id).first()
     if not notification:
         raise HTTPException(status_code=404, detail="Notification not found")
+    
+    # Viewer-role users can only see notifications where they are recipients
+    if current_user.role == UserRole.VIEWER:
+        from sqlalchemy import or_
+        is_recipient = (
+            notification.target_all or
+            any(u.id == current_user.id for u in notification.target_users) or
+            any(g.members and any(m.id == current_user.id for m in g.members) for g in notification.target_groups)
+        )
+        if not is_recipient:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied. You can only view notifications where you are a recipient."
+            )
 
     delivery_stats = _get_delivery_stats(db, notification_id)
     response_stats = _get_response_stats(db, notification_id)
@@ -364,7 +403,13 @@ def get_responses(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    responses = db.query(NRModel).filter(NRModel.notification_id == notification_id).all()
+    """Get notification responses.
+
+    Args:
+        notification_id: ID of the notification
+    """
+    query = db.query(NRModel).filter(NRModel.notification_id == notification_id)
+    responses = query.all()
     result = []
     for r in responses:
         result.append(NotificationResponseOut(
