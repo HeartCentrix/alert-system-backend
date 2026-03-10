@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request, Depends, HTTPException
+from fastapi import APIRouter, Request, Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, update
@@ -451,11 +451,15 @@ async def voice_response(
 
 @router.get("/incoming-messages", response_model=List[IncomingMessageResponse])
 def get_incoming_messages(
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=500),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """View incoming messages (authenticated users only)."""
+    """View incoming messages (authenticated users only).
+
+    Args:
+        limit: Maximum number of results (1-500, default 50)
+    """
     # Query with user relationship to include user_name in response
     messages = (
         db.query(IncomingMessage)

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from contextlib import asynccontextmanager
@@ -361,17 +361,23 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 async def limit_request_size(request: Request, call_next):
     """
     Middleware to limit request body size.
-    
+
     Prevents DoS attacks via oversized payloads.
     Returns 413 Payload Too Large if request exceeds limits.
+
+    Handles BOTH:
+    - Requests with Content-Length header (checked upfront)
+    - Chunked/streaming requests without Content-Length (checked during body read)
     """
+    from fastapi.responses import JSONResponse
+
     content_length = request.headers.get("content-length")
-    
+
+    # Fast-path: reject based on Content-Length header if present
     if content_length:
         try:
             size = int(content_length)
             if size > MAX_REQUEST_SIZE:
-                from fastapi.responses import JSONResponse
                 return JSONResponse(
                     status_code=413,
                     content={
@@ -379,8 +385,29 @@ async def limit_request_size(request: Request, call_next):
                     }
                 )
         except (ValueError, TypeError):
-            pass  # Invalid content-length, let downstream handle it
-    
+            pass
+
+    # For requests WITHOUT Content-Length (chunked transfer),
+    # wrap the receive callable to count bytes as they stream in
+    received_bytes = 0
+
+    original_receive = request._receive
+
+    async def counting_receive():
+        nonlocal received_bytes
+        message = await original_receive()
+        if message.get("type") == "http.request":
+            body = message.get("body", b"")
+            received_bytes += len(body)
+            if received_bytes > MAX_REQUEST_SIZE:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Request payload too large. Maximum size is {MAX_REQUEST_SIZE // (1024*1024)}MB"
+                )
+        return message
+
+    request._receive = counting_receive
+
     return await call_next(request)
 
 # ─── ROUTES ───────────────────────────────────────────────────────────────────

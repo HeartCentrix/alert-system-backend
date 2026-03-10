@@ -325,6 +325,8 @@ def get_delivery_logs(
     notification_id: int,
     channel: Optional[AlertChannel] = None,
     status: Optional[DeliveryStatus] = None,
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -334,13 +336,15 @@ def get_delivery_logs(
         notification_id: ID of the notification
         channel: Filter by delivery channel (sms, email, voice, web)
         status: Filter by delivery status (pending, sent, delivered, failed, bounced)
+        limit: Maximum number of results (1-1000, default 100)
+        offset: Number of results to skip (default 0)
     """
     query = db.query(DeliveryLog).filter(DeliveryLog.notification_id == notification_id)
     if channel:
         query = query.filter(DeliveryLog.channel == channel)
     if status:
         query = query.filter(DeliveryLog.status == status)
-    logs = query.all()
+    logs = query.order_by(desc(DeliveryLog.id)).offset(offset).limit(limit).all()
 
     result = []
     for log in logs:
@@ -361,10 +365,26 @@ def get_delivery_logs(
 @notifications_router.get("/{notification_id}/responses", response_model=List[NotificationResponseOut])
 def get_responses(
     notification_id: int,
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    responses = db.query(NRModel).filter(NRModel.notification_id == notification_id).all()
+    """Get responses for a notification.
+
+    Args:
+        notification_id: ID of the notification
+        limit: Maximum number of results (1-1000, default 100)
+        offset: Number of results to skip (default 0)
+    """
+    responses = (
+        db.query(NRModel)
+        .filter(NRModel.notification_id == notification_id)
+        .order_by(desc(NRModel.id))
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
     result = []
     for r in responses:
         result.append(NotificationResponseOut(
