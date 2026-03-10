@@ -1346,7 +1346,7 @@ async def verify_mfa_and_complete_login(
     if not user.mfa_enabled:
         user.mfa_enabled = True
         was_new_mfa = True
-        
+
         # Generate initial recovery codes for new MFA users
         try:
             plaintext_codes, batch_id = generate_recovery_codes(
@@ -1360,7 +1360,7 @@ async def verify_mfa_and_complete_login(
         except Exception as e:
             logger.error(f"Failed to generate recovery codes: {e}")
             # Don't fail the login, but log the issue
-        
+
         logger.info(f"MFA enabled for user {user_id} during login")
     
     # Issue tokens (same as successful login)
@@ -1411,11 +1411,11 @@ async def verify_mfa_and_complete_login(
         "token_type": "bearer",
         "user": UserResponse.model_validate(user),
     }
-    
+
     if was_new_mfa and recovery_codes:
         response_data["recovery_codes"] = recovery_codes
         response_data["recovery_codes_warning"] = "Store these codes securely. They will not be shown again."
-    
+
     return LoginSuccessResponse(**response_data)
 
 
