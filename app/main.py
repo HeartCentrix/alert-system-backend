@@ -230,12 +230,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to ensure user location columns: {e}")
 
-    # Ensure User table has token_valid_after column (session invalidation on password change)
-    try:
-        ensure_column_exists('users', 'token_valid_after', 'TIMESTAMP WITH TIME ZONE', nullable=True)
-    except Exception as e:
-        logger.error(f"Failed to ensure token_valid_after column: {e}")
-
     # Ensure audit_logs table has user_email column
     logger.info("Ensuring audit_logs table has user_email column...")
     try:
