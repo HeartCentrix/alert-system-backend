@@ -126,8 +126,8 @@ class User(Base):
 
     location = relationship("Location", back_populates="users")
     groups = relationship("Group", secondary=group_members, back_populates="members")
-    delivery_logs = relationship("DeliveryLog", back_populates="user")
-    responses = relationship("NotificationResponse", back_populates="user")
+    delivery_logs = relationship("DeliveryLog", back_populates="user", passive_deletes=True)
+    responses = relationship("NotificationResponse", back_populates="user", passive_deletes=True)
 
     @property
     def full_name(self):
@@ -259,7 +259,7 @@ class DeliveryLog(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     notification_id = Column(Integer, ForeignKey("notifications.id", ondelete="CASCADE"), nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     user_email = Column(String(255), nullable=True)  # Preserved after user deletion
     channel = Column(Enum(AlertChannel), nullable=False)
     status = Column(Enum(DeliveryStatus), default=DeliveryStatus.PENDING)
@@ -272,7 +272,7 @@ class DeliveryLog(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     notification = relationship("Notification", back_populates="delivery_logs")
-    user = relationship("User", back_populates="delivery_logs")
+    user = relationship("User", back_populates="delivery_logs", foreign_keys=[user_id])
 
 
 class NotificationResponse(Base):
@@ -280,7 +280,7 @@ class NotificationResponse(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     notification_id = Column(Integer, ForeignKey("notifications.id", ondelete="CASCADE"), nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     user_email = Column(String(255), nullable=True)  # Preserved after user deletion
     channel = Column(Enum(AlertChannel))
     response_type = Column(Enum(ResponseType), nullable=False)
@@ -291,7 +291,7 @@ class NotificationResponse(Base):
     responded_at = Column(DateTime(timezone=True), server_default=func.now())
 
     notification = relationship("Notification", back_populates="responses")
-    user = relationship("User", back_populates="responses")
+    user = relationship("User", back_populates="responses", foreign_keys=[user_id])
 
 
 class IncomingMessage(Base):
@@ -302,7 +302,7 @@ class IncomingMessage(Base):
     to_number = Column(String(20))
     body = Column(Text)
     channel = Column(Enum(AlertChannel), default=AlertChannel.SMS)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     user_email = Column(String(255), nullable=True)  # Preserved after user deletion
     notification_id = Column(Integer, ForeignKey("notifications.id"), nullable=True)
     is_processed = Column(Boolean, default=False)
@@ -450,3 +450,58 @@ class UserLocationHistory(Base):
 # Add back-references to User and Location models
 User.location_assignments = relationship("UserLocation", foreign_keys=[UserLocation.user_id], back_populates="user")
 Location.user_assignments = relationship("UserLocation", foreign_keys=[UserLocation.location_id], back_populates="location")
+
+
+# ─── MFA RECOVERY CODES ───────────────────────────────────────────────────────
+
+class MFARecoveryCode(Base):
+    """
+    Single-use recovery codes for MFA backup access.
+    
+    Security properties:
+    - Only hashed codes are stored (never plaintext)
+    - Single-use: marked as used after first successful authentication
+    - High entropy: 12-character alphanumeric codes
+    - Batched: regeneration creates new batch, invalidates old unused codes
+    - Audit trail: tracks when used, from which IP
+    
+    OWASP compliance:
+    - Securely generated random codes
+    - Long enough to resist brute force (12+ chars)
+    - Single-use only
+    - Protected by rate limiting
+    - User notified when used
+    """
+    __tablename__ = "mfa_recovery_codes"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    # Hashed code (bcrypt or SHA256 with salt)
+    # Never store plaintext recovery codes
+    code_hash = Column(String(255), nullable=False, index=True)
+    
+    # Batch ID - all codes generated together share same batch
+    # Regenerating creates new batch and invalidates old unused codes
+    batch_id = Column(String(64), nullable=False, index=True)
+    
+    # Status tracking
+    is_used = Column(Boolean, default=False, nullable=False, index=True)
+    
+    # Audit fields
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    used_at = Column(DateTime(timezone=True), nullable=True)
+    used_ip_address = Column(String(45), nullable=True)  # IPv6 compatible
+    used_user_agent = Column(String(500), nullable=True)
+    
+    # Optional: track which admin/generated context
+    generated_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    generation_reason = Column(String(100), nullable=True)  # 'initial_setup', 'regenerated', 'admin_reset'
+    
+    # Relationships
+    user = relationship("User", foreign_keys=[user_id], back_populates="mfa_recovery_codes")
+    generated_by = relationship("User", foreign_keys=[generated_by_user_id])
+
+
+# Add back-reference to User model
+User.mfa_recovery_codes = relationship("MFARecoveryCode", foreign_keys=[MFARecoveryCode.user_id], back_populates="user", cascade="all, delete-orphan")

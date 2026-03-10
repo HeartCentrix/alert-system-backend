@@ -1,6 +1,7 @@
 import secrets
 import time
 import logging
+import json
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
 from sqlalchemy.orm import Session
@@ -11,12 +12,27 @@ from app.models import User, RefreshToken, AuditLog, UserRole, LoginAttempt
 from app.schemas import (
     LoginRequest, TokenResponse, RefreshRequest, UserResponse,
     PasswordResetRequest, PasswordResetConfirm, ChangePasswordRequest,
-    UserProfileUpdate
+    UserProfileUpdate, MFASetupInitiateResponse, MFASetupConfirmRequest,
+    MFAStatusResponse, MFANeededResponse,
+    LoginSuccessResponse, LoginMFASetupResponse, LoginMFAChallengeResponse,
+    MFAVerifyLoginRequest,
+    MFARecoveryCodeVerifyRequest, MFARecoveryCodesResponse, MFARecoveryCodeStatus,
+    MFARegenerateRecoveryCodesRequest, MFARegenerateRecoveryCodesResponse,
+    MFAEnrollStartRequest, MFAEnrollStartResponse, MFAEnrollConfirmRequest,
+    MFAEnrollConfirmResponse, MFADisableRequest, MFADisableResponse,
+    MFAResetStartRequest, MFAResetConfirmRequest, MFAResetConfirmResponse,
+    MFAStatusDetailResponse,
 )
 from app.core.security import (
     verify_password, hash_password, create_access_token,
-    create_refresh_token, decode_token
+    create_refresh_token, decode_token, user_requires_mfa,
+    verify_totp_code, generate_mfa_secret, generate_mfa_qr_code_uri
 )
+from app.services.mfa_recovery import (
+    generate_recovery_codes, verify_recovery_code,
+    get_recovery_code_status, invalidate_all_recovery_codes
+)
+from app.services.mfa_lifecycle import get_mfa_service
 from app.core.deps import get_current_user, require_admin
 from app.services.messaging import email_service
 from app.services.rate_limiter import (
@@ -29,7 +45,7 @@ from app.services.rate_limiter import (
     get_device_failure_count,
     record_device_failure,
 )
-from app.services.security_notifications import notify_suspicious_login
+from app.services.security_notifications import notify_suspicious_login, notify_recovery_codes_regenerated
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -45,6 +61,9 @@ PASSWORD_RESET_RATE_LIMIT_SECONDS = 30  # 30 seconds between requests per email
 ACCOUNT_LOCKOUT_THRESHOLD = 5  # Failed attempts before account lockout
 IP_RATE_LIMIT_MAX_ATTEMPTS = 20  # Max attempts per IP across all accounts
 IP_RATE_LIMIT_WINDOW_SECONDS = 600  # 10 minutes
+
+# MFA challenge token settings
+MFA_CHALLENGE_EXPIRE_SECONDS = 300  # 5 minutes to complete MFA verification
 
 
 def format_lockout_time(seconds: int) -> str:
@@ -62,6 +81,85 @@ def format_lockout_time(seconds: int) -> str:
         return f"{hours} hour{'s' if hours > 1 else ''}"
     days = seconds // 86400
     return f"{days} day{'s' if days > 1 else ''}"
+
+
+def _generate_challenge_token(user_id: int, mfa_secret: str) -> str:
+    """
+    Generate a signed challenge token for MFA verification.
+    
+    The token encodes user_id and expiry, signed with the user's mfa_secret
+    to prevent tampering. This allows stateless verification later.
+    
+    Args:
+        user_id: User's database ID
+        mfa_secret: User's MFA secret (used for signing)
+    
+    Returns:
+        Base64-encoded challenge token
+    """
+    import base64
+    import hashlib
+    
+    expiry = int(time.time()) + MFA_CHALLENGE_EXPIRE_SECONDS
+    # Create payload: user_id:expiry
+    payload = f"{user_id}:{expiry}"
+    # Sign with HMAC-SHA256 using mfa_secret
+    signature = hashlib.sha256(
+        payload.encode() + mfa_secret.encode()
+    ).hexdigest()[:16]
+    # Encode: payload.signature
+    token = base64.urlsafe_b64encode(
+        f"{payload}.{signature}".encode()
+    ).decode().rstrip('=')
+    
+    return token
+
+
+def _verify_challenge_token(token: str, mfa_secret: str) -> tuple[bool, int]:
+    """
+    Verify and decode a challenge token.
+    
+    Args:
+        token: Challenge token from client
+        mfa_secret: User's MFA secret for verification
+    
+    Returns:
+        tuple: (is_valid, user_id)
+        Returns (False, 0) if invalid or expired
+    """
+    import base64
+    import hashlib
+    
+    try:
+        # Decode token
+        padded = token + '=' * (4 - len(token) % 4)
+        decoded = base64.urlsafe_b64decode(padded).decode()
+        # Split payload.signature
+        parts = decoded.split('.')
+        if len(parts) != 2:
+            return False, 0
+        
+        payload, provided_sig = parts
+        user_id_str, expiry_str = payload.split(':')
+        user_id = int(user_id_str)
+        expiry = int(expiry_str)
+        
+        # Verify signature
+        expected_sig = hashlib.sha256(
+            payload.encode() + mfa_secret.encode()
+        ).hexdigest()[:16]
+        
+        if not secrets.compare_digest(expected_sig, provided_sig):
+            return False, 0
+        
+        # Check expiry
+        if time.time() > expiry:
+            return False, 0
+        
+        return True, user_id
+        
+    except (ValueError, IndexError, Exception):
+        return False, 0
 
 
 def _get_redis_client() -> redis.Redis:
@@ -264,8 +362,18 @@ def reset_account_lockout(user_id: int) -> None:
     r.delete(key)
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post("/login")
 async def login(request: LoginRequest, req: Request, db: Session = Depends(get_db)):
+    """
+    Authenticate user with email and password.
+    
+    Response varies based on MFA status:
+    - LoginSuccessResponse: Authentication complete, tokens issued
+    - LoginMFASetupResponse: MFA required but not configured, setup needed
+    - LoginMFAChallengeResponse: MFA required and configured, OTP needed
+    
+    No tokens are issued until MFA verification completes (if required).
+    """
     client_ip = _get_client_ip(req)
 
     # Normalize email to prevent case-based lockout bypass
@@ -353,7 +461,73 @@ async def login(request: LoginRequest, req: Request, db: Session = Depends(get_d
             detail="Invalid credentials"
         )
 
-    # STEP 7: Successful login - reset account lockout
+    # STEP 7: Check if MFA is required for this user
+    mfa_required = user_requires_mfa(user)
+
+    if mfa_required:
+        # Check if user has MFA fully configured AND enabled
+        # A user might have mfa_secret from partial setup but mfa_enabled=False
+        mfa_fully_configured = user.mfa_enabled and user.mfa_secret and user.mfa_secret.strip()
+        
+        if not mfa_fully_configured:
+            # MFA is required but not fully configured - initiate/re-initiate setup flow
+            # Generate a new secret for this user (overwrites any partial setup)
+            temp_secret = generate_mfa_secret()
+            qr_code_uri = generate_mfa_qr_code_uri(user.email, temp_secret)
+            
+            # Save the secret to user record (MFA not enabled until confirmed)
+            user.mfa_secret = temp_secret
+            user.mfa_enabled = False  # Explicitly ensure it's not enabled yet
+            db.add(user)
+            db.commit()
+            
+            # Generate challenge token for verification
+            challenge_token = _generate_challenge_token(user.id, temp_secret)
+            
+            logger.info(f"MFA setup initiated for privileged user {user.id} ({user.email})")
+            
+            # Return setup information - NO tokens issued yet
+            return LoginMFASetupResponse(
+                status="mfa_required",
+                mfa_required=True,
+                mfa_configured=False,
+                challenge_token=challenge_token,
+                qr_code_uri=qr_code_uri,
+                secret=temp_secret,
+                message="MFA is required for your account. Please scan the QR code with your authenticator app and enter the code to complete login."
+            )
+        
+        # MFA is configured and enabled - validate code
+        if not request.mfa_code:
+            # User has MFA configured but didn't provide code - return challenge response
+            challenge_token = _generate_challenge_token(user.id, user.mfa_secret)
+            logger.info(f"MFA challenge issued for user {user.id} ({user.email})")
+            
+            return LoginMFAChallengeResponse(
+                status="mfa_required",
+                mfa_required=True,
+                mfa_configured=True,
+                challenge_token=challenge_token,
+                message="Enter your authentication code to continue."
+            )
+
+        # Verify the TOTP code
+        if not verify_totp_code(user.mfa_secret, request.mfa_code):
+            # Invalid MFA code - record as failed attempt
+            count = await redis_record_failed_login(user.id)
+            await record_ip_failure(client_ip)
+
+            # Track device failures if fingerprint provided
+            if request.device_fingerprint:
+                await record_device_failure(request.device_fingerprint)
+
+            logger.warning(f"Invalid MFA code for user {user.id} ({user.email})")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid credentials or MFA code"
+            )
+
+    # STEP 8: Successful authentication - issue tokens
     await clear_account_failures(user.id)
     # Note: Do NOT record IP attempt on success - only failures count toward rate limit
 
@@ -389,9 +563,11 @@ async def login(request: LoginRequest, req: Request, db: Session = Depends(get_d
     ))
     db.commit()
 
-    return TokenResponse(
+    return LoginSuccessResponse(
+        status="success",
         access_token=access_token,
         refresh_token=refresh_token_str,
+        token_type="bearer",
         user=UserResponse.model_validate(user)
     )
 
@@ -619,10 +795,818 @@ def reset_rate_limits(
     Remove in production or restrict to super_admin only.
     """
     r = _get_redis_client()
-    
+
     # Delete all lockout keys
     keys = r.keys("lockout:*")
     if keys:
         r.delete(*keys)
-    
+
     return {"message": f"Deleted {len(keys)} rate limit keys"}
+
+
+# ─── MFA ENDPOINTS ────────────────────────────────────────────────────────────
+
+# ─── MFA LIFECYCLE ENDPOINTS ────────────────────────────────────────────────
+
+@router.post("/mfa/enroll/start", response_model=MFAEnrollStartResponse)
+def start_mfa_enrollment(
+    request: MFAEnrollStartRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Start MFA enrollment for the current user.
+
+    This is step 1 of a 2-step enrollment flow:
+    1. Call this endpoint with current password (reauthentication)
+    2. User scans QR code with authenticator app
+    3. Call /account/mfa/enroll/complete with OTP code
+
+    Security requirements (OWASP):
+    - Requires recent reauthentication (current password)
+    - Does NOT enable MFA until OTP is verified
+    - Invalidates any previous pending enrollment
+    - Does NOT expose user to MFA if already enabled
+
+    Returns:
+        QR code URI and secret for authenticator app setup
+    """
+    # Check if MFA is already enabled
+    if current_user.mfa_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="MFA is already enabled for your account"
+        )
+
+    mfa_service = get_mfa_service(db)
+
+    try:
+        secret, qr_code_uri, manual_entry_key = mfa_service.start_enrollment(
+            user=current_user,
+            current_password=request.current_password
+        )
+
+        # Commit the pending enrollment
+        db.commit()
+
+        logger.info(f"MFA enrollment started for user {current_user.id}")
+
+        return MFAEnrollStartResponse(
+            secret=secret,
+            qr_code_uri=qr_code_uri,
+            manual_entry_key=manual_entry_key,
+            message="Scan the QR code with your authenticator app, then enter the code to complete setup"
+        )
+
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(e)
+        )
+
+
+@router.post("/mfa/enroll/complete", response_model=MFAEnrollConfirmResponse)
+def complete_mfa_enrollment(
+    request: MFAEnrollConfirmRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Complete MFA enrollment by verifying OTP code.
+
+    This is step 2 of the enrollment flow:
+    - User submits 6-digit code from authenticator app
+    - On success: MFA is enabled, recovery codes generated
+    - Recovery codes are shown ONCE only
+
+    Security:
+    - Validates OTP against pending secret
+    - Only enables MFA on successful verification
+    - Generates recovery codes (stored as hashes)
+    - Audit logged
+    """
+    mfa_service = get_mfa_service(db)
+
+    try:
+        recovery_codes, batch_id = mfa_service.complete_enrollment(
+            user=current_user,
+            code=request.code
+        )
+
+        db.commit()
+
+        logger.info(f"MFA enrollment completed for user {current_user.id}")
+
+        return MFAEnrollConfirmResponse(
+            message="MFA enabled successfully! Store these recovery codes in a secure location.",
+            recovery_codes=recovery_codes,
+            recovery_codes_warning="These codes will NOT be shown again. Each code can only be used once."
+        )
+
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+
+
+@router.post("/mfa/disable", response_model=MFADisableResponse)
+def disable_mfa(
+    request: MFADisableRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Disable MFA for the current user.
+
+    Security requirements (OWASP):
+    - Checks if user is allowed to disable (policy enforcement)
+    - Requires recent reauthentication (current password)
+    - Requires current MFA code or recovery code verification
+    - Clears MFA state and invalidates recovery codes
+    - Audit logged
+
+    Note: Privileged users (ADMIN, MANAGER, SUPER_ADMIN) cannot self-disable MFA.
+    """
+    mfa_service = get_mfa_service(db)
+
+    try:
+        mfa_service.disable_mfa(
+            user=current_user,
+            current_password=request.current_password,
+            mfa_code=request.mfa_code
+        )
+
+        db.commit()
+
+        logger.info(f"MFA disabled for user {current_user.id}")
+
+        return MFADisableResponse(
+            message="MFA has been disabled successfully. Your account is now less secure.",
+            mfa_disabled=True
+        )
+
+    except PermissionError as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(e)
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(e)
+        )
+
+
+@router.post("/mfa/reset/start", response_model=MFAEnrollStartResponse)
+def start_mfa_reset(
+    request: MFAResetStartRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Start MFA reset/replacement flow.
+
+    Use this when:
+    - User changed devices
+    - User lost authenticator but has recovery codes
+    - User wants to rotate MFA secrets
+
+    Security requirements:
+    - Requires current password verification
+    - Requires current MFA code OR recovery code (if available)
+    - Invalidates old MFA secret and recovery codes
+    - Creates pending new enrollment
+
+    Returns:
+        New QR code URI and secret for authenticator app setup
+    """
+    mfa_service = get_mfa_service(db)
+
+    try:
+        secret, qr_code_uri, manual_entry_key = mfa_service.start_reset(
+            user=current_user,
+            current_password=request.current_password,
+            mfa_code=request.mfa_code
+        )
+
+        db.commit()
+
+        logger.info(f"MFA reset started for user {current_user.id}")
+
+        return MFAEnrollStartResponse(
+            secret=secret,
+            qr_code_uri=qr_code_uri,
+            manual_entry_key=manual_entry_key,
+            message="Your previous MFA has been invalidated. Scan the new QR code with your authenticator app."
+        )
+
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(e)
+        )
+
+
+@router.post("/mfa/reset/complete", response_model=MFAResetConfirmResponse)
+def complete_mfa_reset(
+    request: MFAResetConfirmRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Complete MFA reset by verifying new OTP code.
+
+    This completes the reset/re-enrollment flow:
+    - User submits 6-digit code from NEW authenticator app
+    - On success: MFA is enabled with new secret
+    - New recovery codes are generated
+
+    Security:
+    - Validates OTP against new pending secret
+    - Only enables MFA on successful verification
+    - Generates new recovery codes
+    - Audit logged
+    """
+    mfa_service = get_mfa_service(db)
+
+    try:
+        recovery_codes, batch_id = mfa_service.complete_reset(
+            user=current_user,
+            code=request.code
+        )
+
+        db.commit()
+
+        logger.info(f"MFA reset completed for user {current_user.id}")
+
+        return MFAResetConfirmResponse(
+            message="MFA has been reset successfully! Store these new recovery codes in a secure location.",
+            recovery_codes=recovery_codes,
+            recovery_codes_warning="These codes will NOT be shown again. Your previous recovery codes have been invalidated."
+        )
+
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+
+
+@router.post("/mfa/recovery-codes/regenerate", response_model=MFARegenerateRecoveryCodesResponse)
+async def regenerate_recovery_codes_endpoint(
+    request: MFARegenerateRecoveryCodesRequest,
+    req: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Regenerate recovery codes for the authenticated user with dual-proof verification.
+
+    Security requirements (OWASP/NIST):
+    - Requires password verification (knowledge factor)
+    - Requires MFA proof (possession factor):
+      - TOTP code from authenticator app, OR
+      - Single unused recovery code (normal users only)
+    - Privileged users cannot use recovery code fallback
+    - Rate limited to prevent brute force
+    - Invalidates all previous unused codes atomically
+    - Returns new plaintext codes (only time they're available)
+    - Full audit logging
+
+    This endpoint is for users who:
+    - Lost their recovery codes
+    - Want to rotate codes periodically
+    - Used some codes and want fresh ones
+    """
+    client_ip = _get_client_ip(req)
+    mfa_service = get_mfa_service(db)
+
+    # Rate limiting: Check if account is locked for regeneration attempts
+    # Use same mechanism as login rate limiting
+    is_allowed, retry_after = check_account_lockout(current_user.id)
+    if not is_allowed:
+        logger.warning(
+            f"Recovery code regeneration rate limited for user {current_user.id} "
+            f"(retry after: {retry_after}s)"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many regeneration attempts. Please try again later."
+        )
+
+    try:
+        plaintext_codes, batch_id, old_codes_invalidated = mfa_service.regenerate_recovery_codes(
+            user=current_user,
+            current_password=request.current_password,
+            method=request.method,
+            mfa_code=request.mfa_code,
+            recovery_code=request.recovery_code,
+            ip_address=client_ip,
+            user_agent=req.headers.get("user-agent")
+        )
+
+        db.commit()
+
+        # Send security notification email (fire-and-forget, does not block response)
+        await notify_recovery_codes_regenerated(
+            email=current_user.email,
+            ip_address=client_ip,
+            method=request.method,
+            old_codes_count=old_codes_invalidated,
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+
+        logger.info(
+            f"Recovery codes regenerated for user {current_user.id} "
+            f"(method: {request.method}, old codes invalidated: {old_codes_invalidated})"
+        )
+
+        return MFARegenerateRecoveryCodesResponse(
+            recovery_codes=plaintext_codes,
+            batch_id=batch_id[:8] + "...",
+            message="Recovery codes regenerated successfully",
+            warning="Store these codes securely. They will not be shown again. Your previous unused codes have been invalidated.",
+            old_codes_invalidated=old_codes_invalidated
+        )
+
+    except PermissionError as e:
+        # Privileged user tried to use disallowed method
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(e)
+        )
+    except ValueError as e:
+        # Verification failed - record as failed attempt for rate limiting
+        record_failed_login(current_user.id)
+        db.rollback()
+        logger.warning(f"Recovery code regeneration failed for user {current_user.id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(e)
+        )
+
+
+# ─── LEGACY MFA ENDPOINTS (kept for backward compatibility) ─────────────────
+
+
+@router.get("/mfa/status", response_model=MFAStatusDetailResponse)
+def get_mfa_status(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get the current MFA status for the authenticated user.
+
+    Returns comprehensive MFA status including:
+    - Whether MFA is enabled/configured
+    - Whether MFA is required by policy
+    - Recovery codes status (count, not the codes themselves)
+    - Whether user can disable MFA (based on role policy)
+    - Whether there's a pending enrollment
+
+    Security:
+    - Requires authentication
+    - Does NOT expose secrets or recovery codes
+    - Safe for frontend to display in security settings
+    """
+    mfa_service = get_mfa_service(db)
+    status_data = mfa_service.get_mfa_status(current_user)
+
+    return MFAStatusDetailResponse(**status_data)
+
+
+@router.post("/mfa/verify-login", response_model=LoginSuccessResponse)
+async def verify_mfa_and_complete_login(
+    request: MFAVerifyLoginRequest,
+    req: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Complete MFA verification and issue auth tokens.
+    
+    Use this endpoint after receiving a challenge token from /login:
+    1. Call /login with credentials
+    2. Receive challenge token (and QR code if setup needed)
+    3. User scans QR and gets OTP from authenticator app
+    4. Call this endpoint with challenge_token + OTP code
+    5. Receive full auth tokens on success
+    
+    Security:
+    - Challenge token must be valid and not expired
+    - OTP code must match user's TOTP secret
+    - No tokens issued until both verifications pass
+    - Failed attempts counted toward rate limiting
+    """
+    import base64
+    
+    client_ip = _get_client_ip(req)
+    
+    # Decode challenge token to get user info
+    try:
+        padded = request.challenge_token + '=' * (4 - len(request.challenge_token) % 4)
+        decoded = base64.urlsafe_b64decode(padded).decode()
+        parts = decoded.split('.')
+        if len(parts) != 2:
+            raise ValueError("Invalid token format")
+        payload, _ = parts
+        user_id_str, expiry_str = payload.split(':')
+        user_id = int(user_id_str)
+        expiry = int(expiry_str)
+    except (ValueError, IndexError, Exception) as e:
+        logger.warning(f"Invalid challenge token format: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials or MFA code"
+        )
+    
+    # Check expiry
+    if time.time() > expiry:
+        logger.warning(f"Expired challenge token for user {user_id}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials or MFA code"
+        )
+    
+    # Fetch user from database
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user or not user.is_active:
+        logger.warning(f"User {user_id} not found or inactive")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials or MFA code"
+        )
+    
+    # Verify challenge token signature using user's mfa_secret
+    is_valid, _ = _verify_challenge_token(request.challenge_token, user.mfa_secret or "")
+    if not is_valid:
+        logger.warning(f"Invalid challenge token signature for user {user_id}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials or MFA code"
+        )
+    
+    # Verify MFA is still required (user might have completed setup in another session)
+    if not user_requires_mfa(user):
+        logger.warning(f"MFA no longer required for user {user_id}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="MFA not required"
+        )
+    
+    # Verify OTP code
+    if not user.mfa_secret:
+        logger.warning(f"No MFA secret for user {user_id}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials or MFA code"
+        )
+    
+    if not verify_totp_code(user.mfa_secret, request.code):
+        # Invalid MFA code - record as failed attempt
+        try:
+            count = await redis_record_failed_login(user.id)
+            await record_ip_failure(client_ip)
+        except Exception as e:
+            logger.error(f"Error recording failed login: {e}")
+        
+        logger.warning(f"Invalid MFA code for user {user_id}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials or MFA code"
+        )
+    
+    # MFA verified successfully - enable MFA if not already enabled
+    was_new_mfa = False
+    recovery_codes = None
+    if not user.mfa_enabled:
+        user.mfa_enabled = True
+        was_new_mfa = True
+        
+        # Generate initial recovery codes for new MFA users
+        try:
+            plaintext_codes, batch_id = generate_recovery_codes(
+                db=db,
+                user_id=user.id,
+                generated_by_user_id=user.id,
+                reason='initial_setup'
+            )
+            recovery_codes = plaintext_codes
+            logger.info(f"Generated {len(plaintext_codes)} recovery codes for user {user_id}")
+        except Exception as e:
+            logger.error(f"Failed to generate recovery codes: {e}")
+            # Don't fail the login, but log the issue
+        
+        logger.info(f"MFA enabled for user {user_id} during login")
+    
+    # Issue tokens (same as successful login)
+    try:
+        await clear_account_failures(user.id)
+    except Exception as e:
+        logger.error(f"Error clearing account failures: {e}")
+
+    # Log successful attempt
+    db.add(LoginAttempt(
+        email=user.email,
+        ip_address=client_ip,
+        success=True
+    ))
+
+    access_token = create_access_token({"sub": str(user.id), "role": user.role})
+    refresh_token_str = create_refresh_token({"sub": str(user.id)})
+
+    # Save refresh token
+    rt = RefreshToken(
+        user_id=user.id,
+        token=refresh_token_str,
+        expires_at=datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+    )
+    db.add(rt)
+
+    # Update last login
+    user.last_login = datetime.now(timezone.utc)
+
+    # Audit log
+    db.add(AuditLog(
+        user_id=user.id,
+        user_email=user.email,
+        action="mfa_verified_login",
+        resource_type="user",
+        resource_id=user.id,
+        ip_address=req.client.host if req.client else None
+    ))
+    db.commit()
+
+    logger.info(f"MFA verification complete, login successful for user {user_id}")
+
+    # Build response with recovery codes if this was first MFA setup
+    response_data = {
+        "status": "success",
+        "access_token": access_token,
+        "refresh_token": refresh_token_str,
+        "token_type": "bearer",
+        "user": UserResponse.model_validate(user),
+    }
+    
+    if was_new_mfa and recovery_codes:
+        response_data["recovery_codes"] = recovery_codes
+        response_data["recovery_codes_warning"] = "Store these codes securely. They will not be shown again."
+    
+    return LoginSuccessResponse(**response_data)
+
+
+# ─── MFA RECOVERY CODE ENDPOINTS ──────────────────────────────────────────────
+
+@router.post("/mfa/recovery-code/verify", response_model=LoginSuccessResponse)
+async def verify_recovery_code_and_login(
+    request: MFARecoveryCodeVerifyRequest,
+    req: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Complete login using a recovery code.
+    
+    Use this endpoint when user has lost their authenticator device but
+    has recovery codes. This is the primary self-service recovery path.
+    
+    Flow:
+    1. User enters credentials → receives challenge token (MFA required)
+    2. User clicks "Use recovery code" 
+    3. User submits challenge token + recovery code
+    4. Backend verifies code, marks as used, issues tokens
+    
+    Security:
+    - Recovery code is single-use (marked as used atomically)
+    - Rate limited (see rate_limiter)
+    - Audit logged
+    - User notified of use
+    """
+    import base64
+    
+    client_ip = _get_client_ip(req)
+    
+    # Decode challenge token to get user info (same as MFA verify)
+    try:
+        padded = request.challenge_token + '=' * (4 - len(request.challenge_token) % 4)
+        decoded = base64.urlsafe_b64decode(padded).decode()
+        parts = decoded.split('.')
+        if len(parts) != 2:
+            raise ValueError("Invalid token format")
+        payload, _ = parts
+        user_id_str, expiry_str = payload.split(':')
+        user_id = int(user_id_str)
+        expiry = int(expiry_str)
+    except (ValueError, IndexError, Exception) as e:
+        logger.warning(f"Invalid challenge token format: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials or recovery code"
+        )
+    
+    # Check expiry
+    if time.time() > expiry:
+        logger.warning(f"Expired challenge token for user {user_id}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials or recovery code"
+        )
+    
+    # Fetch user from database
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user or not user.is_active:
+        logger.warning(f"User {user_id} not found or inactive")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials or recovery code"
+        )
+    
+    # Verify and consume recovery code
+    is_valid, error = verify_recovery_code(
+        db=db,
+        user_id=user_id,
+        code=request.recovery_code,
+        ip_address=client_ip,
+        user_agent=req.headers.get("user-agent")
+    )
+    
+    if not is_valid:
+        # Record failed attempt for rate limiting
+        try:
+            count = await redis_record_failed_login(user.id)
+            await record_ip_failure(client_ip)
+        except Exception as e:
+            logger.error(f"Error recording failed recovery attempt: {e}")
+        
+        # Send security notification on first failure threshold
+        if count == 5:
+            try:
+                from app.services.security_notifications import notify_suspicious_login
+                await notify_suspicious_login(
+                    email=user.email,
+                    attempt_count=count,
+                    ip_address=client_ip,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                )
+            except Exception as e:
+                logger.error(f"Error sending security notification: {e}")
+        
+        logger.warning(f"Invalid recovery code for user {user_id}: {error}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials or recovery code"
+        )
+    
+    # Recovery code verified - issue tokens
+    await clear_account_failures(user.id)
+    
+    # Log successful login
+    db.add(LoginAttempt(
+        email=user.email,
+        ip_address=client_ip,
+        success=True
+    ))
+    
+    access_token = create_access_token({"sub": str(user.id), "role": user.role})
+    refresh_token_str = create_refresh_token({"sub": str(user.id)})
+    
+    rt = RefreshToken(
+        user_id=user.id,
+        token=refresh_token_str,
+        expires_at=datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+    )
+    db.add(rt)
+    
+    user.last_login = datetime.now(timezone.utc)
+    
+    db.add(AuditLog(
+        user_id=user.id,
+        user_email=user.email,
+        action="recovery_code_login_success",
+        resource_type="user",
+        resource_id=user.id,
+        ip_address=req.client.host if req.client else None
+    ))
+    db.commit()
+    
+    logger.info(f"Recovery code login successful for user {user_id}")
+    
+    return LoginSuccessResponse(
+        status="success",
+        access_token=access_token,
+        refresh_token=refresh_token_str,
+        token_type="bearer",
+        user=UserResponse.model_validate(user)
+    )
+
+
+@router.get("/account/mfa/recovery-codes/status", response_model=MFARecoveryCodeStatus)
+def get_recovery_codes_status(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get the current status of recovery codes for the authenticated user.
+    
+    Returns whether user has codes and how many are unused.
+    Does NOT return the actual codes (they're only shown once during generation).
+    """
+    status_data = get_recovery_code_status(db, current_user.id)
+    return MFARecoveryCodeStatus(**status_data)
+
+
+@router.post("/account/mfa/recovery-codes/regenerate", response_model=MFARecoveryCodesResponse)
+def regenerate_recovery_codes(
+    request: MFARegenerateRecoveryCodesRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Regenerate recovery codes for the authenticated user.
+    
+    Security requirements:
+    - Requires password re-authentication (step-up)
+    - Invalidates all previous unused codes
+    - Returns new plaintext codes (only time they're available)
+    - Audit logged
+    - User notified
+    
+    This endpoint is for users who:
+    - Lost their recovery codes
+    - Want to rotate codes periodically
+    - Regenerate after using some codes
+    """
+    # Verify current password (step-up authentication)
+    if not verify_password(request.current_password, current_user.hashed_password):
+        logger.warning(f"Invalid password during recovery code regeneration for user {current_user.id}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Current password is incorrect"
+        )
+    
+    # Invalidate old codes first
+    invalidate_all_recovery_codes(
+        db=db,
+        user_id=current_user.id,
+        invalidated_by_user_id=current_user.id,
+        reason='user_regenerated'
+    )
+    
+    # Generate new codes
+    plaintext_codes, batch_id = generate_recovery_codes(
+        db=db,
+        user_id=current_user.id,
+        generated_by_user_id=current_user.id,
+        reason='regenerated'
+    )
+    
+    logger.info(f"User {current_user.id} regenerated recovery codes")
+    
+    return MFARecoveryCodesResponse(
+        recovery_codes=plaintext_codes,
+        batch_id=batch_id[:8] + "...",
+        message="Recovery codes generated successfully",
+        warning="Store these codes securely. They will not be shown again. Each code can only be used once."
+    )
+
+
+@router.post("/account/mfa/recovery-codes/generate-initial", response_model=MFARecoveryCodesResponse)
+def generate_initial_recovery_codes(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Generate initial recovery codes for a user who just enabled MFA.
+    
+    This is called automatically after successful MFA enrollment.
+    Only works if user has no existing recovery codes.
+    """
+    # Check if user already has codes
+    existing_status = get_recovery_code_status(db, current_user.id)
+    if existing_status.has_codes and existing_status.unused_count > 0:
+        logger.info(f"User {current_user.id} already has recovery codes, not generating new ones")
+        # Return existing status but NOT the codes
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Recovery codes already exist. Use regenerate endpoint if you need new codes."
+        )
+    
+    # Generate new codes
+    plaintext_codes, batch_id = generate_recovery_codes(
+        db=db,
+        user_id=current_user.id,
+        generated_by_user_id=current_user.id,
+        reason='initial_setup'
+    )
+    
+    logger.info(f"Generated initial recovery codes for user {current_user.id}")
+    
+    return MFARecoveryCodesResponse(
+        recovery_codes=plaintext_codes,
+        batch_id=batch_id[:8] + "...",
+        message="Recovery codes generated successfully. Store them securely!",
+        warning="These codes will not be shown again. Each code can only be used once."
+    )

@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     SLACK_DEFAULT_WEBHOOK_URL: str = ""
     TEAMS_DEFAULT_WEBHOOK_URL: str = ""
 
+    # MFA/2FA settings
+    # TOTP valid window: 0 = current step only (most secure), 1 = allow one step for clock skew
+    # RFC 6238 recommends at most one time step; 0 is preferred for security
+    MFA_TOTP_VALID_WINDOW: int = 0
+
     class Config:
         env_file = ".env"
         case_sensitive = True

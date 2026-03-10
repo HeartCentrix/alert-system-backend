@@ -27,6 +27,29 @@ Details:
 This is an automated security alert. Do not reply to this email.
 """.strip()
 
+RECOVERY_CODES_REGENERATED_SUBJECT = "Security Alert: Recovery codes regenerated"
+
+RECOVERY_CODES_REGENERATED_BODY = """
+Your MFA recovery codes were regenerated on {timestamp}.
+
+Details:
+  - IP Address: {ip_address}
+  - Method: {method}
+  - Old codes invalidated: {old_codes_count}
+
+If this was you:
+  - Store your new recovery codes in a secure location
+  - Each code can only be used once
+  - Keep them separate from your password manager for security
+
+If this was NOT you:
+  1. Log in immediately and regenerate your codes again
+  2. Change your password
+  3. Contact your administrator
+
+This is an automated security alert. Do not reply to this email.
+""".strip()
+
 
 async def notify_suspicious_login(
     email: str,
@@ -47,6 +70,31 @@ async def notify_suspicious_login(
     # Fire and forget — don't await in the request path
     asyncio.create_task(
         _safe_send(email, LOCKOUT_SUBJECT, body)
+    )
+
+
+async def notify_recovery_codes_regenerated(
+    email: str,
+    ip_address: str,
+    method: str,
+    old_codes_count: int,
+    timestamp: str,
+):
+    """
+    Fire-and-forget email alert when recovery codes are regenerated.
+    Per OWASP recommendation, users should be notified of MFA factor changes.
+    Runs in background — does NOT block the regeneration response.
+    """
+    body = RECOVERY_CODES_REGENERATED_BODY.format(
+        ip_address=ip_address,
+        method=method,
+        old_codes_count=old_codes_count,
+        timestamp=timestamp,
+    )
+
+    # Fire and forget — don't await in the request path
+    asyncio.create_task(
+        _safe_send(email, RECOVERY_CODES_REGENERATED_SUBJECT, body)
     )
 
 

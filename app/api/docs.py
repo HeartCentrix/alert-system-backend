@@ -10,13 +10,15 @@ from app.core.security import verify_password
 security = HTTPBasic()
 
 
-def get_super_admin_user(
+def get_admin_or_super_admin_user(
     credentials: HTTPBasicCredentials = Depends(security),
     db: Session = Depends(get_db)
 ) -> User:
     """
-    HTTP Basic Auth for super admin access to docs.
+    HTTP Basic Auth for admin/super admin access to docs.
     Browser shows native login popup.
+    
+    Allowed roles: SUPER_ADMIN, ADMIN
     """
     user = db.query(User).filter(User.email == credentials.username).first()
 
@@ -27,10 +29,12 @@ def get_super_admin_user(
             headers={"WWW-Authenticate": "Basic"},
         )
 
-    if user.role != UserRole.SUPER_ADMIN:
+    # Check if user has admin or super_admin role
+    user_role = str(user.role.value) if hasattr(user.role, 'value') else str(user.role)
+    if user_role.lower() not in ["super_admin", "admin"]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Super admin access required",
+            detail="Admin or Super Admin access required",
         )
 
     if not verify_password(credentials.password, user.hashed_password):
@@ -47,8 +51,8 @@ router = APIRouter()
 
 
 @router.get("/docs", include_in_schema=False)
-async def swagger_docs(current_user: User = Depends(get_super_admin_user)):
-    """Protected Swagger UI — requires super admin HTTP Basic Auth."""
+async def swagger_docs(current_user: User = Depends(get_admin_or_super_admin_user)):
+    """Protected Swagger UI — requires admin/super admin HTTP Basic Auth."""
     return get_swagger_ui_html(
         openapi_url="/api/v1/openapi.json",
         title="TM Alert API - Swagger UI",
@@ -57,8 +61,8 @@ async def swagger_docs(current_user: User = Depends(get_super_admin_user)):
 
 
 @router.get("/redoc", include_in_schema=False)
-async def redoc_docs(current_user: User = Depends(get_super_admin_user)):
-    """Protected ReDoc — requires super admin HTTP Basic Auth."""
+async def redoc_docs(current_user: User = Depends(get_admin_or_super_admin_user)):
+    """Protected ReDoc — requires admin/super admin HTTP Basic Auth."""
     return get_redoc_html(
         openapi_url="/api/v1/openapi.json",
         title="TM Alert API - ReDoc",
@@ -67,8 +71,8 @@ async def redoc_docs(current_user: User = Depends(get_super_admin_user)):
 
 
 @router.get("/openapi.json", include_in_schema=False)
-async def openapi(current_user: User = Depends(get_super_admin_user)):
-    """Protected OpenAPI schema — requires super admin HTTP Basic Auth."""
+async def openapi(current_user: User = Depends(get_admin_or_super_admin_user)):
+    """Protected OpenAPI schema — requires admin/super admin HTTP Basic Auth."""
     from app.main import app
     return get_openapi(
         title=app.title,

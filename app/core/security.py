@@ -4,6 +4,8 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 from app.config import settings
 import re
+import pyotp
+import base64
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -11,6 +13,252 @@ ALGORITHM = "HS256"
 
 # Password policy constants
 MIN_PASSWORD_LENGTH = 8
+
+# MFA policy constants - roles that always require MFA
+# SUPER_ADMIN, ADMIN, and MANAGER must always use MFA
+MFA_REQUIRED_ROLES = ["super_admin", "admin", "manager"]
+
+# Reauthentication TTL for sensitive MFA operations (5 minutes)
+MFA_REAUTH_TTL_SECONDS = 300
+
+
+def user_requires_mfa(user) -> bool:
+    """
+    Determine if a user requires MFA based on policy.
+
+    MFA is required if:
+    - user.mfa_enabled is True, OR
+    - user role is ADMIN or MANAGER (privileged roles)
+
+    This centralizes MFA policy enforcement for consistent behavior.
+
+    Args:
+        user: User model instance
+
+    Returns:
+        True if MFA is required, False otherwise
+    """
+    if user.mfa_enabled:
+        return True
+
+    # Check if user has a privileged role that always requires MFA
+    # Convert role enum to string for comparison
+    user_role = str(user.role.value) if hasattr(user.role, 'value') else str(user.role)
+    if user_role.lower() in MFA_REQUIRED_ROLES:
+        return True
+
+    return False
+
+
+def can_user_self_disable_mfa(user) -> bool:
+    """
+    Determine if a user is allowed to self-disable MFA.
+
+    Policy:
+    - Privileged users (ADMIN, MANAGER, SUPER_ADMIN) CANNOT self-disable
+    - Normal users (VIEWER) can disable if they have MFA enabled
+
+    Args:
+        user: User model instance
+
+    Returns:
+        True if user can self-disable MFA, False otherwise
+    """
+    if not user.mfa_enabled:
+        return False  # Can't disable what isn't enabled
+
+    user_role = str(user.role.value) if hasattr(user.role, 'value') else str(user.role)
+    if user_role.lower() in MFA_REQUIRED_ROLES:
+        return False  # Privileged users cannot self-disable
+
+    return True  # Normal users can disable
+
+
+def can_user_reset_mfa(user) -> bool:
+    """
+    Determine if a user can reset/re-enroll their MFA.
+
+    All authenticated users can reset their own MFA, but:
+    - Privileged users will be forced to re-enroll immediately
+    - Normal users follow standard reset flow
+
+    Args:
+        user: User model instance
+
+    Returns:
+        True if user can reset MFA, False otherwise
+    """
+    return user.is_active  # All active users can reset
+
+
+def requires_recent_reauth_for_mfa_change(user, action: str) -> bool:
+    """
+    Determine if an MFA operation requires recent reauthentication.
+
+    All sensitive MFA operations require step-up authentication:
+    - enroll: Starting MFA enrollment
+    - disable: Disabling MFA
+    - reset: Resetting/replacing MFA
+    - regenerate_codes: Regenerating recovery codes
+
+    Args:
+        user: User model instance
+        action: One of 'enroll', 'disable', 'reset', 'regenerate_codes'
+
+    Returns:
+        True if recent reauthentication is required
+    """
+    # All MFA lifecycle changes require reauthentication
+    # This is per OWASP recommendation to not rely on active session alone
+    return True
+
+
+def get_mfa_policy_info(user) -> dict:
+    """
+    Get MFA policy information for a user.
+
+    Returns policy details for UI display and enforcement.
+
+    Args:
+        user: User model instance
+
+    Returns:
+        Dict with policy information
+    """
+    user_role = str(user.role.value) if hasattr(user.role, 'value') else str(user.role)
+    is_privileged = user_role.lower() in MFA_REQUIRED_ROLES
+
+    return {
+        "mfa_required": is_privileged or user.mfa_enabled,
+        "mfa_enforced": is_privileged,  # Cannot be disabled by user
+        "can_self_disable": not is_privileged and user.mfa_enabled,
+        "can_reset": user.is_active,
+        "role": user_role,
+    }
+
+
+def get_recovery_code_regeneration_policy(user) -> dict:
+    """
+    Get policy for recovery code regeneration.
+
+    Per OWASP and NIST guidance, recovery code regeneration is a
+    security-sensitive action requiring dual-factor verification.
+
+    Policy:
+    - All MFA-enabled users require password + current MFA proof
+    - Privileged users (ADMIN, MANAGER, SUPER_ADMIN) require password + active MFA
+    - Privileged users cannot use recovery code fallback in normal regeneration
+    - Normal users may use recovery code fallback only if explicitly allowed
+
+    Args:
+        user: User model instance
+
+    Returns:
+        Dict with regeneration policy information
+    """
+    user_role = str(user.role.value) if hasattr(user.role, 'value') else str(user.role)
+    is_privileged = user_role.lower() in MFA_REQUIRED_ROLES
+    is_mfa_enabled = user.mfa_enabled
+
+    # Determine allowed verification methods
+    allowed_methods = []
+    if is_mfa_enabled and user.mfa_secret:
+        allowed_methods.append("totp")  # TOTP from authenticator app
+
+    # Recovery code fallback policy
+    allows_recovery_code_fallback = False
+    if is_mfa_enabled and not is_privileged:
+        # Normal users may use recovery code fallback (when authenticator unavailable)
+        allows_recovery_code_fallback = True
+
+    return {
+        "requires_password": True,
+        "requires_mfa_proof": is_mfa_enabled,  # MFA-enabled users must provide MFA proof
+        "allowed_methods": allowed_methods,
+        "allows_recovery_code_fallback": allows_recovery_code_fallback,
+        "is_privileged": is_privileged,
+        "is_mfa_enabled": is_mfa_enabled,
+        "requires_strict_verification": is_privileged or is_mfa_enabled,
+    }
+
+
+def verify_totp_code(secret: str, code: str, valid_window: Optional[int] = None) -> bool:
+    """
+    Verify a TOTP code against a stored secret.
+
+    Args:
+        secret: Base32-encoded TOTP secret
+        code: TOTP code to verify
+        valid_window: Number of time steps to allow for clock drift
+                     If None, uses settings.MFA_TOTP_VALID_WINDOW (default 0)
+                     0 = current step only (most secure)
+                     1 = allow one previous/next step (for clock skew tolerance)
+
+    Returns:
+        True if code is valid, False otherwise
+
+    Security Notes:
+        - Does not log secret or code
+        - Fails closed on exceptions
+        - Uses constant-time comparison via pyotp
+        - Default valid_window=0 rejects expired codes (current step only)
+        - RFC 6238 warns that larger windows increase attack surface
+    """
+    if not secret or not code:
+        return False
+
+    try:
+        # Normalize the code - strip whitespace
+        code = str(code).strip()
+
+        # Validate code format - must be 6 digits
+        if not re.match(r"^\d{6}$", code):
+            return False
+
+        # Validate secret is valid Base32
+        # pyotp handles padding internally, but we normalize here
+        secret = secret.upper().replace(" ", "")
+
+        # Use provided window or fall back to config default
+        if valid_window is None:
+            valid_window = settings.MFA_TOTP_VALID_WINDOW
+
+        totp = pyotp.TOTP(secret)
+        return totp.verify(code, valid_window=valid_window)
+
+    except (ValueError, Exception):
+        # Fail closed on any exception during verification
+        # pyotp may raise various exceptions (binascii.Error, etc.)
+        return False
+
+
+def generate_mfa_secret() -> str:
+    """
+    Generate a new random TOTP secret for MFA setup.
+
+    Returns:
+        Base32-encoded random secret (16 characters)
+    """
+    return pyotp.random_base32()
+
+
+def generate_mfa_qr_code_uri(email: str, secret: str, issuer: str = "TM Alert") -> str:
+    """
+    Generate the provisioning URI for QR code generation.
+
+    This URI can be passed to QR code generators to create scannable
+    MFA setup codes for authenticator apps.
+
+    Args:
+        email: User's email address (will be shown in authenticator app)
+        secret: Base32-encoded TOTP secret
+        issuer: Service name to display in authenticator app
+
+    Returns:
+        Google Authenticator compatible provisioning URI
+    """
+    totp = pyotp.TOTP(secret)
+    return totp.provisioning_uri(name=email, issuer_name=issuer)
 
 
 def validate_password_strength(password: str) -> Tuple[bool, str]:

@@ -13,6 +13,7 @@ Tests cover:
 import pytest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock
+from fastapi.testclient import TestClient
 
 from app.models import User, UserRole, RefreshToken
 from app.core.security import hash_password, create_access_token, create_refresh_token
@@ -25,7 +26,7 @@ from app.core.security import hash_password, create_access_token, create_refresh
 class TestLoginEndpoint:
     """Test /api/v1/auth/login endpoint."""
 
-    def test_login_success(self, client: pytest.TestClient, test_user: User, test_user_data: dict):
+    def test_login_success(self, client: TestClient, test_user: User, test_user_data: dict):
         """Valid credentials should return tokens."""
         response = client.post(
             "/api/v1/auth/login",
@@ -42,7 +43,7 @@ class TestLoginEndpoint:
         assert data["token_type"] == "bearer"
         assert data["user"]["email"] == test_user_data["email"]
 
-    def test_login_invalid_email(self, client: pytest.TestClient):
+    def test_login_invalid_email(self, client: TestClient):
         """Non-existent email should return 401."""
         response = client.post(
             "/api/v1/auth/login",
@@ -55,7 +56,7 @@ class TestLoginEndpoint:
         assert response.status_code == 401
         assert "No account found" in response.json()["detail"]
 
-    def test_login_wrong_password(self, client: pytest.TestClient, test_user: User):
+    def test_login_wrong_password(self, client: TestClient, test_user: User):
         """Wrong password should return 401."""
         response = client.post(
             "/api/v1/auth/login",
@@ -68,7 +69,7 @@ class TestLoginEndpoint:
         assert response.status_code == 401
         assert "Incorrect password" in response.json()["detail"]
 
-    def test_login_inactive_user(self, client: pytest.TestClient, inactive_user: User):
+    def test_login_inactive_user(self, client: TestClient, inactive_user: User):
         """Inactive user should be denied login."""
         response = client.post(
             "/api/v1/auth/login",
@@ -81,7 +82,7 @@ class TestLoginEndpoint:
         assert response.status_code == 403
         assert "deactivated" in response.json()["detail"]
 
-    def test_login_empty_email(self, client: pytest.TestClient):
+    def test_login_empty_email(self, client: TestClient):
         """Empty email should return validation error."""
         response = client.post(
             "/api/v1/auth/login",
@@ -93,7 +94,7 @@ class TestLoginEndpoint:
         
         assert response.status_code == 422  # Validation error
 
-    def test_login_empty_password(self, client: pytest.TestClient, test_user: User):
+    def test_login_empty_password(self, client: TestClient, test_user: User):
         """Empty password should be accepted (validated by auth logic)."""
         response = client.post(
             "/api/v1/auth/login",
@@ -105,7 +106,7 @@ class TestLoginEndpoint:
         
         assert response.status_code == 401  # Wrong password
 
-    def test_login_case_sensitive_email(self, client: pytest.TestClient, test_user: User):
+    def test_login_case_sensitive_email(self, client: TestClient, test_user: User):
         """Email lookup should be case-insensitive."""
         response = client.post(
             "/api/v1/auth/login",
@@ -119,7 +120,7 @@ class TestLoginEndpoint:
         # But password check happens after
         assert response.status_code in [200, 401]
 
-    def test_login_different_roles(self, client: pytest.TestClient, db_session):
+    def test_login_different_roles(self, client: TestClient, db_session):
         """Users with different roles should be able to login."""
         roles = [UserRole.VIEWER, UserRole.MANAGER, UserRole.ADMIN, UserRole.SUPER_ADMIN]
         
@@ -154,7 +155,7 @@ class TestRefreshTokenEndpoint:
     """Test /api/v1/auth/refresh endpoint."""
 
     def test_refresh_token_success(
-        self, client: pytest.TestClient, auth_tokens: dict
+        self, client: TestClient, auth_tokens: dict
     ):
         """Valid refresh token should return new tokens."""
         response = client.post(
@@ -169,7 +170,7 @@ class TestRefreshTokenEndpoint:
         # New tokens should be different
         assert data["refresh_token"] != auth_tokens["refresh_token"]
 
-    def test_refresh_invalid_token(self, client: pytest.TestClient):
+    def test_refresh_invalid_token(self, client: TestClient):
         """Invalid refresh token should return 401."""
         response = client.post(
             "/api/v1/auth/refresh",
@@ -178,7 +179,7 @@ class TestRefreshTokenEndpoint:
         
         assert response.status_code == 401
 
-    def test_refresh_expired_token(self, client: pytest.TestClient):
+    def test_refresh_expired_token(self, client: TestClient):
         """Expired refresh token should return 401."""
         # Create expired token
         from jose import jwt
@@ -198,7 +199,7 @@ class TestRefreshTokenEndpoint:
         
         assert response.status_code == 401
 
-    def test_refresh_revoked_token(self, client: pytest.TestClient, auth_tokens: dict, db_session):
+    def test_refresh_revoked_token(self, client: TestClient, auth_tokens: dict, db_session):
         """Revoked refresh token should return 401."""
         # Revoke the token
         token_record = db_session.query(RefreshToken).filter(
@@ -216,7 +217,7 @@ class TestRefreshTokenEndpoint:
         assert response.status_code == 401
 
     def test_refresh_access_token_instead_of_refresh(
-        self, client: pytest.TestClient, auth_tokens: dict
+        self, client: TestClient, auth_tokens: dict
     ):
         """Using access token as refresh should fail."""
         response = client.post(
@@ -235,7 +236,7 @@ class TestLogoutEndpoint:
     """Test /api/v1/auth/logout endpoint."""
 
     def test_logout_success(
-        self, client: pytest.TestClient, authenticated_client, auth_tokens: dict
+        self, client: TestClient, authenticated_client, auth_tokens: dict
     ):
         """Valid logout should revoke token."""
         response = client.post(
@@ -246,7 +247,7 @@ class TestLogoutEndpoint:
         assert response.status_code == 200
         assert "Logged out" in response.json()["message"]
 
-    def test_logout_invalid_token(self, client: pytest.TestClient, auth_tokens: dict):
+    def test_logout_invalid_token(self, client: TestClient, auth_tokens: dict):
         """Logout with invalid token should succeed (idempotent)."""
         response = client.post(
             "/api/v1/auth/logout",
@@ -257,7 +258,7 @@ class TestLogoutEndpoint:
         # Should still return success (idempotent)
         assert response.status_code == 200
 
-    def test_logout_unauthenticated(self, client: pytest.TestClient):
+    def test_logout_unauthenticated(self, client: TestClient):
         """Logout without auth should fail."""
         response = client.post(
             "/api/v1/auth/logout",
@@ -275,7 +276,7 @@ class TestPasswordResetEndpoints:
     """Test password reset flow endpoints."""
 
     def test_forgot_password_success(
-        self, client: pytest.TestClient, test_user: User, mock_email_service
+        self, client: TestClient, test_user: User, mock_email_service
     ):
         """Valid forgot password should send email."""
         response = client.post(
@@ -288,7 +289,7 @@ class TestPasswordResetEndpoints:
         mock_email_service.send_password_reset_email.assert_called()
 
     def test_forgot_password_nonexistent_email(
-        self, client: pytest.TestClient, mock_email_service
+        self, client: TestClient, mock_email_service
     ):
         """Non-existent email should return same response (security)."""
         response = client.post(
@@ -302,7 +303,7 @@ class TestPasswordResetEndpoints:
         mock_email_service.send_password_reset_email.assert_not_called()
 
     def test_forgot_password_rate_limiting(
-        self, client: pytest.TestClient, test_user: User
+        self, client: TestClient, test_user: User
     ):
         """Multiple requests should be rate limited."""
         # First request
@@ -321,7 +322,7 @@ class TestPasswordResetEndpoints:
         assert response2.status_code == 200
 
     def test_forgot_password_invalid_email_format(
-        self, client: pytest.TestClient
+        self, client: TestClient
     ):
         """Invalid email format should return validation error."""
         response = client.post(
@@ -332,7 +333,7 @@ class TestPasswordResetEndpoints:
         assert response.status_code == 422
 
     def test_reset_password_success(
-        self, client: pytest.TestClient, test_user: User, db_session
+        self, client: TestClient, test_user: User, db_session
     ):
         """Valid reset token should change password."""
         # Create reset token
@@ -364,7 +365,7 @@ class TestPasswordResetEndpoints:
         assert login_response.status_code == 200
 
     def test_reset_password_invalid_token(
-        self, client: pytest.TestClient
+        self, client: TestClient
     ):
         """Invalid reset token should fail."""
         response = client.post(
@@ -378,7 +379,7 @@ class TestPasswordResetEndpoints:
         assert response.status_code == 400
 
     def test_reset_password_expired_token(
-        self, client: pytest.TestClient, test_user: User, db_session
+        self, client: TestClient, test_user: User, db_session
     ):
         """Expired reset token should fail."""
         test_user.password_reset_token = "expired_token"
@@ -396,7 +397,7 @@ class TestPasswordResetEndpoints:
         assert response.status_code == 400
 
     def test_reset_password_short_new_password(
-        self, client: pytest.TestClient, test_user: User, db_session
+        self, client: TestClient, test_user: User, db_session
     ):
         """Short new password should fail validation."""
         import secrets
@@ -453,7 +454,7 @@ class TestChangePasswordEndpoint:
         assert response.status_code == 400
         assert "incorrect" in response.json()["detail"].lower()
 
-    def test_change_password_unauthenticated(self, client: pytest.TestClient):
+    def test_change_password_unauthenticated(self, client: TestClient):
         """Unauthenticated request should fail."""
         response = client.post(
             "/api/v1/auth/change-password",
@@ -497,13 +498,13 @@ class TestGetCurrentUserEndpoint:
         assert data["first_name"] == test_user.first_name
         assert "password" not in data  # Password should not be exposed
 
-    def test_get_me_unauthenticated(self, client: pytest.TestClient):
+    def test_get_me_unauthenticated(self, client: TestClient):
         """Unauthenticated request should fail."""
         response = client.get("/api/v1/auth/me")
         
         assert response.status_code == 401
 
-    def test_get_me_with_expired_token(self, client: pytest.TestClient, expired_token: str):
+    def test_get_me_with_expired_token(self, client: TestClient, expired_token: str):
         """Expired token should fail."""
         response = client.get(
             "/api/v1/auth/me",
@@ -512,7 +513,7 @@ class TestGetCurrentUserEndpoint:
         
         assert response.status_code == 401
 
-    def test_get_me_with_invalid_token(self, client: pytest.TestClient):
+    def test_get_me_with_invalid_token(self, client: TestClient):
         """Invalid token should fail."""
         response = client.get(
             "/api/v1/auth/me",
@@ -522,7 +523,7 @@ class TestGetCurrentUserEndpoint:
         assert response.status_code == 401
 
     def test_get_me_inactive_user(
-        self, client: pytest.TestClient, test_user: User, db_session
+        self, client: TestClient, test_user: User, db_session
     ):
         """Inactive user token should fail."""
         # Deactivate the user
@@ -535,6 +536,545 @@ class TestGetCurrentUserEndpoint:
         response = client.get(
             "/api/v1/auth/me",
             headers={"Authorization": f"Bearer {token}"}
+        )
+
+        assert response.status_code == 401
+
+
+# =============================================================================
+# MFA ENFORCEMENT TESTS
+# =============================================================================
+
+class TestMFAEnforcement:
+    """Test MFA enforcement during login."""
+
+    def test_login_without_mfa_for_regular_user(
+        self, client: TestClient, test_user: User, test_user_data: dict, db_session
+    ):
+        """Regular user without mfa_enabled should login without OTP."""
+        # Ensure user has mfa_enabled=False
+        test_user.mfa_enabled = False
+        test_user.mfa_secret = None
+        db_session.commit()
+
+        response = client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": test_user_data["email"],
+                "password": test_user_data["password"]
+            }
+        )
+
+        assert response.status_code == 200
+        assert "access_token" in response.json()
+
+    def test_login_with_mfa_enabled_requires_otp(
+        self, client: TestClient, test_user: User, test_user_data: dict, db_session
+    ):
+        """User with mfa_enabled=True must provide OTP."""
+        import pyotp
+
+        # Setup MFA for user
+        secret = pyotp.random_base32()
+        test_user.mfa_enabled = True
+        test_user.mfa_secret = secret
+        db_session.commit()
+
+        # Try login without OTP - should fail
+        response = client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": test_user_data["email"],
+                "password": test_user_data["password"]
+            }
+        )
+
+        assert response.status_code == 401
+        assert "MFA" in response.json()["detail"] or "credentials" in response.json()["detail"]
+
+    def test_login_with_mfa_enabled_and_valid_otp(
+        self, client: TestClient, test_user: User, test_user_data: dict, db_session
+    ):
+        """User with mfa_enabled=True and valid OTP should login."""
+        import pyotp
+
+        # Setup MFA for user
+        secret = pyotp.random_base32()
+        test_user.mfa_enabled = True
+        test_user.mfa_secret = secret
+        db_session.commit()
+
+        # Generate valid OTP
+        totp = pyotp.TOTP(secret)
+        otp = totp.now()
+
+        response = client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": test_user_data["email"],
+                "password": test_user_data["password"],
+                "mfa_code": otp
+            }
+        )
+
+        assert response.status_code == 200
+        assert "access_token" in response.json()
+
+    def test_login_with_mfa_enabled_and_invalid_otp(
+        self, client: TestClient, test_user: User, test_user_data: dict, db_session
+    ):
+        """User with mfa_enabled=True and invalid OTP should fail."""
+        import pyotp
+
+        # Setup MFA for user
+        secret = pyotp.random_base32()
+        test_user.mfa_enabled = True
+        test_user.mfa_secret = secret
+        db_session.commit()
+
+        # Use invalid OTP
+        response = client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": test_user_data["email"],
+                "password": test_user_data["password"],
+                "mfa_code": "000000"  # Invalid code
+            }
+        )
+
+        assert response.status_code == 401
+
+    def test_login_with_mfa_enabled_and_malformed_otp(
+        self, client: TestClient, test_user: User, test_user_data: dict, db_session
+    ):
+        """Malformed OTP should be rejected."""
+        import pyotp
+
+        # Setup MFA for user
+        secret = pyotp.random_base32()
+        test_user.mfa_enabled = True
+        test_user.mfa_secret = secret
+        db_session.commit()
+
+        # Test with spaces
+        response = client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": test_user_data["email"],
+                "password": test_user_data["password"],
+                "mfa_code": " 123456 "
+            }
+        )
+        assert response.status_code == 401
+
+        # Test with non-numeric
+        response = client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": test_user_data["email"],
+                "password": test_user_data["password"],
+                "mfa_code": "abcdef"
+            }
+        )
+        assert response.status_code == 401
+
+        # Test with too short
+        response = client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": test_user_data["email"],
+                "password": test_user_data["password"],
+                "mfa_code": "12345"
+            }
+        )
+        assert response.status_code == 401
+
+
+class TestMFAPrivilegedRoleEnforcement:
+    """Test MFA enforcement for privileged roles (ADMIN, MANAGER)."""
+
+    def test_admin_without_mfa_enabled_requires_otp(
+        self, client: TestClient, admin_user: User, db_session
+    ):
+        """ADMIN user must provide OTP even if mfa_enabled=False."""
+        import pyotp
+
+        # Setup MFA secret but keep mfa_enabled=False
+        secret = pyotp.random_base32()
+        admin_user.mfa_enabled = False
+        admin_user.mfa_secret = secret
+        db_session.commit()
+
+        # Generate valid OTP
+        totp = pyotp.TOTP(secret)
+        otp = totp.now()
+
+        response = client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": "admin@example.com",
+                "password": "AdminPassword123!",
+                "mfa_code": otp
+            }
+        )
+
+        assert response.status_code == 200
+        assert "access_token" in response.json()
+
+    def test_admin_without_mfa_enabled_missing_otp_fails(
+        self, client: TestClient, admin_user: User, db_session
+    ):
+        """ADMIN without OTP should fail even with valid password."""
+        import pyotp
+
+        # Setup MFA secret but keep mfa_enabled=False
+        secret = pyotp.random_base32()
+        admin_user.mfa_enabled = False
+        admin_user.mfa_secret = secret
+        db_session.commit()
+
+        # Try login without OTP
+        response = client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": "admin@example.com",
+                "password": "AdminPassword123!"
+            }
+        )
+
+        assert response.status_code == 401
+
+    def test_manager_without_mfa_enabled_requires_otp(
+        self, client: TestClient, manager_user: User, db_session
+    ):
+        """MANAGER user must provide OTP even if mfa_enabled=False."""
+        import pyotp
+
+        # Setup MFA secret but keep mfa_enabled=False
+        secret = pyotp.random_base32()
+        manager_user.mfa_enabled = False
+        manager_user.mfa_secret = secret
+        db_session.commit()
+
+        # Generate valid OTP
+        totp = pyotp.TOTP(secret)
+        otp = totp.now()
+
+        response = client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": "manager@example.com",
+                "password": "ManagerPassword123!",
+                "mfa_code": otp
+            }
+        )
+
+        assert response.status_code == 200
+
+    def test_admin_without_mfa_secret_fails_safely(
+        self, client: TestClient, admin_user: User, db_session
+    ):
+        """ADMIN without mfa_secret should fail safely."""
+        # Clear MFA setup
+        admin_user.mfa_enabled = False
+        admin_user.mfa_secret = None
+        db_session.commit()
+
+        # Try login - should fail because admin requires MFA but has no secret
+        response = client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": "admin@example.com",
+                "password": "AdminPassword123!",
+                "mfa_code": "123456"
+            }
+        )
+
+        assert response.status_code == 401
+        # Error message should be generic
+        detail = response.json()["detail"]
+        assert "credentials" in detail.lower() or "mfa" in detail.lower()
+
+    def test_manager_without_mfa_secret_fails_safely(
+        self, client: TestClient, manager_user: User, db_session
+    ):
+        """MANAGER without mfa_secret should fail safely."""
+        # Clear MFA setup
+        manager_user.mfa_enabled = False
+        manager_user.mfa_secret = None
+        db_session.commit()
+
+        # Try login - should fail because manager requires MFA but has no secret
+        response = client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": "manager@example.com",
+                "password": "ManagerPassword123!",
+                "mfa_code": "123456"
+            }
+        )
+
+        assert response.status_code == 401
+
+    def test_admin_with_empty_mfa_secret_fails(
+        self, client: TestClient, admin_user: User, db_session
+    ):
+        """ADMIN with empty string mfa_secret should fail."""
+        # Set empty secret
+        admin_user.mfa_enabled = False
+        admin_user.mfa_secret = ""
+        db_session.commit()
+
+        response = client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": "admin@example.com",
+                "password": "AdminPassword123!",
+                "mfa_code": "123456"
+            }
+        )
+
+        assert response.status_code == 401
+
+
+class TestMFASecurity:
+    """Test MFA security properties."""
+
+    def test_no_token_issued_before_mfa_verification(
+        self, client: TestClient, test_user: User, test_user_data: dict, db_session
+    ):
+        """No access token should be issued before MFA verification."""
+        import pyotp
+
+        # Setup MFA
+        secret = pyotp.random_base32()
+        test_user.mfa_enabled = True
+        test_user.mfa_secret = secret
+        db_session.commit()
+
+        # Login without OTP
+        response = client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": test_user_data["email"],
+                "password": test_user_data["password"]
+            }
+        )
+
+        assert response.status_code == 401
+        # Ensure no tokens in response
+        assert "access_token" not in response.json()
+        assert "refresh_token" not in response.json()
+
+    def test_wrong_password_fails_before_mfa_check(
+        self, client: TestClient, test_user: User, test_user_data: dict, db_session
+    ):
+        """Wrong password should fail before MFA verification path."""
+        import pyotp
+
+        # Setup MFA
+        secret = pyotp.random_base32()
+        test_user.mfa_enabled = True
+        test_user.mfa_secret = secret
+        db_session.commit()
+
+        # Generate valid OTP but use wrong password
+        totp = pyotp.TOTP(secret)
+        otp = totp.now()
+
+        response = client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": test_user_data["email"],
+                "password": "WrongPassword123!",
+                "mfa_code": otp
+            }
+        )
+
+        assert response.status_code == 401
+        # Should fail for wrong password, not MFA
+        assert "credentials" in response.json()["detail"].lower()
+
+    def test_mfa_code_with_whitespace_stripped(
+        self, client: TestClient, test_user: User, test_user_data: dict, db_session
+    ):
+        """MFA code with surrounding whitespace should be accepted after stripping."""
+        import pyotp
+
+        # Setup MFA
+        secret = pyotp.random_base32()
+        test_user.mfa_enabled = True
+        test_user.mfa_secret = secret
+        db_session.commit()
+
+        # Generate valid OTP with spaces
+        totp = pyotp.TOTP(secret)
+        otp = totp.now()
+        otp_with_spaces = f"  {otp}  "
+
+        response = client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": test_user_data["email"],
+                "password": test_user_data["password"],
+                "mfa_code": otp_with_spaces
+            }
+        )
+
+        # Should succeed (whitespace is stripped)
+        assert response.status_code == 200
+
+
+# =============================================================================
+# MFA SETUP ENDPOINT TESTS
+# =============================================================================
+
+class TestMFASetupEndpoints:
+    """Test MFA setup and management endpoints."""
+
+    def test_initiate_mfa_setup_success(
+        self, authenticated_client, test_user: User, db_session
+    ):
+        """Initiate MFA setup should return secret and QR code URI."""
+        response = authenticated_client.post("/api/v1/auth/mfa/initiate")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "secret" in data
+        assert "qr_code_uri" in data
+        assert "manual_entry_key" in data
+        assert data["secret"] == data["manual_entry_key"]
+
+        # Verify secret was saved to user
+        db_session.refresh(test_user)
+        assert test_user.mfa_secret == data["secret"]
+        assert test_user.mfa_enabled == False  # Not enabled until confirmed
+
+    def test_confirm_mfa_setup_success(
+        self, authenticated_client, test_user: User, db_session
+    ):
+        """Confirm MFA setup with valid code should enable MFA."""
+        import pyotp
+
+        # First initiate
+        init_response = authenticated_client.post("/api/v1/auth/mfa/initiate")
+        secret = init_response.json()["secret"]
+
+        # Generate valid code
+        totp = pyotp.TOTP(secret)
+        code = totp.now()
+
+        # Confirm
+        response = authenticated_client.post(
+            "/api/v1/auth/mfa/confirm",
+            json={"code": code}
+        )
+
+        assert response.status_code == 200
+        assert "MFA enabled" in response.json()["message"]
+
+        # Verify user has MFA enabled
+        db_session.refresh(test_user)
+        assert test_user.mfa_enabled == True
+        assert test_user.mfa_secret == secret
+
+    def test_confirm_mfa_setup_invalid_code(
+        self, authenticated_client, test_user: User, db_session
+    ):
+        """Confirm with invalid code should fail."""
+        # First initiate
+        authenticated_client.post("/api/v1/auth/mfa/initiate")
+
+        # Try to confirm with invalid code
+        response = authenticated_client.post(
+            "/api/v1/auth/mfa/confirm",
+            json={"code": "000000"}
+        )
+
+        assert response.status_code == 400
+        assert "Invalid" in response.json()["detail"]
+
+    def test_confirm_mfa_without_initiating(
+        self, authenticated_client, test_user: User, db_session
+    ):
+        """Confirm without initiating should fail."""
+        # Clear any existing secret
+        test_user.mfa_secret = None
+        db_session.commit()
+
+        response = authenticated_client.post(
+            "/api/v1/auth/mfa/confirm",
+            json={"code": "123456"}
+        )
+
+        assert response.status_code == 400
+        assert "not initiated" in response.json()["detail"].lower()
+
+    def test_disable_mfa_success(
+        self, authenticated_client, test_user: User, db_session
+    ):
+        """Disable MFA with valid code should work."""
+        import pyotp
+
+        # Setup MFA
+        secret = pyotp.random_base32()
+        test_user.mfa_enabled = True
+        test_user.mfa_secret = secret
+        db_session.commit()
+
+        # Generate valid code
+        totp = pyotp.TOTP(secret)
+        code = totp.now()
+
+        # Disable
+        response = authenticated_client.post(
+            "/api/v1/auth/mfa/disable",
+            json={"code": code}
+        )
+
+        assert response.status_code == 200
+        assert "MFA disabled" in response.json()["message"]
+
+        # Verify MFA is disabled
+        db_session.refresh(test_user)
+        assert test_user.mfa_enabled == False
+        assert test_user.mfa_secret is None
+
+    def test_get_mfa_status_enabled(
+        self, authenticated_client, test_user: User, db_session
+    ):
+        """Get MFA status when enabled."""
+        test_user.mfa_enabled = True
+        test_user.mfa_secret = "TESTSECRET123"
+        db_session.commit()
+
+        response = authenticated_client.get("/api/v1/auth/mfa/status")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["mfa_enabled"] == True
+        assert data["mfa_configured"] == True
+
+    def test_get_mfa_status_disabled(
+        self, authenticated_client, test_user: User, db_session
+    ):
+        """Get MFA status when disabled."""
+        test_user.mfa_enabled = False
+        test_user.mfa_secret = None
+        db_session.commit()
+
+        response = authenticated_client.get("/api/v1/auth/mfa/status")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["mfa_enabled"] == False
+        assert data["mfa_configured"] == False
+
+    def test_disable_mfa_unauthenticated(self, client: TestClient):
+        """Disable MFA without authentication should fail."""
+        response = client.post(
+            "/api/v1/auth/mfa/disable",
+            json={"code": "123456"}
         )
 
         assert response.status_code == 401

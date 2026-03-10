@@ -394,25 +394,284 @@ class TestCascadingDeletes:
         group.members.append(test_user)
         db_session.add(group)
         db_session.commit()
-        
+
         # Delete user
         db_session.delete(test_user)
         db_session.commit()
-        
+
         # User should be removed from group
         db_session.refresh(group)
         assert test_user not in group.members
+
+    def test_delete_user_cascades_to_delivery_logs(self, db_session, test_user):
+        """
+        Test that hard deleting a user cascades to delete related delivery_logs.
+        
+        This is a regression test for the IntegrityError that occurred when:
+        - delivery_logs.user_id had ON DELETE SET NULL but column was NOT NULL
+        - SQLAlchemy tried to set user_id=NULL during user deletion
+        
+        The fix uses ON DELETE CASCADE so PostgreSQL deletes child rows automatically.
+        """
+        from app.models import Notification, NotificationStatus
+        
+        # Create a separate admin user to own the notification (for audit trail)
+        admin = User(
+            email="admin@example.com",
+            hashed_password=hash_password("Password123!"),
+            first_name="Admin",
+            last_name="User",
+            role=UserRole.ADMIN,
+        )
+        db_session.add(admin)
+        db_session.commit()
+        db_session.refresh(admin)
+        
+        # Create a notification owned by admin (not test_user)
+        notification = Notification(
+            title="Test Notification",
+            message="Test message",
+            channels=["sms", "email"],
+            created_by_id=admin.id,  # Owned by admin, not test_user
+        )
+        db_session.add(notification)
+        db_session.commit()
+        db_session.refresh(notification)
+
+        # Create delivery logs linked to the test_user (as recipient)
+        delivery_log_1 = DeliveryLog(
+            notification_id=notification.id,
+            user_id=test_user.id,
+            user_email=test_user.email,  # Preserved for audit
+            channel=AlertChannel.SMS,
+            status="sent",
+            to_address="+1234567890",
+        )
+        delivery_log_2 = DeliveryLog(
+            notification_id=notification.id,
+            user_id=test_user.id,
+            user_email=test_user.email,
+            channel=AlertChannel.EMAIL,
+            status="delivered",
+            to_address=test_user.email,
+        )
+        db_session.add_all([delivery_log_1, delivery_log_2])
+        db_session.commit()
+
+        # Verify delivery logs exist
+        user_delivery_logs = db_session.query(DeliveryLog).filter(
+            DeliveryLog.user_id == test_user.id
+        ).all()
+        assert len(user_delivery_logs) == 2
+
+        # Hard delete the user
+        db_session.delete(test_user)
+        db_session.commit()
+
+        # User should be gone
+        user = db_session.query(User).filter(User.id == test_user.id).first()
+        assert user is None
+
+        # Related delivery logs should also be deleted (CASCADE)
+        remaining_logs = db_session.query(DeliveryLog).filter(
+            DeliveryLog.user_id == test_user.id
+        ).all()
+        assert len(remaining_logs) == 0
+
+    def test_delete_user_cascades_to_notification_responses(self, db_session, test_user):
+        """
+        Test that hard deleting a user cascades to delete related notification responses.
+        
+        Similar to delivery_logs, notification_responses.user_id uses ON DELETE CASCADE.
+        """
+        from app.models import NotificationResponse, ResponseType, Notification, NotificationStatus
+        
+        # Create a separate admin user to own the notification (for audit trail)
+        admin = User(
+            email="admin2@example.com",
+            hashed_password=hash_password("Password123!"),
+            first_name="Admin",
+            last_name="User",
+            role=UserRole.ADMIN,
+        )
+        db_session.add(admin)
+        db_session.commit()
+        db_session.refresh(admin)
+        
+        # Create a notification owned by admin
+        notification = Notification(
+            title="Test Notification",
+            message="Test message",
+            channels=["sms"],
+            created_by_id=admin.id,
+        )
+        db_session.add(notification)
+        db_session.commit()
+        db_session.refresh(notification)
+
+        # Create responses linked to the test_user
+        response_1 = NotificationResponse(
+            notification_id=notification.id,
+            user_id=test_user.id,
+            user_email=test_user.email,
+            channel=AlertChannel.SMS,
+            response_type=ResponseType.SAFE,
+        )
+        response_2 = NotificationResponse(
+            notification_id=notification.id,
+            user_id=test_user.id,
+            user_email=test_user.email,
+            channel=AlertChannel.EMAIL,
+            response_type=ResponseType.ACKNOWLEDGED,
+        )
+        db_session.add_all([response_1, response_2])
+        db_session.commit()
+
+        # Verify responses exist
+        user_responses = db_session.query(NotificationResponse).filter(
+            NotificationResponse.user_id == test_user.id
+        ).all()
+        assert len(user_responses) == 2
+
+        # Hard delete the user
+        db_session.delete(test_user)
+        db_session.commit()
+
+        # User should be gone
+        user = db_session.query(User).filter(User.id == test_user.id).first()
+        assert user is None
+
+        # Related responses should also be deleted (CASCADE)
+        remaining_responses = db_session.query(NotificationResponse).filter(
+            NotificationResponse.user_id == test_user.id
+        ).all()
+        assert len(remaining_responses) == 0
+
+    def test_delete_user_with_multiple_delivery_logs_no_integrity_error(self, db_session, test_user):
+        """
+        Regression test: Verify deleting a user with multiple delivery logs succeeds.
+        
+        This test ensures the exact error scenario from the bug report is fixed:
+        sqlalchemy.exc.IntegrityError: null value in column "user_id" of relation "delivery_logs"
+        
+        The delete should complete without attempting to set user_id to NULL.
+        """
+        from app.models import Notification
+        
+        # Create a separate admin user to own the notification
+        admin = User(
+            email="admin3@example.com",
+            hashed_password=hash_password("Password123!"),
+            first_name="Admin",
+            last_name="User",
+            role=UserRole.ADMIN,
+        )
+        db_session.add(admin)
+        db_session.commit()
+        db_session.refresh(admin)
+        
+        # Create notification owned by admin
+        notification = Notification(
+            title="Test",
+            message="Test",
+            channels=["sms"],
+            created_by_id=admin.id,
+        )
+        db_session.add(notification)
+        db_session.commit()
+        db_session.refresh(notification)
+
+        # Create multiple delivery logs for test_user
+        for i in range(5):
+            log = DeliveryLog(
+                notification_id=notification.id,
+                user_id=test_user.id,
+                user_email=test_user.email,
+                channel=AlertChannel.SMS,
+                status="sent",
+                to_address=f"+123456789{i}",
+            )
+            db_session.add(log)
+        db_session.commit()
+
+        # This delete should NOT raise IntegrityError
+        # Previously would fail with: UPDATE delivery_logs SET user_id=NULL ...
+        db_session.delete(test_user)
+        db_session.commit()  # Should succeed without error
+
+        # Verify cleanup
+        assert db_session.query(User).filter(User.id == test_user.id).first() is None
+        assert db_session.query(DeliveryLog).filter(
+            DeliveryLog.user_id == test_user.id
+        ).count() == 0
+
+    def test_user_update_does_not_affect_delivery_logs(self, db_session, test_user):
+        """
+        Test that updating a user's profile does not mutate delivery log ownership.
+        
+        Regression test to ensure delivery_logs remain untouched unless user is deleted.
+        """
+        from app.models import Notification
+        
+        # Create a separate admin user to own the notification
+        admin = User(
+            email="admin4@example.com",
+            hashed_password=hash_password("Password123!"),
+            first_name="Admin",
+            last_name="User",
+            role=UserRole.ADMIN,
+        )
+        db_session.add(admin)
+        db_session.commit()
+        db_session.refresh(admin)
+        
+        # Create notification and delivery log
+        notification = Notification(
+            title="Test",
+            message="Test",
+            channels=["email"],
+            created_by_id=admin.id,
+        )
+        db_session.add(notification)
+        db_session.commit()
+        db_session.refresh(notification)
+
+        delivery_log = DeliveryLog(
+            notification_id=notification.id,
+            user_id=test_user.id,
+            user_email=test_user.email,
+            channel=AlertChannel.EMAIL,
+            status="delivered",
+            to_address=test_user.email,
+        )
+        db_session.add(delivery_log)
+        db_session.commit()
+        db_session.refresh(delivery_log)
+
+        original_log_id = delivery_log.id
+        original_user_id = delivery_log.user_id
+
+        # Update user profile (not deletion)
+        test_user.phone = "+9999999999"
+        test_user.department = "Engineering"
+        db_session.commit()
+
+        # Delivery log should be unchanged
+        db_session.refresh(delivery_log)
+        assert delivery_log.id == original_log_id
+        assert delivery_log.user_id == original_user_id
+        assert delivery_log.user_email == test_user.email  # Still linked
 
     def test_delete_location_cascades_to_users(self, db_session, test_location, test_user):
         """Test deleting location affects user assignments."""
         # Assign user to location
         test_user.location_id = test_location.id
         db_session.commit()
-        
+
         # Delete location
         db_session.delete(test_location)
         db_session.commit()
-        
+
         # User's location_id should be NULL
         db_session.refresh(test_user)
         assert test_user.location_id is None

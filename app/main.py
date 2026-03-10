@@ -1,10 +1,14 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from contextlib import asynccontextmanager
 import logging
 import os
 import re
+
+# Request size limit constants (in bytes)
+MAX_REQUEST_SIZE = 10 * 1024 * 1024  # 10 MB max request body size
+MAX_JSON_SIZE = 1 * 1024 * 1024  # 1 MB max JSON payload
 
 from sqlalchemy import text
 from app.config import settings
@@ -350,6 +354,34 @@ app.add_middleware(
     expose_headers=["Retry-After"],
 )
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+
+# Request size limit middleware
+@app.middleware("http")
+async def limit_request_size(request: Request, call_next):
+    """
+    Middleware to limit request body size.
+    
+    Prevents DoS attacks via oversized payloads.
+    Returns 413 Payload Too Large if request exceeds limits.
+    """
+    content_length = request.headers.get("content-length")
+    
+    if content_length:
+        try:
+            size = int(content_length)
+            if size > MAX_REQUEST_SIZE:
+                from fastapi.responses import JSONResponse
+                return JSONResponse(
+                    status_code=413,
+                    content={
+                        "detail": f"Request payload too large. Maximum size is {MAX_REQUEST_SIZE // (1024*1024)}MB"
+                    }
+                )
+        except (ValueError, TypeError):
+            pass  # Invalid content-length, let downstream handle it
+    
+    return await call_next(request)
 
 # ─── ROUTES ───────────────────────────────────────────────────────────────────
 
