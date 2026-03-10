@@ -541,7 +541,13 @@ def periodic_geofence_check() -> Dict[str, Any]:
     db = SessionLocal()
     try:
         # Get all active users that have a known location
-        users_with_location = db.query(User).filter(
+        # Only select necessary columns to avoid issues with migrations
+        users_with_location = db.query(
+            User.id,
+            User.latitude,
+            User.longitude,
+            User.location_id
+        ).filter(
             User.is_active == True,
             User.latitude.isnot(None),
             User.longitude.isnot(None)
@@ -553,7 +559,7 @@ def periodic_geofence_check() -> Dict[str, Any]:
 
         # Build user_locations list and call batch check
         user_locations = [
-            {"user_id": u.id, "latitude": u.latitude, "longitude": u.longitude}
+            {"user_id": u.id, "latitude": u.latitude, "longitude": u.longitude, "location_id": u.location_id}
             for u in users_with_location
         ]
 
