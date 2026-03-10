@@ -95,10 +95,10 @@ def ensure_column_exists(table_name: str, column_name: str, column_type: str, nu
 def ensure_table_exists(table_name: str):
     """
     Check if a table exists in the database.
-    
+
     Args:
         table_name: Name of the table to check
-    
+
     Returns:
         bool: True if table exists, False otherwise
     """
@@ -106,17 +106,69 @@ def ensure_table_exists(table_name: str):
     try:
         result = db.execute(
             text("""
-                SELECT table_name 
-                FROM information_schema.tables 
+                SELECT table_name
+                FROM information_schema.tables
                 WHERE table_name = :table_name
             """),
             {"table_name": table_name}
         ).fetchone()
-        
+
         return result is not None
-        
+
     except Exception as e:
         logger.error(f"Error checking table '{table_name}': {e}")
         return False
+    finally:
+        db.close()
+
+
+def ensure_mfa_secret_column_expanded():
+    """
+    Ensure the mfa_secret column in users table is VARCHAR(255) for Fernet encryption.
+    
+    Fernet-encrypted secrets are ~120+ characters, but the original column was VARCHAR(32).
+    This expands the column if it's still at the old size.
+    
+    Returns:
+        bool: True if column was altered, False if already correct size
+    """
+    db = SessionLocal()
+    try:
+        # Check current column type
+        result = db.execute(
+            text("""
+                SELECT character_maximum_length, data_type
+                FROM information_schema.columns
+                WHERE table_name = 'users'
+                AND column_name = 'mfa_secret'
+            """)
+        ).fetchone()
+        
+        if not result:
+            logger.error("mfa_secret column not found in users table")
+            return False
+        
+        max_length, data_type = result
+        
+        # Check if already expanded to 255
+        if max_length == 255:
+            logger.info("mfa_secret column already expanded to VARCHAR(255)")
+            return False
+        
+        # Expand the column
+        db.execute(
+            text("""
+                ALTER TABLE users
+                ALTER COLUMN mfa_secret TYPE VARCHAR(255)
+            """)
+        )
+        db.commit()
+        logger.info("Expanded mfa_secret column from VARCHAR(32) to VARCHAR(255)")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error expanding mfa_secret column: {e}")
+        db.rollback()
+        raise
     finally:
         db.close()

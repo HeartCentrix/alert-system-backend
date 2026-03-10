@@ -15,7 +15,7 @@ from app.config import settings
 from app.middleware.security_headers import SecurityHeadersMiddleware
 from app.middleware.request_id import RequestIDMiddleware
 from sqlalchemy import text
-from app.database import engine, Base, SessionLocal, ensure_column_exists
+from app.database import engine, Base, SessionLocal, ensure_column_exists, ensure_mfa_secret_column_expanded
 from app.models import (
     User, UserRole, AlertChannel, Location, Group, NotificationTemplate,
     Incident, Notification, DeliveryLog, NotificationResponse, IncomingMessage,
@@ -235,6 +235,12 @@ async def lifespan(app: FastAPI):
         ensure_column_exists('users', 'token_valid_after', 'TIMESTAMP WITH TIME ZONE', nullable=True)
     except Exception as e:
         logger.error(f"Failed to ensure token_valid_after column: {e}")
+
+    # Ensure mfa_secret column is expanded for Fernet encryption (VARCHAR(32) -> VARCHAR(255))
+    try:
+        ensure_mfa_secret_column_expanded()
+    except Exception as e:
+        logger.error(f"Failed to expand mfa_secret column: {e}")
 
     # Ensure audit_logs table has user_email column
     logger.info("Ensuring audit_logs table has user_email column...")
