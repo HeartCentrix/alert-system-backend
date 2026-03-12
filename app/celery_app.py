@@ -48,11 +48,11 @@ celery_app.conf.update(
             "task": "app.tasks.process_scheduled_notifications",
             "schedule": 30.0,  # Every 30 seconds for time-sensitive alerts
         },
-        # TEMPORARILY DISABLED: Sends duplicate emails to admins every 5 minutes
-        # "check-safety-response-deadlines": {
-        #     "task": "app.tasks.check_safety_response_deadlines",
-        #     "schedule": 300.0,  # Every 5 minutes for deadline monitoring
-        # },
+        "check-safety-response-deadlines": {
+            "task": "app.tasks.check_safety_response_deadlines",
+            "schedule": 300.0,  # Every 5 minutes for deadline monitoring
+            # Sends escalation email to admins ONCE per notification (deadline_escalated flag)
+        },
         "periodic-geofence-check": {
             "task": "app.location_tasks.periodic_geofence_check",
             "schedule": 300.0,  # Every 5 minutes
