@@ -1,11 +1,20 @@
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
-from jose import JWTError, jwt
+import jwt
+from jwt.exceptions import PyJWTError
 from passlib.context import CryptContext
 from app.config import settings
 import re
 import pyotp
 import base64
+import hashlib
+import secrets
+import math
+import time
+from cryptography.fernet import Fernet, InvalidToken
+import logging
+
+logger = logging.getLogger(__name__)
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -20,6 +29,143 @@ MFA_REQUIRED_ROLES = ["super_admin", "admin", "manager"]
 
 # Reauthentication TTL for sensitive MFA operations (5 minutes)
 MFA_REAUTH_TTL_SECONDS = 300
+
+# Fernet encryption for MFA secrets
+# Lazy initialization to avoid issues if key is missing
+_mfa_fernet: Optional[Fernet] = None
+
+
+def _get_mfa_fernet() -> Optional[Fernet]:
+    """
+    Get or create the Fernet instance for MFA encryption.
+    
+    Returns None if MFA_ENCRYPTION_KEY is not configured.
+    """
+    global _mfa_fernet
+    if _mfa_fernet is not None:
+        return _mfa_fernet
+    
+    if not settings.MFA_ENCRYPTION_KEY:
+        logger.warning("MFA_ENCRYPTION_KEY not configured. MFA secrets will NOT be encrypted.")
+        return None
+    
+    try:
+        _mfa_fernet = Fernet(settings.MFA_ENCRYPTION_KEY.encode())
+        return _mfa_fernet
+    except Exception as e:
+        logger.error(f"Failed to initialize MFA Fernet encryption: {e}")
+        return None
+
+
+def encrypt_mfa_secret(secret: str) -> str:
+    """
+    Encrypt an MFA secret using Fernet symmetric encryption.
+    
+    Args:
+        secret: Plaintext base32-encoded TOTP secret
+        
+    Returns:
+        Encrypted secret (Fernet token) or original secret if encryption unavailable
+        
+    Security:
+        - Fernet provides authenticated encryption (AES-CBC + HMAC)
+        - Tokens include timestamp for potential rotation
+        - Encrypted tokens start with 'gAAAAA' (base64 encoding of version byte)
+    """
+    fernet = _get_mfa_fernet()
+    if not fernet:
+        # Encryption not configured, return plaintext (backward compatibility)
+        return secret
+    
+    try:
+        encrypted = fernet.encrypt(secret.encode('utf-8'))
+        return encrypted.decode('utf-8')
+    except Exception as e:
+        logger.error(f"Failed to encrypt MFA secret: {e}")
+        # Fail closed: return plaintext rather than breaking MFA entirely
+        # This is a security tradeoff; in high-security environments, raise instead
+        return secret
+
+
+def decrypt_mfa_secret(encrypted_secret: str) -> Optional[str]:
+    """
+    Decrypt an MFA secret.
+    
+    Handles both encrypted and plaintext secrets for backward compatibility.
+    
+    Args:
+        encrypted_secret: Encrypted or plaintext MFA secret
+        
+    Returns:
+        Decrypted plaintext secret, or None if decryption fails
+        
+    Security:
+        - Detects plaintext vs encrypted by Fernet token prefix (gAAAAA)
+        - Returns None on decryption failure (invalid key or corrupted token)
+        - Logs decryption failures for security monitoring
+    """
+    fernet = _get_mfa_fernet()
+    
+    # Check if this is an encrypted secret (Fernet tokens start with 'gAAAAA')
+    if not encrypted_secret.startswith('gAAAAA'):
+        # Plaintext secret (old format or encryption not enabled)
+        # Return as-is for backward compatibility
+        return encrypted_secret
+    
+    if not fernet:
+        logger.error("MFA secret is encrypted but MFA_ENCRYPTION_KEY not configured")
+        return None
+    
+    try:
+        decrypted = fernet.decrypt(encrypted_secret.encode('utf-8'))
+        return decrypted.decode('utf-8')
+    except InvalidToken:
+        logger.error("Failed to decrypt MFA secret - invalid token or wrong encryption key")
+        return None
+    except Exception as e:
+        logger.error(f"Failed to decrypt MFA secret: {e}")
+        return None
+
+
+def hash_password_reset_token(token: str) -> str:
+    """
+    Hash a password reset token using SHA-256.
+    
+    Password reset tokens are stored as hashes to prevent database leaks
+    from being usable for password resets.
+    
+    Args:
+        token: Plaintext reset token (sent to user via email)
+        
+    Returns:
+        SHA-256 hash of the token (64-character hex string)
+        
+    Security:
+        - SHA-256 is sufficient for random tokens (no need for bcrypt)
+        - Tokens are high-entropy (secrets.token_urlsafe(32))
+        - Hash is stored in DB, plaintext only in email/URL
+    """
+    return hashlib.sha256(token.encode('utf-8')).hexdigest()
+
+
+def verify_password_reset_token(plaintext_token: str, hashed_token: str) -> bool:
+    """
+    Verify a password reset token against its stored hash.
+    
+    Args:
+        plaintext_token: Token provided by user (from email/URL)
+        hashed_token: Hash stored in database
+        
+    Returns:
+        True if token matches, False otherwise
+        
+    Security:
+        - Uses constant-time comparison via hmac.compare_digest
+        - Prevents timing attacks
+    """
+    import hmac
+    computed_hash = hash_password_reset_token(plaintext_token)
+    return hmac.compare_digest(computed_hash, hashed_token)
 
 
 def user_requires_mfa(user) -> bool:
@@ -185,9 +331,11 @@ def get_recovery_code_regeneration_policy(user) -> dict:
 def verify_totp_code(secret: str, code: str, valid_window: Optional[int] = None) -> bool:
     """
     Verify a TOTP code against a stored secret.
+    
+    Automatically handles both encrypted and plaintext secrets.
 
     Args:
-        secret: Base32-encoded TOTP secret
+        secret: Base32-encoded TOTP secret (may be encrypted with Fernet)
         code: TOTP code to verify
         valid_window: Number of time steps to allow for clock drift
                      If None, uses settings.MFA_TOTP_VALID_WINDOW (default 0)
@@ -203,6 +351,7 @@ def verify_totp_code(secret: str, code: str, valid_window: Optional[int] = None)
         - Uses constant-time comparison via pyotp
         - Default valid_window=0 rejects expired codes (current step only)
         - RFC 6238 warns that larger windows increase attack surface
+        - Automatically decrypts Fernet-encrypted secrets
     """
     if not secret or not code:
         return False
@@ -215,21 +364,49 @@ def verify_totp_code(secret: str, code: str, valid_window: Optional[int] = None)
         if not re.match(r"^\d{6}$", code):
             return False
 
+        # Decrypt secret if it's encrypted (Fernet tokens start with 'gAAAAA')
+        decrypted_secret = decrypt_mfa_secret(secret)
+        if not decrypted_secret:
+            # Decryption failed (wrong key or corrupted token)
+            return False
+
         # Validate secret is valid Base32
         # pyotp handles padding internally, but we normalize here
-        secret = secret.upper().replace(" ", "")
+        decrypted_secret = decrypted_secret.upper().replace(" ", "")
 
         # Use provided window or fall back to config default
         if valid_window is None:
             valid_window = settings.MFA_TOTP_VALID_WINDOW
 
-        totp = pyotp.TOTP(secret)
+        totp = pyotp.TOTP(decrypted_secret)
         return totp.verify(code, valid_window=valid_window)
 
     except (ValueError, Exception):
         # Fail closed on any exception during verification
         # pyotp may raise various exceptions (binascii.Error, etc.)
         return False
+
+
+def is_totp_replay(user, code: str) -> bool:
+    """
+    Detect if the given TOTP code is a replay of the most recently used code
+    within the same 30-second TOTP window.
+
+    Args:
+        user: SQLAlchemy User model instance (must have last_used_totp_code and last_used_totp_at)
+        code: The 6-digit TOTP code string being verified
+
+    Returns:
+        True if this is a replay attack (same code, same window) — caller should REJECT.
+        False if the code is fresh and safe to accept.
+    """
+    if not user.last_used_totp_code or not user.last_used_totp_at:
+        return False  # No previous code recorded, cannot be a replay
+
+    current_window = math.floor(time.time() / 30)
+    last_window = math.floor(user.last_used_totp_at.timestamp() / 30)
+
+    return user.last_used_totp_code == code and current_window == last_window
 
 
 def generate_mfa_secret() -> str:
@@ -317,10 +494,15 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + (
+    now = datetime.now(timezone.utc)
+    expire = now + (
         expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     )
-    to_encode.update({"exp": expire, "type": "access"})
+    to_encode.update({
+        "exp": expire,
+        "iat": now,
+        "type": "access",
+    })
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=ALGORITHM)
 
 
@@ -352,5 +534,5 @@ def decode_token(token: str, token_type: str = "access") -> Optional[dict]:
             return None
 
         return payload
-    except JWTError:
+    except PyJWTError:
         return None

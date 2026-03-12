@@ -7,6 +7,10 @@ class Settings(BaseSettings):
     APP_ENV: str = "development"
     SECRET_KEY: str = ""
     REFRESH_SECRET_KEY: str = ""
+    # Dedicated signing key for MFA challenge tokens (5-minute lifetime).
+    # Separate from SECRET_KEY to prevent token-type confusion.
+    # Generate with: python -c "import secrets; print(secrets.token_hex(32))"
+    MFA_CHALLENGE_SECRET_KEY: str = ""
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     FRONTEND_URL: str = "http://localhost:3000"
@@ -46,6 +50,10 @@ class Settings(BaseSettings):
     # TOTP valid window: 0 = current step only (most secure), 1 = allow one step for clock skew
     # RFC 6238 recommends at most one time step; 0 is preferred for security
     MFA_TOTP_VALID_WINDOW: int = 0
+
+    # MFA encryption key for encrypting MFA secrets at rest (Fernet key)
+    # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    MFA_ENCRYPTION_KEY: str = ""
 
     class Config:
         env_file = ".env"

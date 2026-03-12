@@ -1,6 +1,6 @@
 import re
 from pydantic import BaseModel, EmailStr, Field, validator, field_validator, constr
-from typing import Optional, List, Any, Dict
+from typing import Optional, List, Any, Dict, Union
 from datetime import datetime
 from app.models import (
     UserRole, GroupType, NotificationStatus, DeliveryStatus,
@@ -64,13 +64,13 @@ class LoginRequest(BaseModel):
 
 class TokenResponse(BaseModel):
     access_token: str
-    refresh_token: str
     token_type: str = "bearer"
     user: "UserResponse"
+    refresh_token: Optional[str] = None  # For cross-origin deployments (Vercel + Railway)
 
 
 class RefreshRequest(BaseModel):
-    refresh_token: str
+    refresh_token: Optional[str] = None
 
 
 class PasswordResetRequest(BaseModel):
@@ -159,9 +159,9 @@ class LoginSuccessResponse(BaseModel):
     """Standard login success response with tokens."""
     status: str = "success"
     access_token: str
-    refresh_token: str
     token_type: str = "bearer"
     user: "UserResponse"
+    refresh_token: Optional[str] = None  # For cross-origin deployments (Vercel + Railway)
     recovery_codes: Optional[List[str]] = None  # Only present on first MFA setup
     recovery_codes_warning: Optional[str] = None  # Security warning
 
@@ -656,6 +656,10 @@ class UserUpdate(BaseModel):
         None,
         max_length=EMPLOYEE_ID_MAX_LENGTH
     )
+    email: Optional[EmailStr] = Field(
+        None,
+        max_length=EMAIL_MAX_LENGTH
+    )
     role: Optional[UserRole] = None
     location_id: Optional[int] = None
     is_active: Optional[bool] = None
@@ -928,6 +932,7 @@ class NotificationCreate(BaseModel):
     target_group_ids: Optional[List[int]] = []
     target_user_ids: Optional[List[int]] = []
     scheduled_at: Optional[datetime] = None
+    scheduled_timezone: Optional[str] = None  # Timezone for scheduled time (e.g., "America/New_York")
     response_required: bool = False
     response_deadline_minutes: Optional[int] = None
     slack_webhook_url: Optional[str] = None
@@ -1030,7 +1035,7 @@ class DashboardStats(BaseModel):
 # ─── INCOMING MESSAGE ─────────────────────────────────────────────────────────
 
 class IncomingMessageResponse(BaseModel):
-    id: int
+    id: Union[int, str]  # Can be int for SMS or string for voice responses (e.g., "voice_7")
     from_number: str
     body: Optional[str]
     channel: AlertChannel

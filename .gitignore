@@ -4,6 +4,8 @@
 .env.*.local
 .env.production
 .env.staging
+.env.bak
+.env.bak2
 
 # Python
 __pycache__/
@@ -26,8 +28,6 @@ ENV/
 *.swp
 *.swo
 *~
-
-# Environment variables
 
 # Celery
 celerybeat-schedule
@@ -59,6 +59,27 @@ dmypy.json
 
 info/
 
+# Railway - old split configs (use single railway.toml)
+railway.api.toml
+railway.beat.toml
+railway.worker.toml
+
+# Redundant scripts
+check_syntax.py
+
+# Docker override (local dev only)
+docker-compose.override.yml
+
+# Requirements - keep only requirements.txt
+requirements-locked.txt
+
+# Mutation testing (if not used)
+mutmut_config.ini
+
+# Old documentation
+MIGRATIONS.md
+RAILWAY_DEPLOY.md
+
 # Temporary documentation files (not needed in repo)
 *_SUMMARY.md
 *_GUIDE.md
@@ -72,3 +93,6 @@ LOCATION_AUDIENCE_SYSTEM.md
 LOCATION_AUTOCOMPLETE.md
 IMPLEMENTATION_SUMMARY.md
 test_location_members_api.py
+
+# Local documentation (not for git)
+AUTHENTICATION_ARCHITECTURE.md

@@ -5,6 +5,8 @@ from sqlalchemy import or_
 from typing import Optional, List
 from app.database import get_db
 from app.models import Group, GroupType, Location, NotificationTemplate, User, AuditLog, UserLocation, UserLocationStatus, UserRole
+from app.utils.audit import create_audit_log
+from app.utils.search import escape_like
 from app.schemas import (
     GroupCreate, GroupUpdate, GroupResponse, GroupDetailResponse, GroupMemberAdd,
     LocationCreate, LocationUpdate, LocationResponse,
@@ -36,7 +38,8 @@ def list_groups(
         query = query.join(Group.members).filter(User.id == current_user.id)
     
     if search:
-        query = query.filter(Group.name.ilike(f"%{search}%"))
+        safe_search = escape_like(search)
+        query = query.filter(Group.name.ilike(f"%{safe_search}%"))
     if type:
         query = query.filter(Group.type == type)
     groups = query.order_by(Group.name).all()
@@ -56,7 +59,8 @@ def list_groups(
 def create_group(
     data: GroupCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_admin),
+    request: Request = None,
 ):
     group = Group(
         name=data.name,
@@ -66,18 +70,19 @@ def create_group(
         dynamic_filter=data.dynamic_filter,
         created_by_id=current_user.id
     )
-    
+
     # For dynamic groups, auto-populate members based on dynamic_filter
     if data.type == GroupType.DYNAMIC and data.dynamic_filter:
         query = db.query(User).filter(User.is_active == True)
         f = data.dynamic_filter
-        if f.get("department"):
-            query = query.filter(User.department == f["department"])
-        if f.get("title"):
-            query = query.filter(User.title == f["title"])
-        if f.get("role"):
-            query = query.filter(User.role == f["role"])
-        if f.get("location_id"):
+        # Apply filters only if they have non-empty, non-whitespace values
+        if f.get("department") and str(f["department"]).strip():
+            query = query.filter(User.department == f["department"].strip())
+        if f.get("title") and str(f["title"]).strip():
+            query = query.filter(User.title == f["title"].strip())
+        if f.get("role") and str(f["role"]).strip():
+            query = query.filter(User.role == f["role"].strip())
+        if f.get("location_id") and str(f["location_id"]).strip():
             query = query.filter(User.location_id == f["location_id"])
         members = query.all()
         group.members = members
@@ -85,9 +90,9 @@ def create_group(
         # For static groups, use provided member_ids
         members = db.query(User).filter(User.id.in_(data.member_ids)).all()
         group.members = members
-    
+
     db.add(group)
-    db.add(AuditLog(
+    db.add(create_audit_log(
         user_id=current_user.id,
         user_email=current_user.email,
         action="create_group",
@@ -96,7 +101,8 @@ def create_group(
             "group_name": group.name,
             "group_type": data.type.value,
             "member_count": len(group.members)
-        }
+        },
+        request=request,
     ))
     db.commit()
     db.refresh(group)
@@ -162,13 +168,14 @@ def update_group(
     if group.type == GroupType.DYNAMIC and group.dynamic_filter:
         query = db.query(User).filter(User.is_active == True)
         f = group.dynamic_filter
-        if f.get("department"):
-            query = query.filter(User.department == f["department"])
-        if f.get("title"):
-            query = query.filter(User.title == f["title"])
-        if f.get("role"):
-            query = query.filter(User.role == f["role"])
-        if f.get("location_id"):
+        # Apply filters only if they have non-empty, non-whitespace values
+        if f.get("department") and str(f["department"]).strip():
+            query = query.filter(User.department == f["department"].strip())
+        if f.get("title") and str(f["title"]).strip():
+            query = query.filter(User.title == f["title"].strip())
+        if f.get("role") and str(f["role"]).strip():
+            query = query.filter(User.role == f["role"].strip())
+        if f.get("location_id") and str(f["location_id"]).strip():
             query = query.filter(User.location_id == f["location_id"])
         members = query.all()
         group.members = members
@@ -293,14 +300,15 @@ def preview_dynamic_group(
     
     query = db.query(User).filter(User.is_active == True)
     f = data.dynamic_filter
-    
-    if f.get("department"):
-        query = query.filter(User.department == f["department"])
-    if f.get("title"):
-        query = query.filter(User.title == f["title"])
-    if f.get("role"):
-        query = query.filter(User.role == f["role"])
-    if f.get("location_id"):
+
+    # Apply filters only if they have non-empty, non-whitespace values
+    if f.get("department") and str(f["department"]).strip():
+        query = query.filter(User.department == f["department"].strip())
+    if f.get("title") and str(f["title"]).strip():
+        query = query.filter(User.title == f["title"].strip())
+    if f.get("role") and str(f["role"]).strip():
+        query = query.filter(User.role == f["role"].strip())
+    if f.get("location_id") and str(f["location_id"]).strip():
         query = query.filter(User.location_id == f["location_id"])
     
     members = query.all()
@@ -330,28 +338,26 @@ def get_filter_options(
 ):
     """
     Get unique values for dynamic group filter options.
-    
+
     Returns unique departments, titles, and roles that can be used to create dynamic groups.
     """
-    # Get unique departments
+    # Get unique departments (from all users, not just active)
     departments = db.query(User.department).filter(
-        User.department.isnot(None),
-        User.is_active == True
+        User.department.isnot(None)
     ).distinct().all()
-    
-    # Get unique titles
+
+    # Get unique titles (from all users, not just active)
     titles = db.query(User.title).filter(
-        User.title.isnot(None),
-        User.is_active == True
+        User.title.isnot(None)
     ).distinct().all()
-    
+
     # Get all available roles
     roles = [role.value for role in UserRole]
-    
+
     return {
         "departments": [d[0] for d in departments if d[0]],
         "titles": [t[0] for t in titles if t[0]],
-        "roles": roles
+        "roles": roles,
     }
 
 
@@ -449,7 +455,7 @@ def create_location(
     db.add(location)
 
     # Audit log
-    db.add(AuditLog(
+    db.add(create_audit_log(
         user_id=current_user.id,
         user_email=current_user.email,
         action="create_location",
@@ -461,8 +467,7 @@ def create_location(
             "geofence_radius_miles": location.geofence_radius_miles,
             "overlaps": len(overlaps)
         },
-        ip_address=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent") if request else None
+        request=request,
     ))
     
     db.commit()
@@ -554,9 +559,9 @@ def update_location(
     update_data = data.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(location, field, value)
-    
+
     # Audit log
-    db.add(AuditLog(
+    db.add(create_audit_log(
         user_id=current_user.id,
         user_email=current_user.email,
         action="update_location",
@@ -568,8 +573,7 @@ def update_location(
             "longitude": location.longitude,
             "geofence_radius_miles": location.geofence_radius_miles
         },
-        ip_address=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent") if request else None
+        request=request,
     ))
     
     db.commit()

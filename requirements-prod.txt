@@ -25,6 +25,7 @@ python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 pyotp==2.9.0
+cryptography==42.0.5
 
 
 # External Services
@@ -45,6 +46,9 @@ httpx==0.27.0
 
 # Data Processing
 openpyxl==3.1.3
+
+# Timezone Support
+pytz==2024.1
 
 # Password Security
 zxcvbn==4.4.28

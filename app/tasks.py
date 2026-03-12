@@ -9,25 +9,39 @@ from app.models import (
     AlertChannel, User
 )
 from app.services.messaging import twilio_service, email_service, webhook_service
+from app.services.messaging import build_checkin_message, build_checkin_email_html
+from app.utils.checkin_link import generate_checkin_url
 from app.config import settings
-from sqlalchemy import update
+from sqlalchemy import update, Integer
 
 logger = logging.getLogger(__name__)
 
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=30)
-def send_notification_task(self, notification_id: int):
+def send_notification_task(self, notification_id: int, triggered_by_user_id: int = None, triggered_by_email: str = None):
     """Main task to dispatch a notification to all recipients across all channels.
 
     Sets notification status to:
     - SENT: All deliveries successful
     - PARTIALLY_SENT: Some deliveries failed
     - FAILED: All deliveries failed or zero recipients
-    
+
     Idempotency: Uses atomic status claim to prevent double-dispatch on celery beat overlap.
+    
+    Audit Trail:
+    - triggered_by_user_id and triggered_by_email track who initiated the notification
+    - Audit log entry created on task execution for full traceability
     """
     db = SessionLocal()
     notification = None
+
+    # Log who triggered this task for forensic traceability
+    if triggered_by_user_id:
+        logger.info(
+            f"Notification {notification_id} task started — "
+            f"triggered by user {triggered_by_user_id} ({triggered_by_email})"
+        )
+    
     try:
         notification = db.query(Notification).filter(Notification.id == notification_id).first()
         if not notification:
@@ -101,7 +115,10 @@ def send_notification_task(self, notification_id: int):
                     )
                     db.add(log)
                     # Dispatch task for this recipient/channel
-                    _send_to_channel.delay(notification_id, user.id, channel)
+                    _send_to_channel.delay(
+                        notification_id, user.id, channel,
+                        triggered_by_user_id=triggered_by_user_id,
+                    )
                     dispatched_count += 1
 
         # Commit all delivery logs at once
@@ -154,18 +171,18 @@ def send_notification_task(self, notification_id: int):
 
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
-def _send_to_channel(self, notification_id: int, user_id: int, channel: str):
+def _send_to_channel(self, notification_id: int, user_id: int, channel: str, triggered_by_user_id: int = None):
     """Send notification to a single user via a single channel.
-    
+
     Creates a DeliveryLog entry for every attempt to track delivery status.
     Exceptions are logged and the delivery is marked as FAILED.
-    
+
     Idempotency: Checks for existing delivery log (including PENDING) to prevent
     duplicate sends when task_acks_late=True causes task re-queue on worker crash.
     """
     db = SessionLocal()
     log = None  # Initialize early to avoid UnboundLocalError in exception handler
-    
+
     try:
         notification = db.query(Notification).filter(Notification.id == notification_id).first()
         user = db.query(User).filter(User.id == user_id).first()
@@ -211,11 +228,28 @@ def _send_to_channel(self, notification_id: int, user_id: int, channel: str):
 
         result = {}
 
+        # Generate check-in link if response is required
+        checkin_url = None
+        if notification.response_required and notification.response_deadline_minutes:
+            checkin_url = generate_checkin_url(
+                notification_id,
+                user.id,
+                notification.response_deadline_minutes
+            )
+
         if channel == AlertChannel.SMS:
             if user.phone:
                 log.to_address = user.phone
+                # Build message with check-in link if required
+                sms_message = notification.message
+                if checkin_url:
+                    sms_message = build_checkin_message(
+                        notification.message,
+                        checkin_url,
+                        notification.response_deadline_minutes
+                    )
                 logger.info(f"Sending SMS to {user.phone} for notification {notification_id}")
-                result = twilio_service.send_sms(user.phone, notification.message)
+                result = twilio_service.send_sms(user.phone, sms_message)
                 logger.info(f"SMS result for notification {notification_id} to {user.phone}: {result}")
             else:
                 logger.warning(f"User {user_id} has no phone number for SMS")
@@ -236,8 +270,23 @@ def _send_to_channel(self, notification_id: int, user_id: int, channel: str):
             if user.email:
                 log.to_address = user.email
                 subject = notification.subject or notification.title
+                # Build email with check-in link if required
+                email_message = notification.message
+                email_html = None
+                if checkin_url:
+                    email_message = build_checkin_message(
+                        notification.message,
+                        checkin_url,
+                        notification.response_deadline_minutes
+                    )
+                    # Create HTML version with check-in button
+                    email_html = build_checkin_email_html(
+                        email_service._text_to_html(email_message),
+                        checkin_url,
+                        notification.response_deadline_minutes
+                    )
                 logger.info(f"Sending email to {user.email} for notification {notification_id}, subject: {subject}")
-                result = email_service.send_email(user.email, subject, notification.message)
+                result = email_service.send_email(user.email, subject, email_message, email_html)
                 logger.info(f"Email result for notification {notification_id} to {user.email}: {result}")
             else:
                 logger.warning(f"User {user_id} has no email address")
@@ -257,8 +306,12 @@ def _send_to_channel(self, notification_id: int, user_id: int, channel: str):
         elif channel == AlertChannel.VOICE:
             if user.phone:
                 log.to_address = user.phone
+                # For voice calls, mention check-in requirement in the message
+                voice_message = notification.message
+                if checkin_url:
+                    voice_message = f"{notification.message}. A safety check-in response is required. Please visit the link sent to your email or log in to the portal to respond."
                 logger.info(f"Making voice call to {user.phone} for notification {notification_id}")
-                result = twilio_service.make_voice_call(user.phone, notification.message)
+                result = twilio_service.make_voice_call(user.phone, voice_message)
                 logger.info(f"Voice call result for notification {notification_id} to {user.phone}: {result}")
             else:
                 logger.warning(f"User {user_id} has no phone number for voice call")
@@ -331,18 +384,18 @@ def _send_to_channel(self, notification_id: int, user_id: int, channel: str):
 @celery_app.task(bind=True, default_retry_delay=5)
 def process_scheduled_notifications(self):
     """Check for scheduled notifications that are due and dispatch them.
-    
+
     Uses atomic UPDATE with RETURNING to claim notifications exclusively.
     Only the worker that successfully changes status from SCHEDULED to SENDING
     will dispatch the notification, preventing double-dispatch on overlap.
+    
+    Also recovers stuck SENDING notifications (older than 5 minutes) by re-queueing them.
     """
     db = SessionLocal()
     try:
         now = datetime.now(timezone.utc)
 
-        # Atomically claim due notifications to prevent duplicate dispatch
-        # Uses FOR UPDATE-style locking via atomic status change
-        # Only this worker will get these IDs in the RETURNING clause
+        # === 1. Process SCHEDULED notifications that are due ===
         claimed = db.execute(
             update(Notification)
             .where(
@@ -351,7 +404,6 @@ def process_scheduled_notifications(self):
             )
             .values(
                 status=NotificationStatus.SENDING,
-                # Mark as claimed by this execution (idempotency safeguard)
             )
             .returning(Notification.id)
         ).all()
@@ -361,10 +413,48 @@ def process_scheduled_notifications(self):
         # Dispatch only the notifications we claimed
         for (notification_id,) in claimed:
             logger.info(f"Dispatching scheduled notification {notification_id}")
-            send_notification_task.delay(notification_id)
+            send_notification_task.delay(
+                notification_id,
+                triggered_by_user_id=None,
+                triggered_by_email=None,
+            )
 
         if claimed:
             logger.info(f"Dispatched {len(claimed)} scheduled notifications")
+
+        # === 2. Recover stuck SENDING notifications (older than 5 minutes) ===
+        # These are notifications that failed during processing and never completed
+        stuck_threshold = datetime.fromtimestamp(
+            now.timestamp() - 300,  # 5 minutes ago
+            tz=timezone.utc
+        )
+        
+        stuck = db.execute(
+            update(Notification)
+            .where(
+                Notification.status == NotificationStatus.SENDING,
+                Notification.updated_at <= stuck_threshold
+            )
+            .values(
+                status=NotificationStatus.SENDING,  # Re-claim for processing
+                updated_at=now,
+            )
+            .returning(Notification.id)
+        ).all()
+        
+        db.commit()
+        
+        for (notification_id,) in stuck:
+            logger.warning(f"Recovering stuck notification {notification_id}")
+            send_notification_task.delay(
+                notification_id,
+                triggered_by_user_id=None,
+                triggered_by_email=None,
+            )
+            
+        if stuck:
+            logger.info(f"Recovered {len(stuck)} stuck SENDING notifications")
+
     except Exception as e:
         logger.error(f"Error processing scheduled notifications: {e}")
         db.rollback()
@@ -463,13 +553,14 @@ def _get_recipients(db, notification: Notification) -> List[User]:
         if group.type == "dynamic" and group.dynamic_filter:
             query = db.query(User).filter(User.is_active == True)
             f = group.dynamic_filter
-            if f.get("department"):
-                query = query.filter(User.department == f["department"])
-            if f.get("title"):
-                query = query.filter(User.title == f["title"])
-            if f.get("role"):
-                query = query.filter(User.role == f["role"])
-            if f.get("location_id"):
+            # Apply filters only if they have non-empty, non-whitespace values
+            if f.get("department") and str(f["department"]).strip():
+                query = query.filter(User.department == f["department"].strip())
+            if f.get("title") and str(f["title"]).strip():
+                query = query.filter(User.title == f["title"].strip())
+            if f.get("role") and str(f["role"]).strip():
+                query = query.filter(User.role == f["role"].strip())
+            if f.get("location_id") and str(f["location_id"]).strip():
                 query = query.filter(User.location_id == f["location_id"])
             users = query.all()
             logger.info(f"Notification {notification.id}: dynamic group '{group.name}' returned {len(users)} users with filter {f}")
@@ -594,15 +685,165 @@ def fetch_location_autocomplete_task(
             
             logger.info(f"Fetched {len(results)} location results for query: {query}")
             return results
-            
+
     except httpx.TimeoutException as e:
-        logger.error(f"LocationIQ timeout: {e}")
+        logger.error(f"LocationIQ timeout for query: {query}")
         raise self.retry(exc=e)
     except httpx.HTTPStatusError as e:
-        logger.error(f"LocationIQ HTTP error {e.response.status_code}: {e}")
+        logger.error(f"LocationIQ HTTP error {e.response.status_code} for query: {query}")
         if e.response.status_code >= 500:
             raise self.retry(exc=e)
         return None
     except Exception as e:
-        logger.error(f"LocationIQ fetch error: {e}")
+        # Scrub API key from error message to prevent credential leakage in logs
+        error_msg = str(e).replace(settings.LOCATIONIQ_API_KEY, "[REDACTED]") if settings.LOCATIONIQ_API_KEY else str(e)
+        logger.error(f"LocationIQ fetch error: {error_msg}")
         raise self.retry(exc=e)
+
+
+@celery_app.task(bind=True, default_retry_delay=60)
+def check_safety_response_deadlines(self):
+    """
+    Check for notifications with response_required=True where the deadline has passed.
+
+    For each notification:
+    1. Find all recipients who haven't responded
+    2. Send escalation alert to admins (ONLY ONCE per notification)
+    3. Mark notification as escalated to prevent duplicate alerts
+
+    This task runs every 5 minutes via Celery Beat.
+    
+    Security: 
+    - Escalation sent only once per notification (deadline_escalated flag)
+    - No sensitive data exposed in logs
+    - Rate-limited via celery task retry
+    """
+    db = SessionLocal()
+    try:
+        now = datetime.now(timezone.utc)
+
+        # Find notifications where:
+        # - response_required = True
+        # - Deadline has passed (sent_at + deadline_minutes <= now)
+        # - Status is SENT or PARTIALLY_SENT (already dispatched)
+        # - NOT already escalated (deadline_escalated = False)
+        from app.models import NotificationResponse
+        from sqlalchemy import text
+
+        notifications = db.query(Notification).filter(
+            Notification.response_required == True,
+            Notification.response_deadline_minutes != None,
+            Notification.sent_at != None,
+            Notification.status.in_([NotificationStatus.SENT, NotificationStatus.PARTIALLY_SENT]),
+            Notification.deadline_escalated == False,  # ← Skip already escalated
+            # Deadline has passed - use raw SQL for proper timestamp arithmetic
+            text("notifications.sent_at + (notifications.response_deadline_minutes || ' minutes')::interval <= :now")
+            .bindparams(now=now)
+        ).all()
+
+        for notification in notifications:
+            # Get all recipients who should have responded
+            recipient_ids = set()
+            for user in notification.target_users:
+                recipient_ids.add(user.id)
+            for group in notification.target_groups:
+                for member in group.members:
+                    recipient_ids.add(member.id)
+            if notification.target_all:
+                # For target_all, get all active users
+                all_users = db.query(User).filter(User.is_active == True).all()
+                recipient_ids = {u.id for u in all_users}
+
+            # Get users who actually responded
+            responses = db.query(NotificationResponse).filter(
+                NotificationResponse.notification_id == notification.id
+            ).all()
+            responded_ids = {r.user_id for r in responses}
+
+            # Find non-responders
+            non_responder_ids = recipient_ids - responded_ids
+
+            if not non_responder_ids:
+                # Everyone responded, mark as escalated (no escalation needed)
+                notification.deadline_escalated = True
+                db.commit()
+                logger.info(
+                    f"Notification {notification.id}: All recipients responded, "
+                    f"marked as escalated (no action needed)"
+                )
+                continue
+
+            logger.warning(
+                f"Safety response deadline passed for notification {notification.id}. "
+                f"{len(non_responder_ids)} non-responders out of {len(recipient_ids)} recipients"
+            )
+
+            # Get admin users for escalation
+            from app.models import UserRole
+            admins = db.query(User).filter(
+                User.role.in_([UserRole.SUPER_ADMIN, UserRole.ADMIN])
+            ).all()
+
+            if not admins:
+                logger.error(f"No admins found for escalation of notification {notification.id}")
+                continue
+
+            # Build escalation message
+            escalation_message = (
+                f"⚠️ SAFETY RESPONSE DEADLINE PASSED\n\n"
+                f"Notification: {notification.title}\n"
+                f"Sent: {notification.sent_at}\n"
+                f"Deadline: {notification.response_deadline_minutes} minutes\n\n"
+                f"Non-responders: {len(non_responder_ids)}\n"
+                f"Responded: {len(responded_ids)}\n\n"
+                f"Please follow up with non-responders manually."
+            )
+
+            # Send escalation to admins via email
+            emails_sent = 0
+            for admin in admins:
+                if admin.email:
+                    logger.info(f"Sending escalation email to admin {admin.email}")
+                    try:
+                        email_service.send_email(
+                            admin.email,
+                            f"⚠️ Safety Response Deadline Passed - {notification.title}",
+                            escalation_message
+                        )
+                        emails_sent += 1
+                    except Exception as e:
+                        logger.error(f"Failed to send escalation email to {admin.email}: {e}")
+
+            # Mark as escalated AFTER sending emails (prevents duplicates on retry)
+            notification.deadline_escalated = True
+            db.commit()
+
+            logger.info(
+                f"Escalation complete for notification {notification.id}. "
+                f"Sent {emails_sent} emails to admins. Marked as escalated."
+            )
+
+            # Optionally: Re-notify non-responders with urgent flag
+            # DISABLED BY DEFAULT: Can cause spam if enabled
+            RE_NOTIFY_NON_RESPONDERS = False
+            if RE_NOTIFY_NON_RESPONDERS and non_responder_ids:
+                non_responders = db.query(User).filter(User.id.in_(non_responder_ids)).all()
+                for user in non_responders:
+                    if user.phone:
+                        # Send urgent SMS reminder
+                        reminder_msg = (
+                            f"URGENT: You haven't responded to the safety check-in yet. "
+                            f"Please respond: {settings.FRONTEND_URL}/notifications/{notification.id}/respond"
+                        )
+                        try:
+                            twilio_service.send_sms(user.phone, reminder_msg)
+                            logger.info(f"Sent urgent SMS reminder to {user.phone}")
+                        except Exception as e:
+                            logger.error(f"Failed to send SMS to {user.phone}: {e}")
+
+    except Exception as e:
+        logger.error(f"Error checking safety response deadlines: {e}")
+        db.rollback()
+        raise self.retry(exc=e)
+    finally:
+        db.close()

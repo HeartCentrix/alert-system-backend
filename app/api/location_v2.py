@@ -261,7 +261,9 @@ async def _fetch_direct(
             
             return results
     except Exception as e:
-        logger.error(f"Direct LocationIQ fetch failed: {e}")
+        # Scrub API key from error message to prevent credential leakage in logs
+        error_msg = str(e).replace(settings.LOCATIONIQ_API_KEY, "[REDACTED]") if settings.LOCATIONIQ_API_KEY else str(e)
+        logger.error(f"Direct LocationIQ fetch failed: {error_msg}")
         return []
 
 

@@ -22,7 +22,7 @@ echo "Step 3: Starting $SERVICE_TYPE service..."
 case "$SERVICE_TYPE" in
     "api")
         echo "Starting API server (uvicorn)..."
-        exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+        exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --log-level info
         ;;
     "worker")
         echo "Starting Celery worker..."

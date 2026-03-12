@@ -24,6 +24,8 @@ from app.core.security import (
     can_user_reset_mfa,
     get_mfa_policy_info,
     get_recovery_code_regeneration_policy,
+    encrypt_mfa_secret,
+    is_totp_replay,
 )
 from app.services.mfa_recovery import (
     generate_recovery_codes,
@@ -102,9 +104,10 @@ class MFAService:
         secret = generate_mfa_secret()
         qr_code_uri = generate_mfa_qr_code_uri(user.email, secret)
 
-        # Store secret but do NOT enable MFA yet
+        # Encrypt and store secret (do NOT enable MFA yet)
         # MFA will be enabled only after OTP verification
-        user.mfa_secret = secret
+        encrypted_secret = encrypt_mfa_secret(secret)
+        user.mfa_secret = encrypted_secret
         user.mfa_enabled = False  # Explicitly ensure not enabled
 
         # Invalidate any existing recovery codes from previous enrollment
@@ -149,6 +152,15 @@ class MFAService:
         if not verify_totp_code(user.mfa_secret, code):
             logger.warning(f"Invalid OTP code during MFA enrollment for user {user.id}")
             raise ValueError("Invalid verification code. Please try again.")
+
+        # Replay protection — reject reuse within the same 30-second window
+        if is_totp_replay(user, code):
+            logger.warning(f"TOTP replay attempt detected during MFA enrollment for user {user.id}")
+            raise ValueError("TOTP code already used. Please wait for the next code.")
+
+        # Record this code as used
+        user.last_used_totp_code = code
+        user.last_used_totp_at = datetime.now(timezone.utc)
 
         # Enable MFA
         user.mfa_enabled = True
@@ -301,8 +313,9 @@ class MFAService:
         secret = generate_mfa_secret()
         qr_code_uri = generate_mfa_qr_code_uri(user.email, secret)
 
-        # Store new secret (pending enrollment)
-        user.mfa_secret = secret
+        # Encrypt and store new secret (pending enrollment)
+        encrypted_secret = encrypt_mfa_secret(secret)
+        user.mfa_secret = encrypted_secret
 
         # Audit log
         self.db.add(AuditLog(
@@ -344,6 +357,15 @@ class MFAService:
         if not verify_totp_code(user.mfa_secret, code):
             logger.warning(f"Invalid OTP code during MFA reset for user {user.id}")
             raise ValueError("Invalid verification code. Please try again.")
+
+        # Replay protection — reject reuse within the same 30-second window
+        if is_totp_replay(user, code):
+            logger.warning(f"TOTP replay attempt detected during MFA reset for user {user.id}")
+            raise ValueError("TOTP code already used. Please wait for the next code.")
+
+        # Record this code as used
+        user.last_used_totp_code = code
+        user.last_used_totp_at = datetime.now(timezone.utc)
 
         # Enable MFA
         user.mfa_enabled = True
@@ -441,6 +463,15 @@ class MFAService:
                 if not verify_totp_code(user.mfa_secret, mfa_code):
                     logger.warning(f"Invalid TOTP code during regeneration for user {user.id}")
                     raise ValueError("Invalid TOTP code")
+
+                # Replay protection — reject reuse within the same 30-second window
+                if is_totp_replay(user, mfa_code):
+                    logger.warning(f"TOTP replay attempt detected during regeneration for user {user.id}")
+                    raise ValueError("TOTP code already used. Please wait for the next code.")
+
+                # Record this code as used
+                user.last_used_totp_code = mfa_code
+                user.last_used_totp_at = datetime.now(timezone.utc)
 
             elif method == "recovery_code":
                 # Check if recovery code fallback is allowed for this user
