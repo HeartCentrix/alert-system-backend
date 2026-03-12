@@ -198,6 +198,11 @@ def _ensure_delivery_log_user_email():
         db.close()
 
 
+def _ensure_notifications_deadline_escalated():
+    """Add deadline_escalated column to notifications table if it doesn't exist."""
+    ensure_column_exists('notifications', 'deadline_escalated', 'BOOLEAN', nullable=False)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup secret validation ─────────────────────────────────────────
@@ -283,6 +288,13 @@ async def lifespan(app: FastAPI):
         _ensure_incoming_messages_user_email()
     except Exception as e:
         logger.error(f"Failed to ensure incoming_messages user_email column: {e}")
+
+    # Ensure notifications table has deadline_escalated column
+    logger.info("Ensuring notifications table has deadline_escalated column...")
+    try:
+        _ensure_notifications_deadline_escalated()
+    except Exception as e:
+        logger.error(f"Failed to ensure notifications deadline_escalated column: {e}")
 
     # Seed default super admin if no users exist
     try:
