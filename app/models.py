@@ -243,6 +243,7 @@ class Notification(Base):
     failed_count = Column(Integer, default=0)
     response_required = Column(Boolean, default=False)
     response_deadline_minutes = Column(Integer)
+    deadline_escalated = Column(Boolean, default=False)  # Track if deadline escalation was sent
     slack_webhook_url = Column(String(500))
     teams_webhook_url = Column(String(500))
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=False)

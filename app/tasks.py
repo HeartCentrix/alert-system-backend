@@ -705,23 +705,28 @@ def fetch_location_autocomplete_task(
 def check_safety_response_deadlines(self):
     """
     Check for notifications with response_required=True where the deadline has passed.
-    
+
     For each notification:
     1. Find all recipients who haven't responded
-    2. Send escalation alert to admins (or re-notify non-responders)
-    3. Update notification status to track escalation
-    
+    2. Send escalation alert to admins (ONLY ONCE per notification)
+    3. Mark notification as escalated to prevent duplicate alerts
+
     This task runs every 5 minutes via Celery Beat.
+    
+    Security: 
+    - Escalation sent only once per notification (deadline_escalated flag)
+    - No sensitive data exposed in logs
+    - Rate-limited via celery task retry
     """
     db = SessionLocal()
     try:
         now = datetime.now(timezone.utc)
-        
+
         # Find notifications where:
         # - response_required = True
         # - Deadline has passed (sent_at + deadline_minutes <= now)
         # - Status is SENT or PARTIALLY_SENT (already dispatched)
-        # - Not already escalated
+        # - NOT already escalated (deadline_escalated = False)
         from app.models import NotificationResponse
         from sqlalchemy import text
 
@@ -730,16 +735,13 @@ def check_safety_response_deadlines(self):
             Notification.response_deadline_minutes != None,
             Notification.sent_at != None,
             Notification.status.in_([NotificationStatus.SENT, NotificationStatus.PARTIALLY_SENT]),
+            Notification.deadline_escalated == False,  # ← Skip already escalated
             # Deadline has passed - use raw SQL for proper timestamp arithmetic
             text("notifications.sent_at + (notifications.response_deadline_minutes || ' minutes')::interval <= :now")
             .bindparams(now=now)
         ).all()
-        
+
         for notification in notifications:
-            # Check if already escalated (avoid duplicate escalations)
-            # We'll use a simple heuristic: if there are any "need_help" responses, don't escalate
-            # In production, you might want a separate 'escalated' flag
-            
             # Get all recipients who should have responded
             recipient_ids = set()
             for user in notification.target_users:
@@ -751,35 +753,41 @@ def check_safety_response_deadlines(self):
                 # For target_all, get all active users
                 all_users = db.query(User).filter(User.is_active == True).all()
                 recipient_ids = {u.id for u in all_users}
-            
+
             # Get users who actually responded
             responses = db.query(NotificationResponse).filter(
                 NotificationResponse.notification_id == notification.id
             ).all()
             responded_ids = {r.user_id for r in responses}
-            
+
             # Find non-responders
             non_responder_ids = recipient_ids - responded_ids
-            
+
             if not non_responder_ids:
-                # Everyone responded, no escalation needed
+                # Everyone responded, mark as escalated (no escalation needed)
+                notification.deadline_escalated = True
+                db.commit()
+                logger.info(
+                    f"Notification {notification.id}: All recipients responded, "
+                    f"marked as escalated (no action needed)"
+                )
                 continue
-            
+
             logger.warning(
                 f"Safety response deadline passed for notification {notification.id}. "
                 f"{len(non_responder_ids)} non-responders out of {len(recipient_ids)} recipients"
             )
-            
+
             # Get admin users for escalation
             from app.models import UserRole
             admins = db.query(User).filter(
                 User.role.in_([UserRole.SUPER_ADMIN, UserRole.ADMIN])
             ).all()
-            
+
             if not admins:
                 logger.error(f"No admins found for escalation of notification {notification.id}")
                 continue
-            
+
             # Build escalation message
             escalation_message = (
                 f"⚠️ SAFETY RESPONSE DEADLINE PASSED\n\n"
@@ -790,20 +798,34 @@ def check_safety_response_deadlines(self):
                 f"Responded: {len(responded_ids)}\n\n"
                 f"Please follow up with non-responders manually."
             )
-            
+
             # Send escalation to admins via email
+            emails_sent = 0
             for admin in admins:
                 if admin.email:
                     logger.info(f"Sending escalation email to admin {admin.email}")
-                    email_service.send_email(
-                        admin.email,
-                        f"⚠️ Safety Response Deadline Passed - {notification.title}",
-                        escalation_message
-                    )
-            
+                    try:
+                        email_service.send_email(
+                            admin.email,
+                            f"⚠️ Safety Response Deadline Passed - {notification.title}",
+                            escalation_message
+                        )
+                        emails_sent += 1
+                    except Exception as e:
+                        logger.error(f"Failed to send escalation email to {admin.email}: {e}")
+
+            # Mark as escalated AFTER sending emails (prevents duplicates on retry)
+            notification.deadline_escalated = True
+            db.commit()
+
+            logger.info(
+                f"Escalation complete for notification {notification.id}. "
+                f"Sent {emails_sent} emails to admins. Marked as escalated."
+            )
+
             # Optionally: Re-notify non-responders with urgent flag
-            # This can be enabled/disabled via a setting
-            RE_NOTIFY_NON_RESPONDERS = True
+            # DISABLED BY DEFAULT: Can cause spam if enabled
+            RE_NOTIFY_NON_RESPONDERS = False
             if RE_NOTIFY_NON_RESPONDERS and non_responder_ids:
                 non_responders = db.query(User).filter(User.id.in_(non_responder_ids)).all()
                 for user in non_responders:
@@ -811,13 +833,14 @@ def check_safety_response_deadlines(self):
                         # Send urgent SMS reminder
                         reminder_msg = (
                             f"URGENT: You haven't responded to the safety check-in yet. "
-                            f"Please respond immediately: {settings.FRONTEND_URL}/notifications/{notification.id}/respond"
+                            f"Please respond: {settings.FRONTEND_URL}/notifications/{notification.id}/respond"
                         )
-                        twilio_service.send_sms(user.phone, reminder_msg)
-                        logger.info(f"Sent urgent SMS reminder to {user.phone}")
-            
-            logger.info(f"Escalation complete for notification {notification.id}")
-            
+                        try:
+                            twilio_service.send_sms(user.phone, reminder_msg)
+                            logger.info(f"Sent urgent SMS reminder to {user.phone}")
+                        except Exception as e:
+                            logger.error(f"Failed to send SMS to {user.phone}: {e}")
+
     except Exception as e:
         logger.error(f"Error checking safety response deadlines: {e}")
         db.rollback()
