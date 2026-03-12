@@ -1,8 +1,62 @@
 import logging
 from typing import Optional
 from app.config import settings
+from app.utils.checkin_link import generate_checkin_url
 
 logger = logging.getLogger(__name__)
+
+
+# ─── CHECK-IN LINK HELPERS ────────────────────────────────────────────────────
+
+def build_checkin_message(notification_message: str, checkin_url: str, deadline_minutes: Optional[int] = None) -> str:
+    """
+    Build a message with a safety check-in link appended.
+    
+    Args:
+        notification_message: The original notification message
+        checkin_url: The generated check-in URL
+        deadline_minutes: Optional deadline in minutes
+    
+    Returns:
+        Combined message with check-in instructions
+    """
+    deadline_text = f" within {deadline_minutes} minutes" if deadline_minutes else ""
+    return f"{notification_message}\n\n🔔 SAFETY CHECK-IN REQUIRED: Please respond{deadline_text}.\nClick here to respond: {checkin_url}"
+
+
+def build_checkin_email_html(base_html: str, checkin_url: str, deadline_minutes: Optional[int] = None) -> str:
+    """
+    Build HTML email with a prominent check-in button.
+    
+    Args:
+        base_html: The original email HTML body
+        checkin_url: The generated check-in URL
+        deadline_minutes: Optional deadline in minutes
+    
+    Returns:
+        HTML with check-in button added
+    """
+    deadline_text = f" within {deadline_minutes} minutes" if deadline_minutes else ""
+    
+    # Create check-in button HTML
+    checkin_section = f"""
+    <div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 20px; margin: 20px 0; border-radius: 4px; text-align: center;">
+        <p style="color: #92400e; margin: 0 0 15px 0; font-weight: 600; font-size: 16px;">
+            🔔 Safety Check-In Required{deadline_text}
+        </p>
+        <a href="{checkin_url}" style="background: #1e40af; color: white; padding: 14px 32px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; font-size: 16px;">
+            ✓ I'm Safe - Click to Respond
+        </a>
+        <p style="color: #64748b; font-size: 13px; margin: 15px 0 0 0;">
+            Or copy this link: {checkin_url}
+        </p>
+    </div>
+    """
+    
+    # Insert before closing body tag
+    if "</body>" in base_html:
+        return base_html.replace("</body>", f"{checkin_section}</body>")
+    return base_html + checkin_section
 
 
 # ─── TWILIO SERVICE ───────────────────────────────────────────────────────────
@@ -66,6 +120,11 @@ class TwilioService:
     <Say>Please press a key now.</Say>
   </Gather>
 </Response>"""
+            
+            # Log the TwiML and webhook URL for debugging
+            logger.info(f"Voice call TwiML webhook URL: {voice_webhook_url}")
+            logger.info(f"Voice call status callback URL: {status_callback_url}")
+            
             call = self.client.calls.create(
                 twiml=twiml,
                 from_=settings.TWILIO_FROM_NUMBER,
@@ -135,6 +194,13 @@ class EmailService:
         # Escape user_name to prevent HTML injection
         safe_user_name = _escape_xml(user_name)
         body_text = f"Hi {user_name},\n\nClick the link to reset your password:\n{reset_url}\n\nThis link expires in 1 hour.\n\nIf you didn't request this, ignore this email."
+        
+        # For local development: include plain text URL that bypasses SES tracking
+        # Users can copy-paste this directly to avoid redirect issues
+        dev_note = ""
+        if settings.APP_ENV == "development":
+            dev_note = f"\n\n--- LOCAL DEVELOPMENT ---\nDirect link (copy-paste to browser): {reset_url}\n--------------------------"
+        
         body_html = f"""
         <html><body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <div style="background: #1e40af; padding: 20px; text-align: center;">
@@ -149,6 +215,7 @@ class EmailService:
                    text-decoration: none; border-radius: 6px; font-weight: bold;">Reset My Password</a>
             </p>
             <p style="color: #666; font-size: 14px;">This link expires in 1 hour. If you didn't request this, ignore this email.</p>
+            {f'<div style="margin-top: 30px; padding: 15px; background: #fef3c7; border-left: 4px solid #f59e0b;"><p style="margin: 0; font-size: 12px; color: #92400e;"><strong>🔧 Local Development:</strong> If the button above does not work, copy and paste this URL into your browser:<br><code style="word-break: break-all;">{reset_url}</code></p></div>' if settings.APP_ENV == 'development' else ''}
         </div>
         </body></html>"""
         return self.send_email(to, subject, body_text, body_html)

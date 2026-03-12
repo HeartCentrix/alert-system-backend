@@ -1,7 +1,11 @@
 from celery import Celery
 from celery.schedules import crontab
+from celery.signals import worker_ready
 from app.config import settings
 import ssl
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Railway public Redis requires SSL - handle both rediss:// and redis://
 redis_url = settings.REDIS_URL
@@ -42,7 +46,11 @@ celery_app.conf.update(
     beat_schedule={
         "process-scheduled-notifications": {
             "task": "app.tasks.process_scheduled_notifications",
-            "schedule": 60.0,
+            "schedule": 30.0,  # Every 30 seconds for time-sensitive alerts
+        },
+        "check-safety-response-deadlines": {
+            "task": "app.tasks.check_safety_response_deadlines",
+            "schedule": 300.0,  # Every 5 minutes for deadline monitoring
         },
         "periodic-geofence-check": {
             "task": "app.location_tasks.periodic_geofence_check",
@@ -58,3 +66,16 @@ celery_app.conf.update(
         },
     },
 )
+
+
+@worker_ready.connect
+def worker_ready_handler(sender, **kwargs):
+    """When worker is ready, process any overdue scheduled notifications."""
+    logger.info("Worker ready - checking for overdue scheduled notifications...")
+    try:
+        from app.tasks import process_scheduled_notifications
+        # Trigger immediately to catch up on any missed notifications
+        process_scheduled_notifications.delay()
+        logger.info("Worker ready: Scheduled notifications processing triggered")
+    except Exception as e:
+        logger.error(f"Worker ready: Error triggering scheduled notifications: {e}")

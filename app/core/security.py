@@ -9,6 +9,8 @@ import pyotp
 import base64
 import hashlib
 import secrets
+import math
+import time
 from cryptography.fernet import Fernet, InvalidToken
 import logging
 
@@ -383,6 +385,28 @@ def verify_totp_code(secret: str, code: str, valid_window: Optional[int] = None)
         # Fail closed on any exception during verification
         # pyotp may raise various exceptions (binascii.Error, etc.)
         return False
+
+
+def is_totp_replay(user, code: str) -> bool:
+    """
+    Detect if the given TOTP code is a replay of the most recently used code
+    within the same 30-second TOTP window.
+
+    Args:
+        user: SQLAlchemy User model instance (must have last_used_totp_code and last_used_totp_at)
+        code: The 6-digit TOTP code string being verified
+
+    Returns:
+        True if this is a replay attack (same code, same window) — caller should REJECT.
+        False if the code is fresh and safe to accept.
+    """
+    if not user.last_used_totp_code or not user.last_used_totp_at:
+        return False  # No previous code recorded, cannot be a replay
+
+    current_window = math.floor(time.time() / 30)
+    last_window = math.floor(user.last_used_totp_at.timestamp() / 30)
+
+    return user.last_used_totp_code == code and current_window == last_window
 
 
 def generate_mfa_secret() -> str:

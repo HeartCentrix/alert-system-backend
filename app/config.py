@@ -7,6 +7,10 @@ class Settings(BaseSettings):
     APP_ENV: str = "development"
     SECRET_KEY: str = ""
     REFRESH_SECRET_KEY: str = ""
+    # Dedicated signing key for MFA challenge tokens (5-minute lifetime).
+    # Separate from SECRET_KEY to prevent token-type confusion.
+    # Generate with: python -c "import secrets; print(secrets.token_hex(32))"
+    MFA_CHALLENGE_SECRET_KEY: str = ""
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     FRONTEND_URL: str = "http://localhost:3000"

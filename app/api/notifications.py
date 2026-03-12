@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc, update
 from typing import Optional, List
 from datetime import datetime, timezone
+import logging
 from app.database import get_db
 from app.models import (
     Notification, NotificationStatus, Incident, IncidentStatus, IncidentSeverity,
@@ -24,14 +25,21 @@ from app.services.rate_limiter import (
     NOTIFICATION_RATE_LIMIT_MAX,
 )
 
+logger = logging.getLogger(__name__)
+
 # ─── INCIDENT STATUS TRANSITIONS ──────────────────────────────────────────────
 
-# Define valid status transitions for incidents
-# Key = current status, Value = list of allowed next statuses
+# Incident lifecycle state machine
+# ACTIVE → MONITORING → RESOLVED (standard resolution path)
+# ACTIVE → RESOLVED              (fast-track if no monitoring period needed)
+# ACTIVE → CANCELLED             (incident was raised in error or is no longer relevant)
+# MONITORING → CANCELLED         (monitoring period ended without escalation needed)
+# RESOLVED and CANCELLED are terminal — no further transitions permitted
 VALID_INCIDENT_STATUS_TRANSITIONS = {
-    IncidentStatus.ACTIVE: [IncidentStatus.RESOLVED, IncidentStatus.CANCELLED],
-    IncidentStatus.RESOLVED: [],  # Terminal state - no transitions allowed
-    IncidentStatus.CANCELLED: [],  # Terminal state - no transitions allowed
+    IncidentStatus.ACTIVE:     [IncidentStatus.MONITORING, IncidentStatus.RESOLVED, IncidentStatus.CANCELLED],
+    IncidentStatus.MONITORING: [IncidentStatus.RESOLVED, IncidentStatus.CANCELLED],
+    IncidentStatus.RESOLVED:   [],   # terminal state
+    IncidentStatus.CANCELLED:  [],   # terminal state
 }
 
 
@@ -61,12 +69,12 @@ incidents_router = APIRouter(prefix="/incidents", tags=["Incidents"])
 def list_incidents(
     status: Optional[IncidentStatus] = None,
     severity: Optional[IncidentSeverity] = None,
-    limit: int = Query(1, ge=1, le=100),
+    limit: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """List incidents with optional filtering by status and severity.
-    
+
     Args:
         status: Filter by incident status (active, resolved, cancelled)
         severity: Filter by incident severity (low, medium, high, critical)
@@ -252,6 +260,28 @@ async def create_notification(
             detail="Invalid Teams webhook URL. URLs must use HTTP/HTTPS and cannot point to internal/private addresses"
         )
 
+    # Validate timezone if provided
+    scheduled_timezone = data.scheduled_timezone
+    scheduled_at_utc = data.scheduled_at
+    
+    if data.scheduled_at and scheduled_timezone:
+        # Convert scheduled time from local timezone to UTC
+        try:
+            import pytz
+            local_tz = pytz.timezone(scheduled_timezone)
+            # Assume the incoming datetime is naive (no timezone) and localize it
+            local_dt = local_tz.localize(data.scheduled_at)
+            # Convert to UTC
+            scheduled_at_utc = local_dt.astimezone(pytz.UTC)
+        except Exception as e:
+            logger.warning(f"Invalid timezone '{scheduled_timezone}', using UTC: {e}")
+            scheduled_at_utc = data.scheduled_at.replace(tzinfo=timezone.utc)
+            scheduled_timezone = "UTC"
+    elif data.scheduled_at and not scheduled_timezone:
+        # Assume UTC if no timezone provided
+        scheduled_at_utc = data.scheduled_at.replace(tzinfo=timezone.utc)
+        scheduled_timezone = "UTC"
+
     notification = Notification(
         incident_id=data.incident_id,
         template_id=data.template_id,
@@ -260,7 +290,8 @@ async def create_notification(
         subject=data.subject,
         channels=[c.value for c in data.channels],
         target_all=data.target_all,
-        scheduled_at=data.scheduled_at,
+        scheduled_at=scheduled_at_utc,
+        scheduled_timezone=scheduled_timezone,
         response_required=data.response_required,
         response_deadline_minutes=data.response_deadline_minutes,
         slack_webhook_url=data.slack_webhook_url,
@@ -471,6 +502,7 @@ def get_responses(
             id=r.id,
             notification_id=r.notification_id,
             user_id=r.user_id,
+            user_email=r.user_email,  # Add missing user_email
             user_name=r.user.full_name if r.user else r.from_number,
             channel=r.channel,
             response_type=r.response_type,
@@ -483,42 +515,129 @@ def get_responses(
 
 
 @notifications_router.post("/{notification_id}/respond")
-def submit_response(
+async def submit_response(
     notification_id: int,
     data: NotificationResponseCreate,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    token: Optional[str] = None,
+    db: Session = Depends(get_db),
+    request: Request = None
 ):
-    """Employee submits their safety response via the web portal."""
+    """
+    Employee submits their safety response via the web portal.
+    
+    Two modes:
+    1. Authenticated: Logged-in user responding to their own notification (Authorization header)
+    2. Token-based: User clicking link from email/SMS (JWT token query param, no auth header)
+    """
+    from app.utils.checkin_link import verify_checkin_token
+    from fastapi.security import HTTPBearer
+    
     notification = db.query(Notification).filter(Notification.id == notification_id).first()
     if not notification:
         raise HTTPException(status_code=404, detail="Notification not found")
+    
+    # Determine user from token or current_user
+    user_id = None
+    user_email = None
+    
+    if token:
+        # Token-based authentication (from email/SMS link) - NO CSRF REQUIRED
+        payload = verify_checkin_token(token)
+        if not payload:
+            raise HTTPException(status_code=400, detail="Invalid or expired token")
+        
+        # Verify token matches notification
+        if payload.get('notification_id') != notification_id:
+            raise HTTPException(status_code=400, detail="Token does not match this notification")
+        
+        user_id = payload.get('user_id')
+        
+        # SECURITY: Check if user already responded via token
+        # Token links are SINGLE-USE only - prevent response manipulation
+        existing_response = db.query(NRModel).filter(
+            NRModel.notification_id == notification_id,
+            NRModel.user_id == user_id
+        ).first()
+        
+        if existing_response:
+            raise HTTPException(
+                status_code=400, 
+                detail="You have already submitted your safety response. Contact administrator if you need to change it."
+            )
+        
+        # Get user email for the response record
+        user = db.query(User).filter(User.id == user_id).first()
+        if user:
+            user_email = user.email
+        else:
+            user_email = None
+    else:
+        # Try to get authenticated user (requires Authorization header + CSRF token)
+        # Use Security with HTTPBearer - will raise if no auth header
+        bearer = HTTPBearer(auto_error=False)
+        credentials = await bearer(request)
+        
+        if not credentials:
+            raise HTTPException(
+                status_code=401, 
+                detail="Authentication required - provide JWT token (from email/SMS link) or log in"
+            )
+        
+        # Manually get user from token
+        from app.core.security import decode_token
+        payload = decode_token(credentials.credentials, token_type="access")
+        if not payload or payload.get("type") != "access":
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        user_id = payload.get("sub")
+        user = db.query(User).filter(User.id == int(user_id), User.is_active == True).first()
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        
+        user_id = user.id
+        user_email = user.email
 
-    # Create the response record with WEB channel
-    response = NRModel(
-        notification_id=notification_id,
-        user_id=current_user.id,
-        channel=AlertChannel.WEB,
-        response_type=data.response_type,
-        message=data.message,
-        latitude=data.latitude,
-        longitude=data.longitude
-    )
-    db.add(response)
+    # Check if user already responded (prevent duplicate responses)
+    existing_response = db.query(NRModel).filter(
+        NRModel.notification_id == notification_id,
+        NRModel.user_id == user_id
+    ).first()
+    
+    if existing_response:
+        # Update existing response
+        existing_response.response_type = data.response_type
+        existing_response.message = data.message
+        existing_response.latitude = data.latitude
+        existing_response.longitude = data.longitude
+        existing_response.responded_at = datetime.now(timezone.utc)
+        response = existing_response
+    else:
+        # Create new response
+        response = NRModel(
+            notification_id=notification_id,
+            user_id=user_id,
+            user_email=user_email,
+            channel=AlertChannel.WEB,
+            response_type=data.response_type,
+            message=data.message,
+            latitude=data.latitude,
+            longitude=data.longitude
+        )
+        db.add(response)
 
     # Create delivery log entry to track web delivery (mark as delivered when user responds)
     # Check if delivery log already exists to avoid duplicates
     existing_log = db.query(DeliveryLog).filter(
         DeliveryLog.notification_id == notification_id,
-        DeliveryLog.user_id == current_user.id,
+        DeliveryLog.user_id == user_id,
         DeliveryLog.channel == AlertChannel.WEB
     ).first()
 
     if not existing_log:
         delivery_log = DeliveryLog(
             notification_id=notification_id,
-            user_id=current_user.id,
-            user_email=current_user.email,
+            user_id=user_id,
+            user_email=user_email,
             channel=AlertChannel.WEB,
             status=DeliveryStatus.DELIVERED,
             delivered_at=datetime.now(timezone.utc)
@@ -548,8 +667,33 @@ def _get_delivery_stats(db: Session, notification_id: int) -> dict:
 
 
 def _get_response_stats(db: Session, notification_id: int) -> dict:
-    responses = db.query(NRModel).filter(NRModel.notification_id == notification_id).all()
-    stats = {"total": len(responses), "safe": 0, "need_help": 0, "acknowledged": 0}
-    for r in responses:
-        stats[r.response_type.value] = stats.get(r.response_type.value, 0) + 1
-    return stats
+    """Get response statistics counting unique users only (not duplicate responses)."""
+    from sqlalchemy import distinct, func
+    
+    # Count unique users per response type (not total responses)
+    safe_count = db.query(func.count(distinct(NRModel.user_id))).filter(
+        NRModel.notification_id == notification_id,
+        NRModel.response_type == 'safe'
+    ).scalar() or 0
+    
+    need_help_count = db.query(func.count(distinct(NRModel.user_id))).filter(
+        NRModel.notification_id == notification_id,
+        NRModel.response_type == 'need_help'
+    ).scalar() or 0
+    
+    acknowledged_count = db.query(func.count(distinct(NRModel.user_id))).filter(
+        NRModel.notification_id == notification_id,
+        NRModel.response_type == 'acknowledged'
+    ).scalar() or 0
+    
+    # Total unique responders
+    total_unique = db.query(func.count(distinct(NRModel.user_id))).filter(
+        NRModel.notification_id == notification_id
+    ).scalar() or 0
+    
+    return {
+        "total": total_unique,
+        "safe": safe_count,
+        "need_help": need_help_count,
+        "acknowledged": acknowledged_count
+    }

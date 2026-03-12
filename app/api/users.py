@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import or_, func
 from typing import Optional, List
 from app.database import get_db
-from app.models import User, UserRole, AuditLog
+from app.models import User, UserRole, AuditLog, Group, GroupType, UserLocation, UserLocationHistory, Incident, Notification, NotificationTemplate
 from app.utils.search import escape_like
 from app.utils.audit import create_audit_log
 from app.schemas import UserCreate, UserUpdate, UserResponse, UserListResponse, CSVImportResponse, UserBulkDeleteResponse, AdminMFAStatusResponse, AdminMFAResetRequest, AdminMFAResetResponse
@@ -25,6 +25,74 @@ MAX_CSV_FILE_SIZE = 5 * 1024 * 1024
 
 # Maximum allowed CSV rows per import request
 MAX_CSV_ROWS = 1000
+
+
+def refresh_dynamic_groups_for_user(db: Session, user: User) -> None:
+    """
+    Refresh dynamic group memberships for a user after create/update.
+    
+    This function finds all active dynamic groups and re-evaluates whether
+    the user should be a member based on the group's filter criteria.
+    
+    Security: Only processes active groups, uses parameterized queries,
+    and doesn't expose sensitive data.
+    
+    Args:
+        db: Database session
+        user: The user whose memberships should be refreshed
+    """
+    try:
+        # Get all active dynamic groups
+        dynamic_groups = db.query(Group).filter(
+            Group.type == GroupType.DYNAMIC,
+            Group.is_active == True,
+            Group.dynamic_filter.isnot(None)
+        ).all()
+        
+        for group in dynamic_groups:
+            if not group.dynamic_filter:
+                continue
+                
+            # Build query to check if user matches this group's filters
+            f = group.dynamic_filter
+            user_matches = True
+            
+            # Check each filter criterion
+            # Only match if filter has non-empty, non-whitespace values
+            if f.get("department") and str(f["department"]).strip():
+                if user.department != f["department"].strip():
+                    user_matches = False
+            
+            if f.get("title") and str(f["title"]).strip():
+                if user.title != f["title"].strip():
+                    user_matches = False
+            
+            if f.get("role") and str(f["role"]).strip():
+                if user.role != f["role"].strip():
+                    user_matches = False
+            
+            if f.get("location_id") and str(f["location_id"]).strip():
+                if user.location_id != int(f["location_id"]):
+                    user_matches = False
+            
+            # Add/remove user from group based on match result
+            if user_matches:
+                # Add user to group if not already a member
+                if user not in group.members:
+                    group.members.append(user)
+            else:
+                # Remove user from group if they're a member
+                if user in group.members:
+                    group.members.remove(user)
+        
+        # Commit changes if any were made
+        db.commit()
+        
+    except Exception as e:
+        # Log error but don't fail the user create/update operation
+        # User was successfully saved, group membership is secondary
+        logger.error(f"Error refreshing dynamic groups for user {user.id}: {e}")
+        db.rollback()
 
 
 def _prevent_privilege_escalation(current_user: User, target_role: Optional[UserRole]):
@@ -145,6 +213,10 @@ def create_user(
     try:
         db.commit()
         db.refresh(user)
+        
+        # Refresh dynamic group memberships for the new user
+        refresh_dynamic_groups_for_user(db, user)
+        
     except Exception as e:
         db.rollback()
         if "unique" in str(e).lower() or "duplicate" in str(e).lower():
@@ -202,6 +274,18 @@ def update_user(
                     detail=f"Employee ID '{employee_id_value}' already assigned to another user"
                 )
 
+    # Check for duplicate email if it's being updated
+    if data.email is not None and data.email != user.email:
+        existing = db.query(User).filter(
+            User.email == data.email,
+            User.id != user_id  # Exclude current user from check
+        ).first()
+        if existing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Email '{data.email}' already assigned to another user"
+            )
+
     # Use exclude_unset=True to only update fields that were explicitly provided
     # This allows setting fields to None (to clear them) while not requiring all fields
     for field, value in data.model_dump(exclude_unset=True).items():
@@ -219,6 +303,10 @@ def update_user(
     ))
     db.commit()
     db.refresh(user)
+    
+    # Refresh dynamic group memberships for the updated user
+    refresh_dynamic_groups_for_user(db, user)
+    
     return user
 
 
@@ -236,6 +324,17 @@ def delete_user(
     if user.id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot delete yourself")
 
+    # Remove user from all dynamic groups before deletion
+    # This ensures clean deletion without orphaned references
+    dynamic_groups = db.query(Group).filter(
+        Group.type == GroupType.DYNAMIC,
+        Group.is_active == True
+    ).all()
+    
+    for group in dynamic_groups:
+        if user in group.members:
+            group.members.remove(user)
+    
     db.delete(user)
     db.add(create_audit_log(
         user_id=current_user.id,
@@ -277,29 +376,125 @@ def bulk_delete_users(
     # Check for non-existent users
     not_found_ids = set(user_ids) - found_ids
 
-    # Delete users (related records will have user_id set to NULL via ON DELETE SET NULL)
-    deleted_count = 0
+    # Remove users from all dynamic groups before deletion
+    # This ensures clean deletion without orphaned references
+    dynamic_groups = db.query(Group).filter(
+        Group.type == GroupType.DYNAMIC,
+        Group.is_active == True
+    ).all()
+
     for user in users:
-        # Log the deletion action
-        db.add(create_audit_log(
-            user_id=current_user.id,
-            user_email=current_user.email,
-            action="delete_user",
-            resource_type="user",
-            resource_id=user.id,
-            details={"deleted_email": user.email, "deleted_name": user.full_name},
-            request=request,
-        ))
-        db.delete(user)
-        deleted_count += 1
+        for group in dynamic_groups:
+            if user in group.members:
+                group.members.remove(user)
+
+    # Reassign all foreign keys that reference users being deleted
+    # This prevents foreign key constraint violations during deletion
+    # We reassign to the current admin who is performing the deletion
+    
+    # Reassign groups created by users being deleted
+    db.query(Group).filter(
+        Group.created_by_id.in_(user_ids)
+    ).update({
+        Group.created_by_id: current_user.id,
+        Group.updated_at: func.now()
+    }, synchronize_session=False)
+    
+    # Reassign templates created by users being deleted
+    db.query(NotificationTemplate).filter(
+        NotificationTemplate.created_by_id.in_(user_ids)
+    ).update({
+        NotificationTemplate.created_by_id: current_user.id,
+        NotificationTemplate.updated_at: func.now()
+    }, synchronize_session=False)
+    
+    # Reassign incidents created by users being deleted
+    db.query(Incident).filter(
+        Incident.created_by_id.in_(user_ids)
+    ).update({
+        Incident.created_by_id: current_user.id,
+        Incident.updated_at: func.now()
+    }, synchronize_session=False)
+    
+    # Reassign incidents resolved by users being deleted
+    db.query(Incident).filter(
+        Incident.resolved_by_id.in_(user_ids)
+    ).update({
+        Incident.resolved_by_id: current_user.id,
+        Incident.updated_at: func.now()
+    }, synchronize_session=False)
+    
+    # Reassign notifications created by users being deleted
+    db.query(Notification).filter(
+        Notification.created_by_id.in_(user_ids)
+    ).update({
+        Notification.created_by_id: current_user.id,
+        Notification.updated_at: func.now()
+    }, synchronize_session=False)
+    
+    # Reassign user_locations assigned_by_id (manual assignments)
+    db.query(UserLocation).filter(
+        UserLocation.assigned_by_id.in_(user_ids)
+    ).update({
+        UserLocation.assigned_by_id: current_user.id,
+        UserLocation.updated_at: func.now()
+    }, synchronize_session=False)
+    
+    # Reassign user_location_history triggered_by_user_id
+    db.query(UserLocationHistory).filter(
+        UserLocationHistory.triggered_by_user_id.in_(user_ids)
+    ).update({
+        UserLocationHistory.triggered_by_user_id: current_user.id,
+    }, synchronize_session=False)
+
+    # Delete users with proper cascade handling
+    # Explicitly delete related records to avoid NOT NULL constraint violations
+    deleted_count = 0
+    failed_count = 0
+    failed_ids = []
+    
+    for user in users:
+        try:
+            # Log the deletion action
+            db.add(create_audit_log(
+                user_id=current_user.id,
+                user_email=current_user.email,
+                action="delete_user",
+                resource_type="user",
+                resource_id=user.id,
+                details={"deleted_email": user.email, "deleted_name": user.full_name},
+                request=request,
+            ))
+
+            # Explicitly delete related records that have CASCADE
+            # (others were reassigned above)
+            db.query(UserLocation).filter(
+                UserLocation.user_id == user.id
+            ).delete(synchronize_session=False)
+
+            db.query(UserLocationHistory).filter(
+                UserLocationHistory.user_id == user.id
+            ).delete(synchronize_session=False)
+
+            db.delete(user)
+            deleted_count += 1
+        except Exception as e:
+            logger.error(f"Failed to delete user {user.id}: {e}")
+            failed_count += 1
+            failed_ids.append(user.id)
+            # Rollback this user's changes but continue with others
+            db.rollback()
 
     db.commit()
 
+    # Separate successful and failed deletions
+    successful_ids = found_ids - set(failed_ids)
+
     return UserBulkDeleteResponse(
         deleted=deleted_count,
-        failed=len(not_found_ids),
-        deleted_ids=list(found_ids),
-        failed_ids=list(not_found_ids)
+        failed=failed_count,
+        deleted_ids=list(successful_ids),
+        failed_ids=failed_ids
     )
 
 
@@ -458,6 +653,10 @@ async def import_users_csv(
         ))
         db.commit()
         logger.info(f"CSV import committed: {created} created, {updated} updated, {failed} failed")
+        
+        # Refresh dynamic group memberships for all imported/updated users
+        for action_type, user_obj in valid_users:
+            refresh_dynamic_groups_for_user(db, user_obj)
     else:
         # No valid rows to commit - still log the failed import attempt
         db.add(create_audit_log(

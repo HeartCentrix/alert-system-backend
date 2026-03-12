@@ -113,6 +113,8 @@ class User(Base):
     is_verified = Column(Boolean, default=False)
     mfa_enabled = Column(Boolean, default=False)
     mfa_secret = Column(String(255))  # Increased from 32 to store Fernet-encrypted secrets
+    last_used_totp_code = Column(String(6), nullable=True, default=None)
+    last_used_totp_at = Column(DateTime(timezone=True), nullable=True, default=None)
     avatar_url = Column(String(500))
     preferred_channels = Column(JSON, default=["sms", "email"])
     latitude = Column(Float, nullable=True)   # Last known latitude
@@ -204,8 +206,8 @@ class Incident(Base):
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String(500), nullable=False)
     type = Column(String(100))  # weather, security, IT, facility, health, custom
-    severity = Column(Enum(IncidentSeverity), default=IncidentSeverity.MEDIUM)
-    status = Column(Enum(IncidentStatus), default=IncidentStatus.ACTIVE)
+    severity = Column(Enum(IncidentSeverity, values_callable=lambda x: [e.value for e in x]), default=IncidentSeverity.MEDIUM)
+    status = Column(Enum(IncidentStatus, values_callable=lambda x: [e.value for e in x]), default=IncidentStatus.ACTIVE)
     description = Column(Text)
     location_id = Column(Integer, ForeignKey("locations.id"), nullable=True)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=False)
@@ -233,6 +235,7 @@ class Notification(Base):
     status = Column(Enum(NotificationStatus), default=NotificationStatus.DRAFT)
     target_all = Column(Boolean, default=False)
     scheduled_at = Column(DateTime(timezone=True))
+    scheduled_timezone = Column(String(100))  # Original timezone (e.g., "America/New_York")
     sent_at = Column(DateTime(timezone=True))
     total_recipients = Column(Integer, default=0)
     sent_count = Column(Integer, default=0)

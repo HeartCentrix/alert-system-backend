@@ -75,13 +75,14 @@ def create_group(
     if data.type == GroupType.DYNAMIC and data.dynamic_filter:
         query = db.query(User).filter(User.is_active == True)
         f = data.dynamic_filter
-        if f.get("department"):
-            query = query.filter(User.department == f["department"])
-        if f.get("title"):
-            query = query.filter(User.title == f["title"])
-        if f.get("role"):
-            query = query.filter(User.role == f["role"])
-        if f.get("location_id"):
+        # Apply filters only if they have non-empty, non-whitespace values
+        if f.get("department") and str(f["department"]).strip():
+            query = query.filter(User.department == f["department"].strip())
+        if f.get("title") and str(f["title"]).strip():
+            query = query.filter(User.title == f["title"].strip())
+        if f.get("role") and str(f["role"]).strip():
+            query = query.filter(User.role == f["role"].strip())
+        if f.get("location_id") and str(f["location_id"]).strip():
             query = query.filter(User.location_id == f["location_id"])
         members = query.all()
         group.members = members
@@ -167,13 +168,14 @@ def update_group(
     if group.type == GroupType.DYNAMIC and group.dynamic_filter:
         query = db.query(User).filter(User.is_active == True)
         f = group.dynamic_filter
-        if f.get("department"):
-            query = query.filter(User.department == f["department"])
-        if f.get("title"):
-            query = query.filter(User.title == f["title"])
-        if f.get("role"):
-            query = query.filter(User.role == f["role"])
-        if f.get("location_id"):
+        # Apply filters only if they have non-empty, non-whitespace values
+        if f.get("department") and str(f["department"]).strip():
+            query = query.filter(User.department == f["department"].strip())
+        if f.get("title") and str(f["title"]).strip():
+            query = query.filter(User.title == f["title"].strip())
+        if f.get("role") and str(f["role"]).strip():
+            query = query.filter(User.role == f["role"].strip())
+        if f.get("location_id") and str(f["location_id"]).strip():
             query = query.filter(User.location_id == f["location_id"])
         members = query.all()
         group.members = members
@@ -298,14 +300,15 @@ def preview_dynamic_group(
     
     query = db.query(User).filter(User.is_active == True)
     f = data.dynamic_filter
-    
-    if f.get("department"):
-        query = query.filter(User.department == f["department"])
-    if f.get("title"):
-        query = query.filter(User.title == f["title"])
-    if f.get("role"):
-        query = query.filter(User.role == f["role"])
-    if f.get("location_id"):
+
+    # Apply filters only if they have non-empty, non-whitespace values
+    if f.get("department") and str(f["department"]).strip():
+        query = query.filter(User.department == f["department"].strip())
+    if f.get("title") and str(f["title"]).strip():
+        query = query.filter(User.title == f["title"].strip())
+    if f.get("role") and str(f["role"]).strip():
+        query = query.filter(User.role == f["role"].strip())
+    if f.get("location_id") and str(f["location_id"]).strip():
         query = query.filter(User.location_id == f["location_id"])
     
     members = query.all()
@@ -335,28 +338,26 @@ def get_filter_options(
 ):
     """
     Get unique values for dynamic group filter options.
-    
+
     Returns unique departments, titles, and roles that can be used to create dynamic groups.
     """
-    # Get unique departments
+    # Get unique departments (from all users, not just active)
     departments = db.query(User.department).filter(
-        User.department.isnot(None),
-        User.is_active == True
+        User.department.isnot(None)
     ).distinct().all()
-    
-    # Get unique titles
+
+    # Get unique titles (from all users, not just active)
     titles = db.query(User.title).filter(
-        User.title.isnot(None),
-        User.is_active == True
+        User.title.isnot(None)
     ).distinct().all()
-    
+
     # Get all available roles
     roles = [role.value for role in UserRole]
-    
+
     return {
         "departments": [d[0] for d in departments if d[0]],
         "titles": [t[0] for t in titles if t[0]],
-        "roles": roles
+        "roles": roles,
     }
 
 

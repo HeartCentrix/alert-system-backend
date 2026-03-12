@@ -4,6 +4,8 @@
 .env.*.local
 .env.production
 .env.staging
+.env.bak
+.env.bak2
 
 # Python
 __pycache__/

@@ -14,6 +14,7 @@ from sqlalchemy import text
 from app.config import settings
 from app.middleware.security_headers import SecurityHeadersMiddleware
 from app.middleware.request_id import RequestIDMiddleware
+from app.middleware.csrf import CSRFMiddleware
 from sqlalchemy import text
 from app.database import engine, Base, SessionLocal, ensure_column_exists, ensure_mfa_secret_column_expanded
 from app.models import (
@@ -197,6 +198,23 @@ def _ensure_delivery_log_user_email():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # ── Startup secret validation ─────────────────────────────────────────
+    # Fail fast: refuse to start if critical signing keys are absent or weak.
+    # An empty or short key would allow token forgery.
+    _secret_errors = []
+    if not settings.SECRET_KEY or len(settings.SECRET_KEY) < 32:
+        _secret_errors.append("SECRET_KEY is missing or shorter than 32 characters")
+    if not settings.REFRESH_SECRET_KEY or len(settings.REFRESH_SECRET_KEY) < 32:
+        _secret_errors.append("REFRESH_SECRET_KEY is missing or shorter than 32 characters")
+    if not settings.MFA_CHALLENGE_SECRET_KEY or len(settings.MFA_CHALLENGE_SECRET_KEY) < 32:
+        _secret_errors.append("MFA_CHALLENGE_SECRET_KEY is missing or shorter than 32 characters")
+    if _secret_errors:
+        raise RuntimeError(
+            "Application cannot start — critical secret key(s) not configured:\n" +
+            "\n".join(f"  • {e}" for e in _secret_errors)
+        )
+    # ─────────────────────────────────────────────────────────────────────
+
     # Re-apply logging config AFTER uvicorn's dictConfig has run.
     # Without this, uvicorn overwrites our formatters/handlers on startup.
     setup_logging()
@@ -362,6 +380,10 @@ app.add_middleware(SecurityHeadersMiddleware)
 # Registered second-outermost so the ID is available to all inner middleware
 app.add_middleware(RequestIDMiddleware)
 
+# CSRF protection — double-submit cookie pattern
+# Registered before CORS so it can validate state-changing requests
+app.add_middleware(CSRFMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -369,10 +391,10 @@ app.add_middleware(
     allow_credentials=True,
     # Only allow necessary HTTP methods
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    # Only allow necessary headers
-    allow_headers=["Authorization", "Content-Type", "Accept"],
-    # Expose Retry-After header for rate limiting countdown timer
-    expose_headers=["Retry-After", "X-Request-ID"],
+    # Only allow necessary headers - added X-CSRF-Token for CSRF protection
+    allow_headers=["Authorization", "Content-Type", "Accept", "X-CSRF-Token"],
+    # Expose Retry-After and X-CSRF-Token headers for client use
+    expose_headers=["Retry-After", "X-Request-ID", "X-CSRF-Token"],
 )
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
