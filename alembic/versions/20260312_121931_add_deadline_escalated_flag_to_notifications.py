@@ -1,7 +1,7 @@
 """add_deadline_escalated_flag_to_notifications
 
-Revision ID: add_deadline_escalated
-Revises: previous_revision
+Revision ID: 20260312_121931
+Revises: 20260312_000624
 Create Date: 2026-03-12 12:19:31.000000
 
 """
@@ -10,10 +10,10 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision = 'add_deadline_escalated'
-down_revision = None  # Will be updated automatically
-branch_labels = None
-depends_on = None
+revision: str = '20260312_121931'
+down_revision: str | None = '20260312_000624'
+branch_labels: str | None = None
+depends_on: str | None = None
 
 
 def upgrade() -> None:
@@ -22,7 +22,7 @@ def upgrade() -> None:
     conn = op.get_bind()
     inspector = sa.inspect(conn)
     columns = [col['name'] for col in inspector.get_columns('notifications')]
-    
+
     if 'deadline_escalated' not in columns:
         op.add_column('notifications', sa.Column('deadline_escalated', sa.Boolean(), nullable=True, default=False))
         # Set default value for existing rows
@@ -38,7 +38,7 @@ def downgrade() -> None:
     conn = op.get_bind()
     inspector = sa.inspect(conn)
     columns = [col['name'] for col in inspector.get_columns('notifications')]
-    
+
     if 'deadline_escalated' in columns:
         op.drop_column('notifications', 'deadline_escalated')
     else:
