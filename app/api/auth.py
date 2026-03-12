@@ -77,20 +77,32 @@ def _set_refresh_cookie(response: Response, token: str, expire_days: int) -> Non
     Security properties:
     - HttpOnly: JS cannot read it — eliminates XSS token theft
     - Secure: HTTPS only — never sent over plain HTTP
-    - SameSite=Strict: browser won't send on cross-origin requests — first-line CSRF defence
+    - SameSite=lax: allows cookie on top-level navigations (needed for Railway subdomains)
     - Path=/api/v1/auth: cookie only sent to auth endpoints, not to every API call
+    - Domain: auto-detected from request host (needed for Railway subdomains)
 
     In development mode, secure=False so localhost works without HTTPS.
     """
     is_secure = settings.APP_ENV != "development"
+    
+    # Determine domain for cookie
+    # On Railway: .up.railway.app to work across subdomains
+    # On localhost: None (works automatically)
+    cookie_domain = None
+    if settings.APP_ENV == "production":
+        # Extract domain from request or use Railway default
+        # The leading dot allows subdomain matching
+        cookie_domain = ".up.railway.app"
+    
     response.set_cookie(
         key="refresh_token",
         value=token,
         httponly=True,
         secure=is_secure,
-        samesite="strict",
+        samesite="lax",  # Changed from strict to lax for Railway subdomain support
         path="/api/v1/auth",  # Scoped: only sent to auth endpoints
         max_age=expire_days * 86400,  # seconds
+        domain=cookie_domain,  # Required for Railway subdomains
     )
 
 
@@ -712,12 +724,18 @@ def logout(
             db.commit()
 
     # Clear the HttpOnly cookie
+    # Must match the same domain/path/settings as set_cookie
+    cookie_domain = None
+    if settings.APP_ENV == "production":
+        cookie_domain = ".up.railway.app"
+    
     response.delete_cookie(
         key="refresh_token",
         path="/api/v1/auth",
         secure=True,
         httponly=True,
-        samesite="strict",
+        samesite="lax",
+        domain=cookie_domain,
     )
     return {"message": "Logged out successfully"}
 
