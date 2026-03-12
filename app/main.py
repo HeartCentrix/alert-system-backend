@@ -229,15 +229,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to initialize location cache: {e}")
 
-    # Create all DB tables on startup
-    logger.info("Creating database tables...")
-    try:
-        Base.metadata.create_all(bind=engine)
-        logger.info("Database tables ready")
-    except Exception as e:
-        logger.error(f"Failed to create database tables: {e}")
-
-    # Run Alembic migrations to ensure all schema changes are applied
+    # Run Alembic migrations to create tables and apply all schema changes
     logger.info("Running Alembic database migrations...")
     try:
         alembic_cfg = Config("alembic.ini")
