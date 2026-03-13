@@ -40,9 +40,24 @@ class GeoPoint:
     """Represents a geographic point."""
     latitude: float
     longitude: float
-    
+
     def validate(self) -> Tuple[bool, Optional[str]]:
-        """Validate coordinates are within valid ranges."""
+        """
+        Validate coordinates are within valid ranges.
+        
+        Checks:
+        - NaN/Infinity values (rejected)
+        - Latitude range: -90 to 90
+        - Longitude range: -180 to 180
+        """
+        # Check for NaN and Infinity values
+        import math
+        if math.isnan(self.latitude) or math.isinf(self.latitude):
+            return False, "Latitude cannot be NaN or Infinity"
+        if math.isnan(self.longitude) or math.isinf(self.longitude):
+            return False, "Longitude cannot be NaN or Infinity"
+        
+        # Validate ranges
         if not (MIN_COORDINATE <= self.latitude <= MAX_COORDINATE):
             return False, f"Latitude must be between {MIN_COORDINATE} and {MAX_COORDINATE}"
         if not (MIN_LONGITUDE <= self.longitude <= MAX_LONGITUDE):

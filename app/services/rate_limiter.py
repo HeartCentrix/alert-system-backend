@@ -267,3 +267,88 @@ async def clear_notification_limit(user_id: int):
     r = _get_client()
     key = _notification_key(user_id)
     await r.delete(key)
+
+
+# ──────────────────────────────────────────────
+# General API rate limiting for state-changing endpoints
+# ──────────────────────────────────────────────
+# Constants for general API rate limiting
+API_RATE_LIMIT_MAX = 100  # Max state-changing requests per minute
+API_RATE_LIMIT_WINDOW = 60  # 60 seconds window
+
+
+def _api_rate_limit_key(user_id: int, endpoint: str) -> str:
+    """Key for general API rate limiting per user per endpoint."""
+    return f"api:rate_limit:user:{user_id}:endpoint:{endpoint}"
+
+
+async def check_api_rate_limit(user_id: int, endpoint: str) -> tuple[bool, int]:
+    """
+    Check if user has exceeded API rate limit for a specific endpoint.
+    
+    This provides rate limiting for state-changing operations like:
+    - Creating notifications
+    - Creating/updating users
+    - Sending messages
+    - CSV imports
+    
+    Args:
+        user_id: ID of the user making the request
+        endpoint: Endpoint identifier (e.g., "create_notification", "import_users")
+    
+    Returns:
+        Tuple of (is_allowed, retry_after_seconds)
+        - is_allowed: True if user can proceed
+        - retry_after_seconds: Seconds until rate limit resets (0 if allowed)
+    """
+    r = _get_client()
+    key = _api_rate_limit_key(user_id, endpoint)
+    
+    count = await r.get(key)
+    if count is None:
+        return True, 0
+    
+    count = int(count)
+    if count >= API_RATE_LIMIT_MAX:
+        # Get TTL for retry-after header
+        ttl = await r.ttl(key)
+        return False, ttl if ttl > 0 else API_RATE_LIMIT_WINDOW
+    
+    return True, 0
+
+
+async def record_api_request(user_id: int, endpoint: str) -> int:
+    """
+    Record an API request for rate limiting.
+    
+    Args:
+        user_id: ID of the user making the request
+        endpoint: Endpoint identifier (e.g., "create_notification", "import_users")
+    
+    Returns:
+        The new request count within the current window
+    """
+    r = _get_client()
+    key = _api_rate_limit_key(user_id, endpoint)
+    
+    count = await r.incr(key)
+    if count == 1:
+        # First request in window, set TTL
+        await r.expire(key, timedelta(seconds=API_RATE_LIMIT_WINDOW))
+    
+    return count
+
+
+async def get_api_request_count(user_id: int, endpoint: str) -> int:
+    """Get current API request count for a user on a specific endpoint."""
+    r = _get_client()
+    key = _api_rate_limit_key(user_id, endpoint)
+    count = await r.get(key)
+    return int(count) if count else 0
+
+
+async def clear_api_rate_limit(user_id: int, endpoint: str):
+    """Clear API rate limit for a user (admin use only)."""
+    r = _get_client()
+    key = _api_rate_limit_key(user_id, endpoint)
+    await r.delete(key)
