@@ -1,3 +1,3 @@
-web: bash -c 'uvicorn app.main:app --host 0.0.0.0 --port $PORT'
-worker: celery -A app.celery_app worker --loglevel=info --concurrency=2
-beat: celery -A app.celery_app beat --loglevel=info
+web: SERVICE_TYPE=api /app/start.sh
+worker: SERVICE_TYPE=worker /app/start.sh
+beat: SERVICE_TYPE=beat /app/start.sh

@@ -40,4 +40,5 @@ USER appuser
 EXPOSE 8000
 
 # Use startup script that runs migrations before starting
-CMD ["/app/start.sh", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# SERVICE_TYPE env var should be set to 'api', 'worker', or 'beat'
+CMD ["/app/start.sh"]
