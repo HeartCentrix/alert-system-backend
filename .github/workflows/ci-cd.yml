@@ -136,7 +136,8 @@ jobs:
         continue-on-error: false  # High severity issues should fail CI
 
       - name: Upload Bandit results
-        uses: actions/upload-artifact@v4
+        uses: github/codeql-action/upload-sarif@v3
+        if: always() && (hashFiles('bandit-report.json') != '')
         with:
           name: bandit-report
           path: bandit-report.json
