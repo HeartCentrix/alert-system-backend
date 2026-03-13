@@ -40,4 +40,5 @@ USER appuser
 EXPOSE 8000
 
 # Use startup script that runs migrations before starting
-CMD ["/app/start.sh", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Railway injects $PORT — start.sh reads it via ${PORT:-8000}
+CMD ["/app/start.sh"]

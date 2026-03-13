@@ -21,8 +21,8 @@ echo "Step 3: Starting $SERVICE_TYPE service..."
 # Start the appropriate service based on type
 case "$SERVICE_TYPE" in
     "api")
-        echo "Starting API server (uvicorn)..."
-        exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --log-level info
+        echo "Starting API server (uvicorn) on port ${PORT:-8000}..."
+        exec uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-8000}" --log-level info
         ;;
     "worker")
         echo "Starting Celery worker..."

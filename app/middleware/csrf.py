@@ -1,7 +1,10 @@
 """
-CSRF protection — Double-Submit Cookie pattern.
+CSRF protection — Double-Submit Cookie pattern (cross-origin aware).
 
-On every response the middleware ensures a 'csrf_token' cookie is present.
+On every response the middleware ensures a 'csrf_token' cookie is present
+AND sends the token in the X-CSRF-Token response header (for cross-origin
+deployments where document.cookie can't read another domain's cookies).
+
 On state-changing requests (POST, PUT, PATCH, DELETE) the X-CSRF-Token
 request header must match the csrf_token cookie value.
 
@@ -80,19 +83,23 @@ class CSRFMiddleware(BaseHTTPMiddleware):
 
         # Set csrf_token cookie if not present.
         # NOT HttpOnly: JS must read it to set the X-CSRF-Token header.
-        # SameSite=Strict: first-line CSRF defence.
-        # In development mode, secure=False so localhost works without HTTPS.
+        # SameSite=None + Secure: required for cross-origin (Vercel → Railway).
+        # In development mode, secure=False and samesite=lax so localhost works.
         if not existing_token:
             from app.config import settings
-            is_secure = settings.APP_ENV != "development"
+            is_production = settings.APP_ENV != "development"
             response.set_cookie(
                 key=CSRF_COOKIE_NAME,
                 value=csrf_token,
                 httponly=False,
-                secure=is_secure,
-                samesite="strict",
+                secure=is_production,
+                samesite="none" if is_production else "lax",
                 path="/",
                 max_age=86400,
             )
+
+        # Always send CSRF token in response header so cross-origin frontends
+        # can read it (document.cookie only sees same-origin cookies).
+        response.headers["X-CSRF-Token"] = csrf_token
 
         return response
