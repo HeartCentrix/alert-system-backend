@@ -21,16 +21,6 @@ emergencies, with two-way safety check-in responses.
 - **No organisation_id/tenant_id** fields on database models
 - **No cross-organisation access controls** - Not needed for single customer
 
-### If Multi-Tenancy Becomes Required:
-
-This would require significant re-architecture:
-1. Add `Organisation` model with `tenant_id` isolation
-2. Add `organisation_id` foreign keys to User, Group, Notification, Location
-3. Implement organisation-scoped queries throughout the codebase
-4. Add organisation-level access controls and admin roles
-
-**Current Status:** Single-tenant design is intentional and appropriate for the use case.
-
 ---
 
 ## Tech Stack
@@ -38,10 +28,10 @@ This would require significant re-architecture:
 - **Backend**: Python 3.11 + FastAPI
 - **Database**: PostgreSQL 16
 - **Cache / Queue Broker**: Redis 7
-- **Background Tasks**: Celery
+- **Background Tasks**: Celery + Celery Beat
 - **SMS / Voice**: Twilio
-- **Email**: AWS SES
-- **Auth**: JWT (email + password)
+- **Email**: AWS SES + SMTP
+- **Auth**: JWT with MFA support (email + password + TOTP)
 
 ---
 
