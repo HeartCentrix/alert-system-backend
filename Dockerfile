@@ -29,7 +29,7 @@ COPY --from=builder /install /usr/local
 COPY --chown=appuser:appgroup . .
 
 # 3. Make startup script executable
-RUN chmod +x /app/start.sh
+RUN sed -i 's/\r$//' start.sh
 
 # 4. Create tmp directory for celerybeat schedule with proper permissions
 RUN mkdir -p /tmp && chown appuser:appgroup /tmp

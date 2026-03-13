@@ -11,7 +11,7 @@ echo "========================================="
 
 # Run schema validation and migrations for all service types
 echo "Step 1: Validating database schema..."
-python scripts/validate_db_schema.py --fix || true
+python -m scripts.validate_db_schema --fix || true
 
 echo "Step 2: Running database migrations..."
 alembic upgrade head

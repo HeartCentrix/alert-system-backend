@@ -3,27 +3,36 @@
 Revision ID: add_scheduled_timezone
 Revises: fix_incidentstatus_enum
 Create Date: 2026-03-12
-
-Add scheduled_timezone column to store the original timezone
-when a notification is scheduled (e.g., "America/New_York", "Asia/Kolkata").
-The scheduled_at is always stored in UTC in the database.
 """
+
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 
 
-# revision identifiers, used by Alembic.
-revision = 'add_scheduled_timezone'
-down_revision = 'fix_incidentstatus_enum'
+revision = "add_scheduled_timezone"
+down_revision = "fix_incidentstatus_enum"
 branch_labels = None
 depends_on = None
 
 
+def column_exists(table_name: str, column_name: str) -> bool:
+    bind = op.get_bind()
+    inspector = inspect(bind)
+    columns = [c["name"] for c in inspector.get_columns(table_name)]
+    return column_name in columns
+
+
 def upgrade() -> None:
-    """Add scheduled_timezone column to notifications table."""
-    op.add_column('notifications', sa.Column('scheduled_timezone', sa.String(100), nullable=True))
+
+    if not column_exists("notifications", "scheduled_timezone"):
+        op.add_column(
+            "notifications",
+            sa.Column("scheduled_timezone", sa.String(100), nullable=True),
+        )
 
 
 def downgrade() -> None:
-    """Remove scheduled_timezone column from notifications table."""
-    op.drop_column('notifications', 'scheduled_timezone')
+
+    if column_exists("notifications", "scheduled_timezone"):
+        op.drop_column("notifications", "scheduled_timezone")
