@@ -136,12 +136,12 @@ jobs:
         continue-on-error: false  # High severity issues should fail CI
 
       - name: Upload Bandit results
-        uses: github/codeql-action/upload-sarif@v3
-        if: false  # Disable SARIF upload (bandit JSON not valid SARIF format)
+        uses: actions/upload-artifact@v4
         with:
-          sarif_file: bandit-report.json
-          category: bandit
-      
+          name: bandit-report
+          path: bandit-report.json
+          retention-days: 30
+
       - name: Run Safety dependency check
         run: |
           safety check --json --output safety-report.json || true
