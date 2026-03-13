@@ -14,6 +14,7 @@ from app.core.security import hash_password
 from app.core.deps import get_current_user, require_admin, require_manager
 from app.services.mfa_lifecycle import get_mfa_service
 from app.services.mfa_recovery import get_recovery_code_status, invalidate_all_recovery_codes
+from app.services.rate_limiter import check_api_rate_limit, record_api_request, API_RATE_LIMIT_MAX
 from app.utils.audit import create_audit_log
 
 logger = logging.getLogger(__name__)
@@ -511,6 +512,18 @@ async def import_users_csv(
 
     Sends welcome emails with login credentials to newly created users.
     """
+    # Rate limiting: Check API rate limit for state-changing operations
+    is_allowed, retry_after = await check_api_rate_limit(current_user.id, "import_users_csv")
+    if not is_allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit exceeded. Maximum {API_RATE_LIMIT_MAX} requests per minute for this endpoint.",
+            headers={"Retry-After": str(retry_after)}
+        )
+    
+    # Record the API request for rate limiting
+    await record_api_request(current_user.id, "import_users_csv")
+    
     # Validate file extension
     if not file.filename.endswith('.csv'):
         raise HTTPException(status_code=400, detail="File must be a CSV")
@@ -659,6 +672,7 @@ async def import_users_csv(
             refresh_dynamic_groups_for_user(db, user_obj)
     else:
         # No valid rows to commit - still log the failed import attempt
+        # Store all errors (no truncation) for complete audit trail
         db.add(create_audit_log(
             user_id=current_user.id,
             user_email=current_user.email,
@@ -667,7 +681,7 @@ async def import_users_csv(
             details={
                 "failed": failed,
                 "total_rows": failed,
-                "errors": errors[:10]  # Include first 10 errors in audit log
+                "errors": errors  # Include all errors for complete audit trail
             },
             request=request,
         ))

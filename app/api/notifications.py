@@ -23,6 +23,9 @@ from app.services.rate_limiter import (
     check_notification_rate_limit,
     record_notification_dispatch,
     NOTIFICATION_RATE_LIMIT_MAX,
+    check_api_rate_limit,
+    record_api_request,
+    API_RATE_LIMIT_MAX,
 )
 
 logger = logging.getLogger(__name__)
@@ -235,7 +238,16 @@ async def create_notification(
     current_user: User = Depends(require_manager),
     request: Request = None,
 ):
-    # Rate limiting: Check if user has exceeded notification dispatch limit
+    # Rate limiting 1: Check general API rate limit for state-changing operations
+    is_allowed, retry_after = await check_api_rate_limit(current_user.id, "create_notification")
+    if not is_allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit exceeded. Maximum {API_RATE_LIMIT_MAX} requests per minute for this endpoint.",
+            headers={"Retry-After": str(retry_after)}
+        )
+    
+    # Rate limiting 2: Check notification-specific dispatch limit
     is_allowed, retry_after = await check_notification_rate_limit(current_user.id)
     if not is_allowed:
         raise HTTPException(
@@ -243,6 +255,10 @@ async def create_notification(
             detail=f"Rate limit exceeded. Maximum {NOTIFICATION_RATE_LIMIT_MAX} notifications per minute.",
             headers={"Retry-After": str(retry_after)}
         )
+    
+    # Record both rate limit counters
+    await record_api_request(current_user.id, "create_notification")
+    await record_notification_dispatch(current_user.id)
 
     # Validate at least one recipient method
     if not data.target_all and not data.target_group_ids and not data.target_user_ids:
@@ -451,6 +467,10 @@ def get_delivery_logs(
 ):
     """Get delivery logs for a notification with optional filtering.
 
+    Access Control:
+        - Manager and Admin roles: Can see all notifications
+        - Viewer role: Can only see notifications where they are recipients
+    
     Args:
         notification_id: ID of the notification
         channel: Filter by delivery channel (sms, email, voice, web)
@@ -458,6 +478,25 @@ def get_delivery_logs(
         limit: Maximum number of results (1-1000, default 100)
         offset: Number of results to skip (default 0)
     """
+    # Fetch the notification first to check permissions
+    notification = db.query(Notification).filter(Notification.id == notification_id).first()
+    if not notification:
+        raise HTTPException(status_code=404, detail="Notification not found")
+
+    # Viewer-role users can only see delivery logs for notifications where they are recipients
+    if current_user.role == UserRole.VIEWER:
+        from sqlalchemy import or_
+        is_recipient = (
+            notification.target_all or
+            any(u.id == current_user.id for u in notification.target_users) or
+            any(g.members and any(m.id == current_user.id for m in g.members) for g in notification.target_groups)
+        )
+        if not is_recipient:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied. You can only view delivery logs for notifications where you are a recipient."
+            )
+
     query = db.query(DeliveryLog).filter(DeliveryLog.notification_id == notification_id)
     if channel:
         query = query.filter(DeliveryLog.channel == channel)
@@ -491,9 +530,34 @@ def get_responses(
 ):
     """Get notification responses.
 
+    Access Control:
+        - Manager and Admin roles: Can see all responses
+        - Viewer role: Can only see responses for notifications where they are recipients
+    
     Args:
         notification_id: ID of the notification
+        limit: Maximum number of results (1-1000, default 100)
+        offset: Number of results to skip (default 0)
     """
+    # Fetch the notification first to check permissions
+    notification = db.query(Notification).filter(Notification.id == notification_id).first()
+    if not notification:
+        raise HTTPException(status_code=404, detail="Notification not found")
+
+    # Viewer-role users can only see responses for notifications where they are recipients
+    if current_user.role == UserRole.VIEWER:
+        from sqlalchemy import or_
+        is_recipient = (
+            notification.target_all or
+            any(u.id == current_user.id for u in notification.target_users) or
+            any(g.members and any(m.id == current_user.id for m in g.members) for g in notification.target_groups)
+        )
+        if not is_recipient:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied. You can only view responses for notifications where you are a recipient."
+            )
+
     query = db.query(NRModel).filter(NRModel.notification_id == notification_id)
     responses = query.all()
     result = []
@@ -502,7 +566,7 @@ def get_responses(
             id=r.id,
             notification_id=r.notification_id,
             user_id=r.user_id,
-            user_email=r.user_email,  # Add missing user_email
+            user_email=r.user_email,
             user_name=r.user.full_name if r.user else r.from_number,
             channel=r.channel,
             response_type=r.response_type,
@@ -597,61 +661,79 @@ async def submit_response(
         user_id = user.id
         user_email = user.email
 
-    # Check if user already responded (prevent duplicate responses)
-    existing_response = db.query(NRModel).filter(
-        NRModel.notification_id == notification_id,
-        NRModel.user_id == user_id
-    ).first()
+    # Use database row-level locking to prevent race conditions
+    # Lock the notification row to prevent concurrent response creation
+    from sqlalchemy import select, func
     
-    if existing_response:
-        # Update existing response
-        existing_response.response_type = data.response_type
-        existing_response.message = data.message
-        existing_response.latitude = data.latitude
-        existing_response.longitude = data.longitude
-        existing_response.responded_at = datetime.now(timezone.utc)
-        response = existing_response
-    else:
-        # Create new response
-        response = NRModel(
-            notification_id=notification_id,
-            user_id=user_id,
-            user_email=user_email,
-            channel=AlertChannel.WEB,
-            response_type=data.response_type,
-            message=data.message,
-            latitude=data.latitude,
-            longitude=data.longitude
+    # Use a transaction with proper locking for race condition prevention
+    try:
+        # Check if user already responded using row-level locking (SELECT FOR UPDATE)
+        # This prevents two concurrent requests from both seeing "no response" and creating duplicates
+        stmt = (
+            select(NRModel)
+            .where(NRModel.notification_id == notification_id)
+            .where(NRModel.user_id == user_id)
+            .with_for_update()  # Acquire exclusive lock on matching rows
         )
-        db.add(response)
+        existing_response = db.execute(stmt).scalar_one_or_none()
 
-    # Create delivery log entry to track web delivery (mark as delivered when user responds)
-    # Check if delivery log already exists to avoid duplicates
-    existing_log = db.query(DeliveryLog).filter(
-        DeliveryLog.notification_id == notification_id,
-        DeliveryLog.user_id == user_id,
-        DeliveryLog.channel == AlertChannel.WEB
-    ).first()
+        if existing_response:
+            # Update existing response
+            existing_response.response_type = data.response_type
+            existing_response.message = data.message
+            existing_response.latitude = data.latitude
+            existing_response.longitude = data.longitude
+            existing_response.responded_at = datetime.now(timezone.utc)
+            response = existing_response
+        else:
+            # Create new response (no duplicate possible due to lock)
+            response = NRModel(
+                notification_id=notification_id,
+                user_id=user_id,
+                user_email=user_email,
+                channel=AlertChannel.WEB,
+                response_type=data.response_type,
+                message=data.message,
+                latitude=data.latitude,
+                longitude=data.longitude
+            )
+            db.add(response)
 
-    if not existing_log:
-        delivery_log = DeliveryLog(
-            notification_id=notification_id,
-            user_id=user_id,
-            user_email=user_email,
-            channel=AlertChannel.WEB,
-            status=DeliveryStatus.DELIVERED,
-            delivered_at=datetime.now(timezone.utc)
+        # Create delivery log entry to track web delivery (mark as delivered when user responds)
+        # Use locking here too to prevent duplicate delivery logs
+        stmt_log = (
+            select(DeliveryLog)
+            .where(DeliveryLog.notification_id == notification_id)
+            .where(DeliveryLog.user_id == user_id)
+            .where(DeliveryLog.channel == AlertChannel.WEB)
+            .with_for_update()
         )
-        db.add(delivery_log)
-        # Atomically increment delivered_count
-        db.execute(
-            update(Notification)
-            .where(Notification.id == notification_id)
-            .values(delivered_count=Notification.delivered_count + 1)
-        )
+        existing_log = db.execute(stmt_log).scalar_one_or_none()
 
-    db.commit()
-    return {"message": "Response recorded", "response_type": data.response_type}
+        if not existing_log:
+            delivery_log = DeliveryLog(
+                notification_id=notification_id,
+                user_id=user_id,
+                user_email=user_email,
+                channel=AlertChannel.WEB,
+                status=DeliveryStatus.DELIVERED,
+                delivered_at=datetime.now(timezone.utc)
+            )
+            db.add(delivery_log)
+            # Atomically increment delivered_count
+            db.execute(
+                update(Notification)
+                .where(Notification.id == notification_id)
+                .values(delivered_count=Notification.delivered_count + 1)
+            )
+
+        db.commit()
+        return {"message": "Response recorded", "response_type": data.response_type}
+    
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error creating notification response: {e}")
+        raise HTTPException(status_code=500, detail="Failed to record response")
 
 
 def _get_delivery_stats(db: Session, notification_id: int) -> dict:

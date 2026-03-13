@@ -772,6 +772,16 @@ class LocationCreate(BaseModel):
     longitude: Optional[float] = None
     geofence_radius_miles: float = 1.0
 
+    @field_validator("latitude", "longitude")
+    @classmethod
+    def validate_coordinates_not_nan(cls, v: Optional[float]) -> Optional[float]:
+        """Ensure latitude/longitude are not NaN or Infinity."""
+        if v is not None:
+            import math
+            if math.isnan(v) or math.isinf(v):
+                raise ValueError("Coordinates cannot be NaN or Infinity")
+        return v
+
 
 class LocationUpdate(BaseModel):
     name: Optional[str] = None
@@ -784,6 +794,16 @@ class LocationUpdate(BaseModel):
     longitude: Optional[float] = None
     geofence_radius_miles: Optional[float] = None
     is_active: Optional[bool] = None
+
+    @field_validator("latitude", "longitude")
+    @classmethod
+    def validate_coordinates_not_nan(cls, v: Optional[float]) -> Optional[float]:
+        """Ensure latitude/longitude are not NaN or Infinity."""
+        if v is not None:
+            import math
+            if math.isnan(v) or math.isinf(v):
+                raise ValueError("Coordinates cannot be NaN or Infinity")
+        return v
 
 
 class LocationResponse(BaseModel):
@@ -989,10 +1009,10 @@ class DeliveryLogResponse(BaseModel):
 
 class NotificationResponseCreate(BaseModel):
     """Schema for submitting a safety response to a notification.
-    
+
     Note: notification_id is provided via URL path parameter (/notifications/{id}/respond),
     not in the request body. This follows RESTful design patterns.
-    
+
     Example request: POST /notifications/123/respond
     Body: {"response_type": "safe", "latitude": 40.7128, "longitude": -74.0060}
     """
@@ -1000,6 +1020,16 @@ class NotificationResponseCreate(BaseModel):
     message: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+
+    @field_validator("latitude", "longitude")
+    @classmethod
+    def validate_coordinates_not_nan(cls, v: Optional[float]) -> Optional[float]:
+        """Ensure latitude/longitude are not NaN or Infinity."""
+        if v is not None:
+            import math
+            if math.isnan(v) or math.isinf(v):
+                raise ValueError("Coordinates cannot be NaN or Infinity")
+        return v
 
 
 class NotificationResponseOut(BaseModel):
