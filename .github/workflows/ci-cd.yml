@@ -294,7 +294,7 @@ jobs:
           coverage combine coverage-unit.xml coverage-integration.xml coverage-api.xml coverage-security.xml || true
           coverage xml -o coverage.xml
           coverage html -d htmlcov
-          coverage report --fail-under=60
+          coverage report --fail-under=75
       
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
