@@ -26,12 +26,12 @@ logger = logging.getLogger(__name__)
 
 
 def _scrub_phone(phone: str) -> str:
-    """Scrub phone for safe logging: +1-555-123-4567 → +1-***-4567"""
-    if not phone or len(phone) < 7:
+    """Scrub phone for safe logging: +1-555-123-4567 → +15***4567"""
+    if not phone or len(str(phone)) < 4:
         return "***"
-    clean = ''.join(c for c in phone if c.isdigit() or c == '+')
+    clean = ''.join(c for c in str(phone) if c.isdigit() or c == '+')
     if len(clean) <= 7:
-        return clean[:3] + "***"
+        return clean[:3] + "***" if len(clean) > 3 else "***"
     return f"{clean[:3]}***{clean[-4:]}"
 
 

@@ -12,31 +12,36 @@ from app.utils.search import escape_like
 from app.schemas import UserCreate, UserUpdate, UserResponse, UserListResponse, CSVImportResponse, UserBulkDeleteResponse, AdminMFAStatusResponse, AdminMFAResetRequest, AdminMFAResetResponse
 from app.core.security import hash_password
 from app.core.deps import get_current_user, require_admin, require_manager
+from app.services.mfa_lifecycle import get_mfa_service
+from app.services.mfa_recovery import get_recovery_code_status, invalidate_all_recovery_codes
+from app.services.rate_limiter import check_api_rate_limit, record_api_request, API_RATE_LIMIT_MAX
+
+logger = logging.getLogger(__name__)
 
 
 def _scrub_email(email: str) -> str:
     """
     Scrub email address for safe logging while keeping it useful for debugging.
-    
+
     Shows: first 2 chars + *** + @ + domain
     Example: john.doe@example.com → jo***@example.com
     """
     if not email or '@' not in email:
         return "***@***"
-    
+
     local, domain = email.rsplit('@', 1)
     if len(local) <= 2:
         scrubbed_local = local + "***"
     else:
         scrubbed_local = local[:2] + "***"
-    
+
     return f"{scrubbed_local}@{domain}"
 
 
 def _log_user_identity(user_id: Optional[int], email: Optional[str]) -> str:
     """
     Create a safe user identity string for logging.
-    
+
     Shows: user_id + scrubbed email
     Example: "user_id=12345, email=jo***@example.com"
     """
@@ -46,12 +51,6 @@ def _log_user_identity(user_id: Optional[int], email: Optional[str]) -> str:
     if email:
         parts.append(f"email={_scrub_email(email)}")
     return ", ".join(parts) if parts else "[UNKNOWN]"
-from app.services.mfa_lifecycle import get_mfa_service
-from app.services.mfa_recovery import get_recovery_code_status, invalidate_all_recovery_codes
-from app.services.rate_limiter import check_api_rate_limit, record_api_request, API_RATE_LIMIT_MAX
-from app.utils.audit import create_audit_log
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/users", tags=["Users / People"])
 

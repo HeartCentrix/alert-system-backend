@@ -53,9 +53,14 @@ class Settings(BaseSettings):
     # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
     MFA_ENCRYPTION_KEY: str = ""
 
+    # Test database/redis URLs (used in CI/CD testing)
+    TEST_DATABASE_URL: Optional[str] = None
+    TEST_REDIS_URL: Optional[str] = None
+
     class Config:
         env_file = ".env"
         case_sensitive = True
+        extra = 'ignore'  # Ignore extra environment variables in CI
 
 
 settings = Settings()

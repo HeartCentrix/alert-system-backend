@@ -23,7 +23,7 @@ from typing import Optional, List
 from time import time as current_time
 
 from app.database import get_db
-from app.models import User, Location, UserLocation, UserLocationHistory, AuditLog, UserLocationStatus, UserLocationAssignmentType
+from app.models import User, Location, UserLocation, UserLocationHistory, AuditLog, UserLocationStatus, UserLocationAssignmentType, UserRole
 from app.utils.audit import create_audit_log
 from app.utils.search import escape_like
 from app.schemas import (
@@ -762,7 +762,3 @@ def _build_history_response(db: Session, history: UserLocationHistory) -> UserLo
         distance_from_center_miles=history.distance_from_center_miles,
         created_at=history.created_at
     )
-
-
-# Import UserRole for the IDOR check
-from app.models import UserRole

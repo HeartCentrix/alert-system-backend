@@ -1,18 +1,16 @@
 import secrets
 import time
 import logging
-import json
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Query, Response
-from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, func
 import redis
 from app.database import get_db
-from app.models import User, RefreshToken, AuditLog, UserRole, LoginAttempt
+from app.models import User, RefreshToken, LoginAttempt
 from app.schemas import (
-    LoginRequest, TokenResponse, RefreshRequest, UserResponse,
+    LoginRequest, TokenResponse, UserResponse,
     PasswordResetRequest, PasswordResetConfirm, ChangePasswordRequest,
     UserProfileUpdate, MFASetupInitiateResponse, MFASetupConfirmRequest,
     MFAStatusResponse, MFANeededResponse,
