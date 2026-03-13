@@ -26,13 +26,13 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         # Control referrer leakage — send origin only on cross-origin
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
 
-        # CSP — allow same-origin plus CDN resources for Swagger/OpenAPI docs
+        # CSP — allow same-origin plus CDN resources for Swagger/OpenAPI docs and Google Fonts
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
-            "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+            "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
             "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
             "img-src 'self' data:; "
-            "font-src 'self' https://cdn.jsdelivr.net"
+            "font-src 'self' https://cdn.jsdelivr.net https://fonts.gstatic.com"
         )
 
         # Disable browser features the API does not use

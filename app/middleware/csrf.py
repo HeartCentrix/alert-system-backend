@@ -1,12 +1,14 @@
 """
-CSRF protection — Double-Submit Cookie pattern (cross-origin aware).
+CSRF protection — Synchronised Token + HttpOnly Cookie pattern.
 
 On every response the middleware ensures a 'csrf_token' cookie is present
-AND sends the token in the X-CSRF-Token response header (for cross-origin
-deployments where document.cookie can't read another domain's cookies).
+(HttpOnly so JS cannot access it via document.cookie) AND echoes the token in
+the X-CSRF-Token response header so the frontend can read it from there and
+keep it in memory.
 
 On state-changing requests (POST, PUT, PATCH, DELETE) the X-CSRF-Token
-request header must match the csrf_token cookie value.
+request header must match the csrf_token cookie value (which the browser
+sends automatically, opaque to JS).
 
 Exempt paths (unauthenticated or non-browser callers):
   /api/v1/auth/login, /api/v1/auth/refresh, /api/v1/auth/mfa/verify-login,
@@ -82,7 +84,9 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         response: Response = await call_next(request)
 
         # Set csrf_token cookie if not present.
-        # NOT HttpOnly: JS must read it to set the X-CSRF-Token header.
+        # HttpOnly: JS cannot read it via document.cookie (mitigates XSS theft).
+        # The frontend reads the token from the X-CSRF-Token response header
+        # and keeps it in memory to send on subsequent state-changing requests.
         # SameSite=None + Secure: required for cross-origin (Vercel → Railway).
         # In development mode, secure=False and samesite=lax so localhost works.
         if not existing_token:
@@ -91,7 +95,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
             response.set_cookie(
                 key=CSRF_COOKIE_NAME,
                 value=csrf_token,
-                httponly=False,
+                httponly=True,
                 secure=is_production,
                 samesite="none" if is_production else "lax",
                 path="/",
