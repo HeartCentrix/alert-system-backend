@@ -18,7 +18,7 @@ from app.database import Base, engine
 from app.models import (
     User, Group, Location, Notification, NotificationTemplate,
     Incident, DeliveryLog, NotificationResponse, IncomingMessage,
-    AuditLog, RefreshToken, LocationAutocompleteCache
+    AuditLog, RefreshToken
 )
 
 
@@ -121,7 +121,7 @@ def generate_fix_sql(issues):
         
         elif issue['type'] == 'missing_column':
             col = issue['definition']
-            type_str = str(col['type'])
+            type_str = col['type'].compile(dialect=engine.dialect)
             nullable_str = "NULL" if col['nullable'] else "NOT NULL"
             default_str = ""
             
@@ -130,7 +130,8 @@ def generate_fix_sql(issues):
             elif col['default'] is not None and hasattr(col['default'], 'arg'):
                 default_str = f" DEFAULT {col['default'].arg}"
             
-            sql = f"ALTER TABLE {issue['table']} ADD COLUMN {col['name']} {type_str} {nullable_str}{default_str};"
+            # sql = f"ALTER TABLE {issue['table']} ADD COLUMN {col['name']} {type_str} {nullable_str}{default_str};"
+            sql = f"ALTER TABLE {issue['table']} ADD COLUMN IF NOT EXISTS {col['name']} {type_str} {nullable_str}{default_str};"
             sql_statements.append(f"-- {issue['message']}")
             sql_statements.append(sql)
         
