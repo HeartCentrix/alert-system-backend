@@ -3,6 +3,7 @@ import time
 import logging
 import json
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Query, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
@@ -55,6 +56,25 @@ from app.utils.audit import create_audit_log
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+
+
+def _scrub_email(email: str) -> str:
+    """Scrub email for safe logging: john.doe@example.com → jo***@example.com"""
+    if not email or '@' not in email:
+        return "***@***"
+    local, domain = email.rsplit('@', 1)
+    scrubbed_local = local + "***" if len(local) <= 2 else local[:2] + "***"
+    return f"{scrubbed_local}@{domain}"
+
+
+def _log_user_identity(user_id: Optional[int], email: Optional[str]) -> str:
+    """Create safe user identity for logging: user_id=12345, email=jo***@example.com"""
+    parts = []
+    if user_id is not None:
+        parts.append(f"user_id={user_id}")
+    if email:
+        parts.append(f"email={_scrub_email(email)}")
+    return ", ".join(parts) if parts else "[UNKNOWN]"
 
 # Simple in-memory rate limiting for password reset requests
 # Format: {email: last_request_timestamp}
@@ -514,7 +534,7 @@ async def login(request: LoginRequest, req: Request, response: Response, db: Ses
             # Generate challenge token for verification
             challenge_token = _generate_challenge_token(user.id)
 
-            logger.info(f"MFA setup initiated for privileged user {user.id} ({user.email})")
+            logger.info(f"MFA setup initiated for privileged user {_log_user_identity(user.id, user.email)}")
 
             # Return setup information - NO tokens issued yet
             return LoginMFASetupResponse(
@@ -531,7 +551,7 @@ async def login(request: LoginRequest, req: Request, response: Response, db: Ses
         if not request.mfa_code:
             # User has MFA configured but didn't provide code - return challenge response
             challenge_token = _generate_challenge_token(user.id)
-            logger.info(f"MFA challenge issued for user {user.id} ({user.email})")
+            logger.info(f"MFA challenge issued for {_log_user_identity(user.id, user.email)}")
 
             return LoginMFAChallengeResponse(
                 status="mfa_required",
@@ -552,7 +572,7 @@ async def login(request: LoginRequest, req: Request, response: Response, db: Ses
             if request.device_fingerprint:
                 await record_device_failure(request.device_fingerprint)
 
-            logger.warning(f"Invalid MFA code for user {user.id} ({user.email})")
+            logger.warning(f"Invalid MFA code for {_log_user_identity(user.id, user.email)}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid credentials or MFA code"
@@ -560,7 +580,7 @@ async def login(request: LoginRequest, req: Request, response: Response, db: Ses
 
         # Replay protection — reject reuse within the same 30-second window
         if is_totp_replay(user, request.mfa_code):
-            logger.warning(f"TOTP replay attempt detected for user {user.id} ({user.email})")
+            logger.warning(f"TOTP replay attempt detected for {_log_user_identity(user.id, user.email)}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="TOTP code already used. Please wait for the next code."

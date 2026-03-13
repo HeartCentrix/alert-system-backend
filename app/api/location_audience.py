@@ -314,46 +314,57 @@ def update_user_geofence(
 ):
     """
     Update user's location and trigger geofence check.
-    
+
     This endpoint is called when:
     - User logs in
     - User updates their location
     - Periodic location sync
-    
+
     **Security:**
-    - Users can only update their own location
-    - Rate limiting (30 requests/min)
-    - Coordinate validation
-    - IDOR prevention
-    
+    - Users can only update their own location (IDOR prevented via Depends)
+    - Rate limiting (30 requests/min per user)
+    - Coordinate validation (range, NaN, Infinity checks)
+    - Coordinates rounded to 4 decimals (~11m precision) for privacy
+    - No sensitive data in logs
+    - Celery task runs async (non-blocking)
+
     **Flow:**
-    1. Validate coordinates
-    2. Store user's current location
-    3. Trigger async geofence check (Celery)
-    4. Return current status
+    1. Validate coordinates (range, type, NaN/Infinity)
+    2. Round coordinates for privacy (~11m precision)
+    3. Rate limit check (per user ID)
+    4. Store user's current location
+    5. Trigger async geofence check (Celery)
+    6. Return current status
     """
-    # Rate limiting
+    # Validate coordinates first (before rate limit to reject invalid early)
+    is_valid, error = validate_coordinates(data.latitude, data.longitude)
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=error)
+
+    # SECURITY: Round coordinates to 4 decimals (~11m precision) for privacy
+    # This prevents tracking exact location while still enabling geofence
+    rounded_lat = round(data.latitude, 4)
+    rounded_lon = round(data.longitude, 4)
+
+    # Rate limiting (after validation to avoid storing bad data)
     client_ip = request.client.host
     allowed, retry_after = _geofence_update_limiter.is_allowed(f"geofence:{current_user.id}")
     if not allowed:
+        # Log rate limit event without sensitive data
+        logger.warning(f"Rate limit exceeded for geofence update")
         raise HTTPException(
             status_code=429,
             detail=f"Too many location updates. Try again in {retry_after} seconds.",
             headers={"Retry-After": str(retry_after)}
         )
-    
-    # Validate coordinates
-    is_valid, error = validate_coordinates(data.latitude, data.longitude)
-    if not is_valid:
-        raise HTTPException(status_code=400, detail=error)
-    
-    # Update user's primary location fields
-    current_user.latitude = data.latitude
-    current_user.longitude = data.longitude
+
+    # Update user's primary location fields (use rounded values)
+    current_user.latitude = rounded_lat
+    current_user.longitude = rounded_lon
     current_user.updated_at = datetime.now(timezone.utc)
-    
-    # Trigger async geofence check
-    check_user_geofence_task.delay(current_user.id, data.latitude, data.longitude)
+
+    # Trigger async geofence check (use rounded coordinates)
+    check_user_geofence_task.delay(current_user.id, rounded_lat, rounded_lon)
     
     # Get current locations for immediate response
     locations = db.query(Location).filter(
@@ -362,12 +373,12 @@ def update_user_geofence(
         Location.longitude.isnot(None)
     ).all()
     
-    # Check geofences synchronously for immediate feedback
+    # Check geofences synchronously for immediate feedback (use rounded values)
     locations_inside = []
     locations_outside = []
-    
+
     for loc in locations:
-        result = check_geofence(data.latitude, data.longitude, loc)
+        result = check_geofence(rounded_lat, rounded_lon, loc)
         geofence_result = GeofenceCheckResult(
             location_id=loc.id,
             location_name=loc.name,
@@ -384,11 +395,11 @@ def update_user_geofence(
             locations_outside.append(geofence_result)
     
     db.commit()
-    
+
     return UserGeofenceStatus(
         user_id=current_user.id,
-        latitude=data.latitude,
-        longitude=data.longitude,
+        latitude=rounded_lat,
+        longitude=rounded_lon,
         checked_at=datetime.now(timezone.utc),
         locations_inside=locations_inside,
         locations_outside=locations_outside,

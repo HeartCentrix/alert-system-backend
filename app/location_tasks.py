@@ -28,6 +28,25 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
+def _scrub_user_id(user_id: Optional[int]) -> str:
+    """Scrub user ID for safe logging (shows only last 4 chars)."""
+    if user_id is None:
+        return "[REDACTED]"
+    user_str = str(user_id)
+    if len(user_str) <= 4:
+        return "[USER]"
+    return f"[USER_...{user_str[-4:]}]"
+
+
+def _scrub_coordinates(lat: Optional[float], lon: Optional[float]) -> str:
+    """Scrub coordinates for safe logging (shows only quadrant)."""
+    if lat is None or lon is None:
+        return "[REDACTED]"
+    lat_q = "N" if lat >= 0 else "S"
+    lon_q = "E" if lon >= 0 else "W"
+    return f"[{lat_q}{lon_q}_APPROX]"
+
+
 # ─── GEOFENCE CHECKING TASKS ──────────────────────────────────────────────────
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=30)
@@ -129,10 +148,11 @@ def check_user_geofence_task(self, user_id: int, latitude: float, longitude: flo
         
         # Sync to Redis GEO (async, don't block)
         _sync_user_to_redis.delay(user_id, latitude, longitude)
-        
+
+        inside_count = len([r for r in results if r.is_inside])
         logger.info(
-            f"Geofence check for user {user_id}: "
-            f"{len([r for r in results if r.is_inside])} inside, "
+            f"Geofence check for user {_scrub_user_id(user_id)}: "
+            f"{inside_count} locations inside, "
             f"{len(assignments_changed)} changes"
         )
         
@@ -147,7 +167,7 @@ def check_user_geofence_task(self, user_id: int, latitude: float, longitude: flo
         }
         
     except Exception as e:
-        logger.error(f"Geofence check failed for user {user_id}: {e}")
+        logger.error(f"Geofence check failed for user {_scrub_user_id(user_id)}: {type(e).__name__}")
         db.rollback()
         raise self.retry(exc=e)
     finally:
@@ -229,7 +249,7 @@ def batch_geofence_check_task(
                 results_summary["success"] += 1
                 
             except Exception as e:
-                logger.error(f"Batch geofence failed for user {user_loc.get('user_id')}: {e}")
+                logger.error(f"Batch geofence failed for user {_scrub_user_id(user_loc.get('user_id'))}: {type(e).__name__}")
                 results_summary["failed"] += 1
         
         results_summary["processed"] = len(user_locations)
@@ -630,10 +650,13 @@ def periodic_geofence_check() -> Dict[str, Any]:
 
                 _update_primary_location(db, uid, results)
             except Exception as e:
-                logger.error(f"Periodic geofence failed for user {user_loc.get('user_id')}: {e}")
+                logger.error(f"Periodic geofence failed for user {_scrub_user_id(user_loc.get('user_id'))}: {type(e).__name__}")
 
         db.commit()
-        logger.info(f"Periodic geofence check complete: {len(user_locations)} users, {total_changes} changes")
+        logger.info(
+            f"Periodic geofence check complete: {len(user_locations)} users processed, "
+            f"{total_changes} assignment changes"
+        )
 
         return {
             "processed": len(user_locations),

@@ -25,6 +25,36 @@ router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
 logger = logging.getLogger(__name__)
 
 
+def _scrub_phone(phone: str) -> str:
+    """Scrub phone for safe logging: +1-555-123-4567 → +1-***-4567"""
+    if not phone or len(phone) < 7:
+        return "***"
+    clean = ''.join(c for c in phone if c.isdigit() or c == '+')
+    if len(clean) <= 7:
+        return clean[:3] + "***"
+    return f"{clean[:3]}***{clean[-4:]}"
+
+
+def _scrub_email(email: str) -> str:
+    """Scrub email for safe logging: john.doe@example.com → jo***@example.com"""
+    if not email or '@' not in email:
+        return "***@***"
+    local, domain = email.rsplit('@', 1)
+    scrubbed_local = local + "***" if len(local) <= 2 else local[:2] + "***"
+    return f"{scrubbed_local}@{domain}"
+
+
+def _log_user_identity(user_id: Optional[int], email: Optional[str]) -> str:
+    """Create safe user identity for logging: user_id=12345, email=jo***@example.com"""
+    from typing import Optional
+    parts = []
+    if user_id is not None:
+        parts.append(f"user_id={user_id}")
+    if email:
+        parts.append(f"email={_scrub_email(email)}")
+    return ", ".join(parts) if parts else "[UNKNOWN]"
+
+
 @router.post("/voice/response")
 def handle_voice_response(
     request: Request,
@@ -88,7 +118,7 @@ def handle_voice_response(
                         break
         
         if not user:
-            logger.warning(f"Voice response from unknown number: {user_phone} (cleaned: {user_phone_clean})")
+            logger.warning(f"Voice response from unknown number: {_scrub_phone(user_phone)}")
             # Return TwiML acknowledging the response even for unknown users
             twiml = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -96,7 +126,7 @@ def handle_voice_response(
 </Response>"""
             return Response(content=twiml, media_type="application/xml")
         
-        logger.info(f"Voice response matched user: {user.id} ({user.email}) from phone {user_phone}")
+        logger.info(f"Voice response matched user: {_log_user_identity(user.id, user.email)} from phone {_scrub_phone(user_phone)}")
         
         # Map digits to response type with proper validation
         response_type = None

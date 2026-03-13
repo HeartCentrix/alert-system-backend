@@ -17,6 +17,39 @@ from sqlalchemy import update, Integer
 logger = logging.getLogger(__name__)
 
 
+def _scrub_phone(phone: str) -> str:
+    """
+    Scrub phone number for safe logging while keeping it useful for debugging.
+    
+    Shows: first 3 chars + *** + last 4 chars
+    Example: +1-555-123-4567 → +1-***-4567
+    """
+    if not phone or len(phone) < 7:
+        return "***"
+    # Keep country code and last 4 digits
+    clean = ''.join(c for c in phone if c.isdigit() or c == '+')
+    if len(clean) <= 7:
+        return clean[:3] + "***"
+    return f"{clean[:3]}***{clean[-4:]}"
+
+
+def _scrub_email(email: str) -> str:
+    """
+    Scrub email address for safe logging while keeping it useful for debugging.
+    
+    Shows: first 2 chars + *** + @ + domain
+    Example: john.doe@example.com → jo***@example.com
+    """
+    if not email or '@' not in email:
+        return "***@***"
+    local, domain = email.rsplit('@', 1)
+    if len(local) <= 2:
+        scrubbed_local = local + "***"
+    else:
+        scrubbed_local = local[:2] + "***"
+    return f"{scrubbed_local}@{domain}"
+
+
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=30)
 def send_notification_task(self, notification_id: int, triggered_by_user_id: int = None, triggered_by_email: str = None):
     """Main task to dispatch a notification to all recipients across all channels.
@@ -248,9 +281,9 @@ def _send_to_channel(self, notification_id: int, user_id: int, channel: str, tri
                         checkin_url,
                         notification.response_deadline_minutes
                     )
-                logger.info(f"Sending SMS to {user.phone} for notification {notification_id}")
+                logger.info(f"Sending SMS to {_scrub_phone(user.phone)} for notification {notification_id}")
                 result = twilio_service.send_sms(user.phone, sms_message)
-                logger.info(f"SMS result for notification {notification_id} to {user.phone}: {result}")
+                logger.info(f"SMS result for notification {notification_id} to {_scrub_phone(user.phone)}: {result.get('status', 'unknown')}")
             else:
                 logger.warning(f"User {user_id} has no phone number for SMS")
                 log.status = DeliveryStatus.FAILED
@@ -285,9 +318,9 @@ def _send_to_channel(self, notification_id: int, user_id: int, channel: str, tri
                         checkin_url,
                         notification.response_deadline_minutes
                     )
-                logger.info(f"Sending email to {user.email} for notification {notification_id}, subject: {subject}")
+                logger.info(f"Sending email to {_scrub_email(user.email)} for notification {notification_id}, subject: {subject}")
                 result = email_service.send_email(user.email, subject, email_message, email_html)
-                logger.info(f"Email result for notification {notification_id} to {user.email}: {result}")
+                logger.info(f"Email result for notification {notification_id} to {_scrub_email(user.email)}: {result.get('status', 'unknown')}")
             else:
                 logger.warning(f"User {user_id} has no email address")
                 log.status = DeliveryStatus.FAILED
@@ -310,9 +343,9 @@ def _send_to_channel(self, notification_id: int, user_id: int, channel: str, tri
                 voice_message = notification.message
                 if checkin_url:
                     voice_message = f"{notification.message}. A safety check-in response is required. Please visit the link sent to your email or log in to the portal to respond."
-                logger.info(f"Making voice call to {user.phone} for notification {notification_id}")
+                logger.info(f"Making voice call to {_scrub_phone(user.phone)} for notification {notification_id}")
                 result = twilio_service.make_voice_call(user.phone, voice_message)
-                logger.info(f"Voice call result for notification {notification_id} to {user.phone}: {result}")
+                logger.info(f"Voice call result for notification {notification_id} to {_scrub_phone(user.phone)}: {result.get('status', 'unknown')}")
             else:
                 logger.warning(f"User {user_id} has no phone number for voice call")
                 log.status = DeliveryStatus.FAILED
@@ -700,7 +733,7 @@ def check_safety_response_deadlines(self):
             emails_sent = 0
             for admin in admins:
                 if admin.email:
-                    logger.info(f"Sending escalation email to admin {admin.email}")
+                    logger.info(f"Sending escalation email to admin user_id={admin.id}, email={_scrub_email(admin.email)}")
                     try:
                         email_service.send_email(
                             admin.email,
@@ -709,7 +742,7 @@ def check_safety_response_deadlines(self):
                         )
                         emails_sent += 1
                     except Exception as e:
-                        logger.error(f"Failed to send escalation email to {admin.email}: {e}")
+                        logger.error(f"Failed to send escalation email to admin user_id={admin.id}, email={_scrub_email(admin.email)}: {e}")
 
             # Mark as escalated AFTER sending emails (prevents duplicates on retry)
             notification.deadline_escalated = True
@@ -734,9 +767,9 @@ def check_safety_response_deadlines(self):
                         )
                         try:
                             twilio_service.send_sms(user.phone, reminder_msg)
-                            logger.info(f"Sent urgent SMS reminder to {user.phone}")
+                            logger.info(f"Sent urgent SMS reminder to user_id={user.id}, phone={_scrub_phone(user.phone)}")
                         except Exception as e:
-                            logger.error(f"Failed to send SMS to {user.phone}: {e}")
+                            logger.error(f"Failed to send SMS to user_id={user.id}, phone={_scrub_phone(user.phone)}: {e}")
 
     except Exception as e:
         logger.error(f"Error checking safety response deadlines: {e}")
