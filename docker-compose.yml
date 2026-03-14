@@ -50,6 +50,7 @@ services:
       - DATABASE_URL=postgresql://postgres:password@db:5432/tm_alert
       - REDIS_URL=redis://redis:6379/0
       - ENVIRONMENT=production
+      - SERVICE_TYPE=worker
     env_file:
       - .env
     depends_on:
@@ -65,6 +66,7 @@ services:
       - DATABASE_URL=postgresql://postgres:password@db:5432/tm_alert
       - REDIS_URL=redis://redis:6379/0
       - ENVIRONMENT=production
+      - SERVICE_TYPE=beat
     env_file:
       - .env
     depends_on:
