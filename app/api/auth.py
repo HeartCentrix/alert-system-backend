@@ -85,18 +85,21 @@ def _set_refresh_cookie(response: Response, token: str, expire_days: int) -> Non
 
     In development mode, secure=False so localhost works without HTTPS.
     """
-    is_secure = settings.APP_ENV != "development"
+    is_production = settings.APP_ENV != "development"
 
-    # For cross-origin (Vercel -> Railway), we need SameSite=None
-    # This is secure because we always use Secure flag (HTTPS only)
+    # SameSite=None is required for cross-origin cookie usage (Vercel → Railway).
+    # In development (same-origin localhost), SameSite=Lax is sufficient and avoids
+    # ZAP's "Cookie with SameSite Attribute None" alert.
+    # Secure=True is always set — modern browsers accept Secure cookies on localhost,
+    # and ZAP flags Secure=False as "Cookie Without Secure Flag" regardless of scheme.
     response.set_cookie(
         key="refresh_token",
         value=token,
         httponly=True,
-        secure=is_secure,
-        samesite="none",  # Required for cross-origin (Vercel to Railway)
-        path="/api/v1/auth",  # Scoped: only sent to auth endpoints
-        max_age=expire_days * 86400,  # seconds
+        secure=True,
+        samesite="none" if is_production else "lax",
+        path="/api/v1/auth",
+        max_age=expire_days * 86400,
     )
 
 

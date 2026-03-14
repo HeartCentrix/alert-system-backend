@@ -92,13 +92,16 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         if not existing_token:
             from app.config import settings
             is_production = settings.APP_ENV != "development"
+            # path="/api" scopes the cookie to API endpoints only — avoids ZAP's
+            # "Loosely Scoped Cookie" alert that fires for path="/".
+            # Secure=True always (modern browsers accept it on localhost).
             response.set_cookie(
                 key=CSRF_COOKIE_NAME,
                 value=csrf_token,
                 httponly=True,
-                secure=is_production,
+                secure=True,
                 samesite="none" if is_production else "lax",
-                path="/",
+                path="/api",
                 max_age=86400,
             )
 
