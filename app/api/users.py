@@ -1,6 +1,7 @@
 import io
 import csv
 import logging
+from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, func
@@ -8,6 +9,7 @@ from typing import Optional, List
 from app.database import get_db
 from app.models import User, UserRole, AuditLog, Group, GroupType, UserLocation, UserLocationHistory, Incident, Notification, NotificationTemplate
 from app.utils.audit import create_audit_log
+from app.schemas import UserCreate, UserUpdate, UserResponse, UserListResponse, CSVImportResponse, UserBulkDeleteResponse, AdminMFAStatusResponse, AdminMFAResetRequest, AdminMFAResetResponse, HeartbeatResponse
 from app.utils.search import escape_like
 from app.schemas import UserCreate, UserUpdate, UserResponse, UserListResponse, CSVImportResponse, UserBulkDeleteResponse, AdminMFAStatusResponse, AdminMFAResetRequest, AdminMFAResetResponse
 from app.core.security import hash_password
@@ -949,4 +951,28 @@ def admin_reset_user_mfa(
         mfa_reset=True,
         user_notified=user_notified,
         reason=request_data.reason
+    )
+
+
+@router.post("/heartbeat", response_model=HeartbeatResponse)
+def heartbeat(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Heartbeat endpoint to mark user as online.
+    
+    Called periodically by the frontend (every 30 seconds) to indicate
+    the user is still active and online. Updates last_seen_at timestamp
+    and sets is_active to True.
+    """
+    now = datetime.now(timezone.utc)
+    current_user.last_seen_at = now
+    current_user.is_active = True
+    db.commit()
+    
+    return HeartbeatResponse(
+        status="ok",
+        message="Heartbeat received",
+        last_seen_at=current_user.last_seen_at
     )

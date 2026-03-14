@@ -109,7 +109,7 @@ class User(Base):
     title = Column(String(100))
     employee_id = Column(String(50), unique=True)
     role = Column(Enum(UserRole), default=UserRole.VIEWER, nullable=False)
-    is_active = Column(Boolean, default=True)
+    is_active = Column(Boolean, default=False)  # Tracks real-time online presence
     is_verified = Column(Boolean, default=False)
     mfa_enabled = Column(Boolean, default=False)
     mfa_secret = Column(String(255))  # Increased from 32 to store Fernet-encrypted secrets
@@ -121,6 +121,7 @@ class User(Base):
     longitude = Column(Float, nullable=True)  # Last known longitude
     location_id = Column(Integer, ForeignKey("locations.id"), nullable=True)
     last_login = Column(DateTime(timezone=True))
+    last_seen_at = Column(DateTime(timezone=True), nullable=True)  # Last heartbeat timestamp
     password_reset_token = Column(String(100))
     password_reset_expires = Column(DateTime(timezone=True))
     token_valid_after = Column(DateTime(timezone=True), nullable=True)

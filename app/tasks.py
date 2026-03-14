@@ -777,3 +777,53 @@ def check_safety_response_deadlines(self):
         raise self.retry(exc=e)
     finally:
         db.close()
+
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=10)
+def mark_offline_users_task(self):
+    """
+    Periodic task to mark users as offline if no heartbeat received within 30 seconds.
+    
+    This task runs every 30 seconds via Celery Beat and:
+    1. Finds all users with is_active=True
+    2. Checks if their last_seen_at is older than 30 seconds
+    3. Marks them as inactive (is_active=False)
+    
+    This ensures the online status reflects real-time presence.
+    """
+    db = SessionLocal()
+    try:
+        from datetime import timedelta
+        from app.models import User
+        
+        cutoff_time = datetime.now(timezone.utc) - timedelta(seconds=30)
+        
+        # Find users who are active but haven't sent a heartbeat in 30+ seconds
+        stale_users = db.query(User).filter(
+            User.is_active == True,
+            User.last_seen_at.isnot(None),
+            User.last_seen_at < cutoff_time
+        ).all()
+        
+        if stale_users:
+            user_ids = [u.id for u in stale_users]
+            logger.info(f"Marking {len(stale_users)} users as offline due to inactivity: {user_ids}")
+            
+            # Mark them as offline
+            db.execute(
+                update(User)
+                .where(User.id.in_(user_ids))
+                .values(is_active=False)
+            )
+            db.commit()
+            
+            logger.info(f"Successfully marked {len(stale_users)} users as offline")
+        else:
+            logger.debug("No stale users found - all active users have recent heartbeats")
+            
+    except Exception as e:
+        logger.error(f"Error marking offline users: {e}")
+        db.rollback()
+        raise self.retry(exc=e)
+    finally:
+        db.close()
