@@ -759,6 +759,13 @@ class UserBulkDeleteResponse(BaseModel):
     failed_ids: List[int]
 
 
+class HeartbeatResponse(BaseModel):
+    """Response for user heartbeat endpoint."""
+    status: str
+    message: str
+    last_seen_at: datetime
+
+
 # ─── LOCATION ─────────────────────────────────────────────────────────────────
 
 class LocationCreate(BaseModel):

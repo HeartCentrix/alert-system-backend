@@ -53,6 +53,10 @@ celery_app.conf.update(
             "schedule": 300.0,  # Every 5 minutes for deadline monitoring
             # Sends escalation email to admins ONCE per notification (deadline_escalated flag)
         },
+        "mark-offline-users": {
+            "task": "app.tasks.mark_offline_users_task",
+            "schedule": 30.0,  # Every 30 seconds to timeout inactive users
+        },
         "periodic-geofence-check": {
             "task": "app.location_tasks.periodic_geofence_check",
             "schedule": 300.0,  # Every 5 minutes

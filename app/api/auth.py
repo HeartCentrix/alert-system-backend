@@ -103,18 +103,21 @@ def _set_refresh_cookie(response: Response, token: str, expire_days: int) -> Non
 
     In development mode, secure=False so localhost works without HTTPS.
     """
-    is_secure = settings.APP_ENV != "development"
+    is_production = settings.APP_ENV != "development"
 
-    # For cross-origin (Vercel -> Railway), we need SameSite=None
-    # This is secure because we always use Secure flag (HTTPS only)
+    # SameSite=None is required for cross-origin cookie usage (Vercel → Railway).
+    # In development (same-origin localhost), SameSite=Lax is sufficient and avoids
+    # ZAP's "Cookie with SameSite Attribute None" alert.
+    # Secure=True is always set — modern browsers accept Secure cookies on localhost,
+    # and ZAP flags Secure=False as "Cookie Without Secure Flag" regardless of scheme.
     response.set_cookie(
         key="refresh_token",
         value=token,
         httponly=True,
-        secure=is_secure,
-        samesite="none",  # Required for cross-origin (Vercel to Railway)
-        path="/api/v1/auth",  # Scoped: only sent to auth endpoints
-        max_age=expire_days * 86400,  # seconds
+        secure=True,
+        samesite="none" if is_production else "lax",
+        path="/api/v1/auth",
+        max_age=expire_days * 86400,
     )
 
 
@@ -463,15 +466,6 @@ async def login(request: LoginRequest, req: Request, response: Response, db: Ses
             detail="Invalid credentials"
         )
 
-    # Check if account is active
-    if not user.is_active:
-        # Record failed attempt for IP tracking
-        await record_ip_failure(client_ip)
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Invalid credentials"
-        )
-
     # STEP 5: Device fingerprint tracking (if provided)
     # Track failures per device to detect automated attacks
     if request.device_fingerprint:
@@ -611,8 +605,10 @@ async def login(request: LoginRequest, req: Request, response: Response, db: Ses
     )
     db.add(rt)
 
-    # Update last login
+    # Update last login and mark user as online
     user.last_login = datetime.now(timezone.utc)
+    user.last_seen_at = datetime.now(timezone.utc)
+    user.is_active = True
 
     # Audit log
     db.add(create_audit_log(
@@ -689,10 +685,9 @@ async def refresh_token(req: Request, response: Response, db: Session = Depends(
             detail="Refresh token expired"
         )
 
-    # Check if user exists and is active
+    # Check if user exists (don't check is_active - that's for online presence, not account status)
     user = db.query(User).filter(
-        User.id == rt.user_id,
-        User.is_active == True
+        User.id == rt.user_id
     ).first()
     if not user:
         raise HTTPException(
@@ -738,6 +733,7 @@ def logout(
     - Refresh token read from HttpOnly cookie
     - Token revoked in database
     - Cookie cleared from browser
+    - User marked as offline (is_active=False)
     """
     # Read refresh token from HttpOnly cookie
     refresh_token_str = req.cookies.get("refresh_token")
@@ -749,7 +745,10 @@ def logout(
         ).first()
         if rt:
             rt.revoked = True
-            db.commit()
+
+    # Mark user as offline
+    current_user.is_active = False
+    db.commit()
 
     # Clear the HttpOnly cookie
     # Must match the same settings as set_cookie
@@ -1399,8 +1398,8 @@ async def verify_mfa_and_complete_login(
 
     # Fetch user from database
     user = db.query(User).filter(User.id == user_id).first()
-    if not user or not user.is_active:
-        logger.warning(f"User {user_id} not found or inactive")
+    if not user:
+        logger.warning(f"User {user_id} not found")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials or MFA code"
@@ -1497,8 +1496,10 @@ async def verify_mfa_and_complete_login(
     )
     db.add(rt)
 
-    # Update last login
+    # Mark user as online (same as successful login)
     user.last_login = datetime.now(timezone.utc)
+    user.last_seen_at = datetime.now(timezone.utc)
+    user.is_active = True
 
     # Audit log
     db.add(create_audit_log(

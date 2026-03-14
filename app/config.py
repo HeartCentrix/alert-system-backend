@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     GEOCODING_PROVIDER: str = "photon_public"
     GEOCODING_PROVIDER_URL: str = ""
 
+    # LocationIQ API key (optional - for geocoding fallback)
+    LOCATIONIQ_API_KEY: str = ""
+
     SLACK_DEFAULT_WEBHOOK_URL: str = ""
     TEAMS_DEFAULT_WEBHOOK_URL: str = ""
 

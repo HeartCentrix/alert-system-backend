@@ -396,12 +396,7 @@ if railway_domain:
 logger.info(f"CORS allowed origins: {allowed_origins}")
 logger.info(f"CORS origin regex: Railway subdomains allowed for migration flexibility")
 
-# Security headers — MUST be registered first (outermost layer)
-# Wraps all other middleware to ensure headers on every response
-app.add_middleware(SecurityHeadersMiddleware)
-
 # Request ID — generates UUID per request for log correlation
-# Registered second-outermost so the ID is available to all inner middleware
 app.add_middleware(RequestIDMiddleware)
 
 # CSRF protection — double-submit cookie pattern
@@ -542,6 +537,14 @@ async def limit_response_size(request: Request, call_next):
         response.body_iterator = counting_iterator()
 
     return response
+
+# Security headers — registered HERE (after all @app.middleware decorators) so it
+# is the absolute outermost layer in Starlette's LIFO middleware stack.
+# The two @app.middleware decorators above (limit_request_size, limit_response_size)
+# call app.add_middleware() internally when the module loads; they must be INNER
+# to SecurityHeadersMiddleware so their early-return 413/500 responses also receive
+# HSTS, X-Content-Type-Options, CSP, etc.  Placing this call last guarantees it.
+app.add_middleware(SecurityHeadersMiddleware)
 
 # ─── ROUTES ───────────────────────────────────────────────────────────────────
 
