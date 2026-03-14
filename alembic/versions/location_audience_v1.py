@@ -20,18 +20,10 @@ def upgrade() -> None:
     conn = op.get_bind()
     inspector = sa.inspect(conn)
 
-    # Check if enum types already exist in database
-    enum_types = inspector.get_enums()
-    enum_names = [e['name'] for e in enum_types]
-
-    # Create enum types if they don't exist (using SQLAlchemy DDL)
-    if 'userlocationassignmenttype' not in enum_names:
-        assignment_type = sa.dialects.postgresql.ENUM('MANUAL', 'GEOFENCE', name='userlocationassignmenttype')
-        assignment_type.create(conn)
-
-    if 'userlocationstatus' not in enum_names:
-        status_type = sa.dialects.postgresql.ENUM('ACTIVE', 'INACTIVE', name='userlocationstatus')
-        status_type.create(conn)
+    # Create enum types if they don't exist (using raw SQL with IF NOT EXISTS for safety)
+    # This prevents "type already exists" errors in CI/CD where migration may run multiple times
+    op.execute("CREATE TYPE IF NOT EXISTS userlocationassignmenttype AS ENUM ('MANUAL', 'GEOFENCE')")
+    op.execute("CREATE TYPE IF NOT EXISTS userlocationstatus AS ENUM ('ACTIVE', 'INACTIVE')")
 
     # Check if tables already exist
     existing_tables = inspector.get_table_names()
