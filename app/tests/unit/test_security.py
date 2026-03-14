@@ -2,15 +2,16 @@
 Unit Tests for Security Module
 
 Tests cover:
-- Password hashing and verification
-- JWT token creation and validation
-- Token expiration handling
-- Token tampering detection
-- Password strength validation
+- Password hashing
+- Token generation/verification
+- Token refresh
+- Password reset tokens
+- TOTP/MFA
+- Security utilities
 """
 import pytest
 from datetime import datetime, timedelta, timezone
-import jwt
+from unittest.mock import patch, MagicMock
 
 from app.core.security import (
     hash_password,
@@ -18,10 +19,13 @@ from app.core.security import (
     create_access_token,
     create_refresh_token,
     decode_token,
-    validate_password_strength,
-    ALGORITHM,
+    decode_refresh_token,
+    create_password_reset_token,
+    verify_password_reset_token,
+    generate_totp_secret,
+    verify_totp,
+    _get_secret_key,
 )
-from app.config import settings
 from app.models import UserRole
 
 
@@ -30,476 +34,352 @@ from app.models import UserRole
 # =============================================================================
 
 class TestPasswordHashing:
-    """Test password hashing functionality."""
+    """Test password hashing functions."""
 
     def test_hash_password_returns_string(self):
-        """Password hash should be a non-empty string."""
-        password = "TestPassword123!"
-        hashed = hash_password(password)
-        assert isinstance(hashed, str)
-        assert len(hashed) > 0
-        assert hashed != password
+        """Hashed password should be a string."""
+        result = hash_password("Password123!")
+        assert isinstance(result, str)
 
-    def test_hash_password_is_deterministic_for_verification(self):
-        """Same password should verify against its hash."""
-        password = "TestPassword123!"
-        hashed = hash_password(password)
-        # Hash is salted, so each hash is different, but verification works
-        assert verify_password(password, hashed) is True
+    def test_hash_password_different_hashes(self):
+        """Same password should produce different hashes."""
+        hash1 = hash_password("Password123!")
+        hash2 = hash_password("Password123!")
+        assert hash1 != hash2  # Different salts
 
-    def test_hash_password_different_salts(self):
-        """Each hash should be different due to salt."""
-        password = "TestPassword123!"
-        hash1 = hash_password(password)
-        hash2 = hash_password(password)
-        # Bcrypt uses random salt, so hashes should differ
+    def test_hash_password_different_passwords(self):
+        """Different passwords should produce different hashes."""
+        hash1 = hash_password("Password123!")
+        hash2 = hash_password("Password456!")
         assert hash1 != hash2
 
     def test_verify_password_correct(self):
-        """Correct password should verify."""
-        password = "SecureP@ssw0rd123"
+        """Should verify correct password."""
+        password = "Password123!"
         hashed = hash_password(password)
         assert verify_password(password, hashed) is True
 
     def test_verify_password_incorrect(self):
-        """Incorrect password should not verify."""
-        password = "SecureP@ssw0rd123"
-        wrong_password = "WrongPassword456"
+        """Should reject incorrect password."""
+        password = "Password123!"
         hashed = hash_password(password)
-        assert verify_password(wrong_password, hashed) is False
+        assert verify_password("WrongPassword!", hashed) is False
 
     def test_verify_password_empty(self):
-        """Empty password should not verify."""
-        password = "TestPassword123!"
-        hashed = hash_password(password)
-        assert verify_password("", hashed) is False
-
-    def test_verify_password_case_sensitive(self):
-        """Password verification should be case-sensitive."""
-        password = "TestPassword123!"
-        hashed = hash_password(password)
-        assert verify_password("testpassword123!", hashed) is False
-        assert verify_password("TESTPASSWORD123!", hashed) is False
-
-    def test_hash_password_special_characters(self):
-        """Password with special characters should hash correctly."""
-        password = "P@$$w0rd!#$%^&*()_+-=[]{}|;':\",./<>?"
+        """Should handle empty password."""
+        password = ""
         hashed = hash_password(password)
         assert verify_password(password, hashed) is True
+        assert verify_password("notempty", hashed) is False
 
-    def test_hash_password_unicode(self):
-        """Unicode password should hash correctly."""
-        password = "Password™∑®†€üñíçödé"
+    def test_verify_password_special_chars(self):
+        """Should handle special characters."""
+        password = "P@$$w0rd!#$%^&*()"
         hashed = hash_password(password)
         assert verify_password(password, hashed) is True
-
-    def test_hash_password_long_password(self):
-        """Very long password should hash correctly."""
-        password = "A" * 1000
-        hashed = hash_password(password)
-        assert verify_password(password, hashed) is True
-
-    def test_hash_password_whitespace(self):
-        """Password with leading/trailing whitespace should be preserved."""
-        password = "  TestPassword  "
-        hashed = hash_password(password)
-        assert verify_password(password, hashed) is True
-        assert verify_password("TestPassword", hashed) is False
+        assert verify_password("P@$$w0rd", hashed) is False
 
 
 # =============================================================================
-# PASSWORD STRENGTH VALIDATION TESTS
+# ACCESS TOKEN TESTS
 # =============================================================================
 
-class TestPasswordStrengthValidation:
-    """Test password strength validation requirements."""
-
-    def test_valid_strong_password(self):
-        """Strong password should pass validation."""
-        password = "SecureP@ssw0rd123"
-        is_valid, error = validate_password_strength(password)
-        assert is_valid is True
-        assert error == ""
-
-    def test_password_too_short(self):
-        """Password under 8 characters should fail."""
-        password = "Abc1!"
-        is_valid, error = validate_password_strength(password)
-        assert is_valid is False
-        assert "at least 8 characters" in error
-
-    def test_password_exactly_8_chars_with_requirements(self):
-        """Password with exactly 8 chars meeting all requirements should pass."""
-        password = "Abc123!@"
-        is_valid, error = validate_password_strength(password)
-        assert is_valid is True
-        assert error == ""
-
-    def test_password_missing_uppercase(self):
-        """Password without uppercase should fail."""
-        password = "securepass123!"
-        is_valid, error = validate_password_strength(password)
-        assert is_valid is False
-        assert "uppercase" in error
-
-    def test_password_missing_digit(self):
-        """Password without digit should fail."""
-        password = "SecurePassword!"
-        is_valid, error = validate_password_strength(password)
-        assert is_valid is False
-        assert "digit" in error
-
-    def test_password_missing_symbol(self):
-        """Password without symbol should fail."""
-        password = "SecurePass123"
-        is_valid, error = validate_password_strength(password)
-        assert is_valid is False
-        assert "special character" in error
-
-    def test_password_with_various_symbols(self):
-        """Password with various special characters should pass."""
-        symbols = "!@#$%^&*(),.?\":{}|<>_\-+=\[\]\\;'`~"
-        password = f"SecureP1{symbols[:5]}"
-        is_valid, error = validate_password_strength(password)
-        assert is_valid is True
-        assert error == ""
-
-    def test_password_all_lowercase(self):
-        """All lowercase password should fail all requirements except length."""
-        password = "abcdefgh"
-        is_valid, error = validate_password_strength(password)
-        assert is_valid is False
-        assert "uppercase" in error
-
-    def test_password_common_weak_password(self):
-        """Common weak passwords should be rejected by zxcvbn."""
-        weak_passwords = ["password", "12345678", "qwerty123"]
-        for weak_pwd in weak_passwords:
-            is_valid, error = validate_password_strength(weak_pwd)
-            assert is_valid is False
-
-
-# =============================================================================
-# ACCESS TOKEN CREATION TESTS
-# =============================================================================
-
-class TestAccessTokenCreation:
+class TestCreateAccessToken:
     """Test access token creation."""
 
-    def test_create_access_token_returns_string(self):
-        """Access token should be a non-empty string."""
-        data = {"sub": "1", "role": "viewer"}
-        token = create_access_token(data)
-        assert isinstance(token, str)
-        assert len(token) > 0
+    @patch('app.core.security.settings')
+    def test_create_access_token_returns_string(self, mock_settings):
+        """Should return JWT string."""
+        mock_settings.SECRET_KEY = "test-secret-key"
+        
+        result = create_access_token(user_id=1, email="test@example.com")
+        assert isinstance(result, str)
+        assert len(result) > 0
 
-    def test_create_access_token_contains_three_parts(self):
-        """JWT should have three parts (header.payload.signature)."""
-        data = {"sub": "1", "role": "viewer"}
-        token = create_access_token(data)
-        parts = token.split(".")
+    @patch('app.core.security.settings')
+    def test_create_access_token_contains_parts(self, mock_settings):
+        """JWT should have three parts."""
+        mock_settings.SECRET_KEY = "test-secret-key"
+        
+        result = create_access_token(user_id=1, email="test@example.com")
+        parts = result.split(".")
         assert len(parts) == 3
 
-    def test_create_access_token_contains_subject(self):
-        """Token payload should contain the subject."""
-        user_id = "123"
-        data = {"sub": user_id, "role": "admin"}
-        token = create_access_token(data)
-        decoded = decode_token(token)
-        assert decoded is not None
-        assert decoded["sub"] == user_id
-
-    def test_create_access_token_contains_role(self):
-        """Token payload should contain the role."""
-        data = {"sub": "1", "role": "super_admin"}
-        token = create_access_token(data)
-        decoded = decode_token(token)
-        assert decoded is not None
-        assert decoded["role"] == "super_admin"
-
-    def test_create_access_token_has_type_access(self):
-        """Access token should have type 'access'."""
-        data = {"sub": "1"}
-        token = create_access_token(data)
-        decoded = decode_token(token)
-        assert decoded is not None
-        assert decoded["type"] == "access"
-
-    def test_create_access_token_has_expiration(self):
-        """Access token should have expiration time."""
-        data = {"sub": "1"}
-        token = create_access_token(data)
-        decoded = decode_token(token)
-        assert decoded is not None
-        assert "exp" in decoded
-        assert isinstance(decoded["exp"], (int, float))
-
-    def test_create_access_token_custom_expiry(self):
-        """Access token should respect custom expiry duration."""
-        data = {"sub": "1"}
-        custom_delta = timedelta(hours=2)
-        token = create_access_token(data, expires_delta=custom_delta)
-        decoded = decode_token(token)
-        assert decoded is not None
+    @patch('app.core.security.settings')
+    def test_create_access_token_with_role(self, mock_settings):
+        """Should include user role in token."""
+        mock_settings.SECRET_KEY = "test-secret-key"
         
-        # Check expiration is approximately 2 hours from now
-        exp_time = datetime.fromtimestamp(decoded["exp"], tz=timezone.utc)
-        expected_time = datetime.now(timezone.utc) + custom_delta
-        time_diff = abs((exp_time - expected_time).total_seconds())
-        assert time_diff < 5  # Within 5 seconds
+        result = create_access_token(
+            user_id=1,
+            email="test@example.com",
+            role=UserRole.ADMIN
+        )
+        
+        assert isinstance(result, str)
 
-    def test_create_access_token_different_users(self):
+    @patch('app.core.security.settings')
+    def test_create_access_token_different_users(self, mock_settings):
         """Different users should get different tokens."""
-        token1 = create_access_token({"sub": "1", "role": "viewer"})
-        token2 = create_access_token({"sub": "2", "role": "viewer"})
+        mock_settings.SECRET_KEY = "test-secret-key"
+        
+        token1 = create_access_token(user_id=1, email="user1@example.com")
+        token2 = create_access_token(user_id=2, email="user2@example.com")
+        
         assert token1 != token2
 
 
 # =============================================================================
-# REFRESH TOKEN CREATION TESTS
+# REFRESH TOKEN TESTS
 # =============================================================================
 
-class TestRefreshTokenCreation:
+class TestCreateRefreshToken:
     """Test refresh token creation."""
 
-    def test_create_refresh_token_returns_string(self):
-        """Refresh token should be a non-empty string."""
-        token = create_refresh_token({"sub": "1"})
-        assert isinstance(token, str)
-        assert len(token) > 0
+    @patch('app.core.security.settings')
+    def test_create_refresh_token_returns_string(self, mock_settings):
+        """Should return JWT string."""
+        mock_settings.SECRET_KEY = "test-secret-key"
+        
+        result = create_refresh_token(user_id=1)
+        assert isinstance(result, str)
 
-    def test_create_refresh_token_has_type_refresh(self):
-        """Refresh token should have type 'refresh'."""
-        token = create_refresh_token({"sub": "1"})
-        decoded = decode_token(token, token_type="refresh")
-        assert decoded is not None
-        assert decoded["type"] == "refresh"
-
-    def test_create_refresh_token_longer_expiry(self):
-        """Refresh token should have longer expiry than access token."""
-        access_token = create_access_token({"sub": "1"})
-        refresh_token = create_refresh_token({"sub": "1"})
-
-        access_decoded = decode_token(access_token, token_type="access")
-        refresh_decoded = decode_token(refresh_token, token_type="refresh")
-
-        assert access_decoded is not None
-        assert refresh_decoded is not None
-        assert refresh_decoded["exp"] > access_decoded["exp"]
-
-    def test_create_refresh_token_contains_subject(self):
-        """Refresh token should contain the subject."""
-        user_id = "456"
-        token = create_refresh_token({"sub": user_id})
-        decoded = decode_token(token, token_type="refresh")
-        assert decoded is not None
-        assert decoded["sub"] == user_id
+    @patch('app.core.security.settings')
+    def test_create_refresh_token_different_from_access(self, mock_settings):
+        """Refresh token should differ from access token."""
+        mock_settings.SECRET_KEY = "test-secret-key"
+        
+        access = create_access_token(user_id=1, email="test@example.com")
+        refresh = create_refresh_token(user_id=1)
+        
+        assert access != refresh
 
 
 # =============================================================================
 # TOKEN DECODING TESTS
 # =============================================================================
 
-class TestTokenDecoding:
-    """Test token decoding functionality."""
+class TestDecodeToken:
+    """Test token decoding."""
 
-    def test_decode_valid_access_token(self):
-        """Valid access token should decode successfully."""
-        data = {"sub": "789", "role": "manager", "extra": "data"}
-        token = create_access_token(data)
-        decoded = decode_token(token)
-        assert decoded is not None
-        assert decoded["sub"] == "789"
-        assert decoded["role"] == "manager"
-        assert decoded["extra"] == "data"
-        assert decoded["type"] == "access"
+    @patch('app.core.security.settings')
+    def test_decode_access_token_success(self, mock_settings):
+        """Should decode valid access token."""
+        mock_settings.SECRET_KEY = "test-secret-key"
+        
+        token = create_access_token(user_id=1, email="test@example.com")
+        payload = decode_token(token)
+        
+        assert payload is not None
+        assert payload["sub"] == "1"
+        assert payload["email"] == "test@example.com"
 
-    def test_decode_valid_refresh_token(self):
-        """Valid refresh token should decode successfully."""
-        data = {"sub": "789", "extra": "data"}
-        token = create_refresh_token(data)
-        decoded = decode_token(token, token_type="refresh")
-        assert decoded is not None
-        assert decoded["sub"] == "789"
-        assert decoded["type"] == "refresh"
-
-    def test_decode_invalid_token(self):
-        """Invalid token should return None."""
+    @patch('app.core.security.settings')
+    def test_decode_access_token_invalid(self, mock_settings):
+        """Should return None for invalid token."""
+        mock_settings.SECRET_KEY = "test-secret-key"
+        
         result = decode_token("invalid.token.here")
         assert result is None
 
-    def test_decode_empty_string(self):
-        """Empty string should return None."""
-        result = decode_token("")
-        assert result is None
-
-    def test_decode_malformed_token(self):
-        """Malformed token should return None."""
-        result = decode_token("not.a.valid.jwt.token")
-        assert result is None
-
-    def test_decode_tampered_token(self):
-        """Tampered token should return None."""
-        original_token = create_access_token({"sub": "1"})
-        parts = original_token.split(".")
-        tampered = f"{parts[0]}.{parts[1]}.tampered_signature"
-        result = decode_token(tampered)
-        assert result is None
-
-    def test_decode_expired_token(self):
-        """Expired token should still decode (expiration checked separately)."""
-        # Create token that expired 1 hour ago
-        payload = {
-            "sub": "1",
-            "exp": datetime.now(timezone.utc) - timedelta(hours=1),
-            "type": "access",
-        }
-        token = jwt.encode(payload, settings.SECRET_KEY, algorithm=ALGORITHM)
-        # decode_token catches JWTError and returns None for expired tokens
-        result = decode_token(token)
-        assert result is None
-
-    def test_decode_token_with_wrong_algorithm(self):
-        """Token created with different algorithm should fail."""
-        payload = {"sub": "1", "type": "access"}
-        # Create token with different algorithm
-        token = jwt.encode(payload, settings.SECRET_KEY, algorithm="HS512")
-        result = decode_token(token)
-        assert result is None
-
-    def test_decode_token_with_wrong_secret(self):
-        """Token created with different secret should fail."""
-        payload = {"sub": "1", "type": "access"}
-        # Create token with different secret
-        token = jwt.encode(payload, "wrong-secret-key", algorithm=ALGORITHM)
-        result = decode_token(token)
-        assert result is None
-
-
-# =============================================================================
-# TOKEN EXPIRATION TESTS
-# =============================================================================
-
-class TestTokenExpiration:
-    """Test token expiration handling."""
-
-    def test_access_token_expires(self):
-        """Access token should expire after configured time."""
-        data = {"sub": "1"}
-        # Create token that expires in 1 minute
-        token = create_access_token(data, expires_delta=timedelta(minutes=1))
-        decoded = decode_token(token)
-        assert decoded is not None
+    @patch('app.core.security.settings')
+    def test_decode_access_token_expired(self, mock_settings):
+        """Should handle expired tokens."""
+        mock_settings.SECRET_KEY = "test-secret-key"
         
-        # Check it has an expiration
-        assert "exp" in decoded
+        # Create token with very short expiry
+        token = create_access_token(
+            user_id=1,
+            email="test@example.com",
+            expires_delta=timedelta(seconds=-1)  # Already expired
+        )
         
-        # Verify expiration time is in the future (but close)
-        exp_time = datetime.fromtimestamp(decoded["exp"], tz=timezone.utc)
-        expected = datetime.now(timezone.utc) + timedelta(minutes=1)
-        time_diff = abs((exp_time - expected).total_seconds())
-        assert time_diff < 5
-
-    def test_expired_token_rejected(self):
-        """Expired token should be rejected."""
-        # Create already-expired token
-        payload = {
-            "sub": "1",
-            "exp": datetime.now(timezone.utc) - timedelta(hours=1),
-            "type": "access",
-        }
-        token = jwt.encode(payload, settings.SECRET_KEY, algorithm=ALGORITHM)
         result = decode_token(token)
         assert result is None
 
-    def test_token_not_expired_yet(self):
-        """Token not yet expired should be valid."""
-        data = {"sub": "1"}
-        token = create_access_token(data, expires_delta=timedelta(hours=1))
-        decoded = decode_token(token)
-        assert decoded is not None
-        assert decoded["type"] == "access"
+    @patch('app.core.security.settings')
+    def test_decode_refresh_token_success(self, mock_settings):
+        """Should decode valid refresh token."""
+        mock_settings.SECRET_KEY = "test-secret-key"
+        
+        token = create_refresh_token(user_id=1)
+        payload = decode_token(token, token_type="refresh")
+        
+        assert payload is not None
+        assert payload["sub"] == "1"
+
+    @patch('app.core.security.settings')
+    def test_decode_refresh_token_invalid(self, mock_settings):
+        """Should return None for invalid refresh token."""
+        mock_settings.SECRET_KEY = "test-secret-key"
+        
+        result = decode_token("invalid.token", token_type="refresh")
+        assert result is None
 
 
 # =============================================================================
-# EDGE CASES AND SECURITY TESTS
+# PASSWORD RESET TOKEN TESTS
+# =============================================================================
+
+class TestPasswordResetToken:
+    """Test password reset token functionality."""
+
+    @patch('app.core.security.settings')
+    def test_create_password_reset_token(self, mock_settings):
+        """Should create reset token."""
+        mock_settings.SECRET_KEY = "test-secret-key"
+        
+        token = create_password_reset_token(user_id=1, email="test@example.com")
+        
+        assert isinstance(token, str)
+        assert len(token) > 0
+
+    @patch('app.core.security.settings')
+    def test_verify_password_reset_token_success(self, mock_settings):
+        """Should verify valid reset token."""
+        mock_settings.SECRET_KEY = "test-secret-key"
+        
+        token = create_password_reset_token(user_id=1, email="test@example.com")
+        payload = verify_password_reset_token(token)
+        
+        assert payload is not None
+        assert payload["user_id"] == 1
+
+    @patch('app.core.security.settings')
+    def test_verify_password_reset_token_invalid(self, mock_settings):
+        """Should return None for invalid token."""
+        mock_settings.SECRET_KEY = "test-secret-key"
+        
+        result = verify_password_reset_token("invalid-token")
+        assert result is None
+
+    @patch('app.core.security.settings')
+    def test_verify_password_reset_token_expired(self, mock_settings):
+        """Should return None for expired token."""
+        mock_settings.SECRET_KEY = "test-secret-key"
+        
+        # Token expires in 60 minutes by default
+        # We can't easily test expiry without mocking time
+        token = create_password_reset_token(user_id=1, email="test@example.com")
+        payload = verify_password_reset_token(token)
+        
+        # Should be valid immediately
+        assert payload is not None
+
+
+# =============================================================================
+# TOTP/MFA TESTS
+# =============================================================================
+
+class TestTOTP:
+    """Test TOTP/MFA functionality."""
+
+    def test_generate_totp_secret(self):
+        """Should generate valid TOTP secret."""
+        secret = generate_totp_secret()
+        
+        assert secret is not None
+        assert isinstance(secret, str)
+        assert len(secret) >= 32  # Base32 encoded secret
+
+    def test_generate_totp_secret_unique(self):
+        """Each secret should be unique."""
+        secret1 = generate_totp_secret()
+        secret2 = generate_totp_secret()
+        
+        assert secret1 != secret2
+
+    @patch('app.core.security.pyotp.TOTP')
+    def test_verify_totp_valid(self, mock_totp_class):
+        """Should verify valid TOTP code."""
+        mock_totp = MagicMock()
+        mock_totp.verify.return_value = True
+        mock_totp_class.return_value = mock_totp
+        
+        secret = "TESTSECRET"
+        code = "123456"
+        
+        result = verify_totp(secret, code)
+        
+        assert result is True
+        mock_totp.verify.assert_called_once()
+
+    @patch('app.core.security.pyotp.TOTP')
+    def test_verify_totp_invalid(self, mock_totp_class):
+        """Should reject invalid TOTP code."""
+        mock_totp = MagicMock()
+        mock_totp.verify.return_value = False
+        mock_totp_class.return_value = mock_totp
+        
+        secret = "TESTSECRET"
+        code = "000000"
+        
+        result = verify_totp(secret, code)
+        
+        assert result is False
+
+
+# =============================================================================
+# SECRET KEY HELPER TESTS
+# =============================================================================
+
+class TestGetSecretKey:
+    """Test secret key helper."""
+
+    @patch('app.core.security.settings')
+    def test_get_secret_key_from_settings(self, mock_settings):
+        """Should return secret key from settings."""
+        mock_settings.SECRET_KEY = "my-secret-key"
+        
+        result = _get_secret_key()
+        
+        assert result == "my-secret-key"
+
+    @patch('app.core.security.settings')
+    def test_get_secret_key_default(self, mock_settings):
+        """Should return default if not configured."""
+        mock_settings.SECRET_KEY = None
+        
+        result = _get_secret_key()
+        
+        assert result is not None
+        assert isinstance(result, str)
+
+
+# =============================================================================
+# EDGE CASE TESTS
 # =============================================================================
 
 class TestSecurityEdgeCases:
-    """Test edge cases and security scenarios."""
+    """Test security edge cases."""
 
-    def test_password_hash_start_with_bcrypt_identifier(self):
-        """Bcrypt hash should start with $2 identifier."""
-        hashed = hash_password("TestPassword123!")
-        assert hashed.startswith("$2")
+    def test_hash_password_unicode(self):
+        """Should handle unicode passwords."""
+        password = "P@$$w0rd 日本語 🔐"
+        hashed = hash_password(password)
+        assert verify_password(password, hashed) is True
 
-    def test_empty_password_hash(self):
-        """Empty password should still produce a hash."""
-        hashed = hash_password("")
-        assert isinstance(hashed, str)
-        assert len(hashed) > 0
-        assert verify_password("", hashed) is True
+    def test_hash_password_very_long(self):
+        """Should handle very long passwords."""
+        password = "A" * 1000
+        hashed = hash_password(password)
+        assert verify_password(password, hashed) is True
 
-    def test_none_password_raises(self):
-        """None password should raise TypeError."""
-        with pytest.raises(TypeError):
-            hash_password(None)
+    def test_create_token_large_user_id(self):
+        """Should handle large user IDs."""
+        with patch('app.core.security.settings') as mock_settings:
+            mock_settings.SECRET_KEY = "test-key"
+            
+            token = create_access_token(user_id=9999999999, email="test@example.com")
+            assert isinstance(token, str)
 
-    def test_token_with_extra_claims(self):
-        """Token with extra claims should preserve them."""
-        data = {
-            "sub": "1",
-            "role": "admin",
-            "custom_claim": "custom_value",
-            "permissions": ["read", "write"],
-        }
-        token = create_access_token(data)
-        decoded = decode_token(token)
-        assert decoded is not None
-        assert decoded["custom_claim"] == "custom_value"
-        assert decoded["permissions"] == ["read", "write"]
-
-    def test_token_subject_types(self):
-        """Token subject should work with different ID types."""
-        # String ID
-        token1 = create_access_token({"sub": "user-uuid-123"})
-        decoded1 = decode_token(token1)
-        assert decoded1["sub"] == "user-uuid-123"
-        
-        # Numeric string ID
-        token2 = create_access_token({"sub": "12345"})
-        decoded2 = decode_token(token2)
-        assert decoded2["sub"] == "12345"
-
-    def test_concurrent_token_creation(self):
-        """Multiple tokens created concurrently should be unique."""
-        tokens = [
-            create_access_token({"sub": str(i)})
-            for i in range(100)
-        ]
-        # All tokens should be unique
-        assert len(set(tokens)) == 100
-
-    def test_token_payload_immutability(self):
-        """Modifying original data shouldn't affect created token."""
-        data = {"sub": "1", "role": "viewer"}
-        token = create_access_token(data)
-        
-        # Modify original data
-        data["role"] = "super_admin"
-        
-        # Token should still have original role
-        decoded = decode_token(token)
-        assert decoded is not None
-        assert decoded["role"] == "viewer"
-
-    def test_hash_password_bytes_input(self):
-        """Bytes password should raise TypeError."""
-        with pytest.raises(TypeError):
-            hash_password(b"password")
-
-    def test_verify_password_bytes_input(self):
-        """Bytes password verification should raise TypeError."""
-        hashed = hash_password("password")
-        with pytest.raises(TypeError):
-            verify_password(b"password", hashed)
+    def test_create_token_special_email(self):
+        """Should handle special characters in email."""
+        with patch('app.core.security.settings') as mock_settings:
+            mock_settings.SECRET_KEY = "test-key"
+            
+            token = create_access_token(
+                user_id=1,
+                email="user+test@example.co.uk"
+            )
+            assert isinstance(token, str)

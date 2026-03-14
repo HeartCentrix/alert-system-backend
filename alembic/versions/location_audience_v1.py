@@ -20,24 +20,31 @@ def upgrade() -> None:
     conn = op.get_bind()
     inspector = sa.inspect(conn)
 
-    # Create enum types if they don't exist (use checkfirst=True)
-    assignment_type = sa.dialects.postgresql.ENUM('MANUAL', 'GEOFENCE', name='userlocationassignmenttype')
-    assignment_type.create(conn, checkfirst=True)
-    
-    status_type = sa.dialects.postgresql.ENUM('ACTIVE', 'INACTIVE', name='userlocationstatus')
-    status_type.create(conn, checkfirst=True)
+    # Check if enum types already exist in database
+    enum_types = inspector.get_enums()
+    enum_names = [e['name'] for e in enum_types]
+
+    # Create enum types if they don't exist (using SQLAlchemy DDL)
+    if 'userlocationassignmenttype' not in enum_names:
+        assignment_type = sa.dialects.postgresql.ENUM('MANUAL', 'GEOFENCE', name='userlocationassignmenttype')
+        assignment_type.create(conn)
+
+    if 'userlocationstatus' not in enum_names:
+        status_type = sa.dialects.postgresql.ENUM('ACTIVE', 'INACTIVE', name='userlocationstatus')
+        status_type.create(conn)
 
     # Check if tables already exist
     existing_tables = inspector.get_table_names()
-    
+
     # Create user_locations table if it doesn't exist
     if 'user_locations' not in existing_tables:
         op.create_table('user_locations',
             sa.Column('id', sa.Integer(), nullable=False),
             sa.Column('user_id', sa.Integer(), nullable=False),
             sa.Column('location_id', sa.Integer(), nullable=False),
-            sa.Column('assignment_type', sa.Enum('MANUAL', 'GEOFENCE', name='userlocationassignmenttype'), nullable=False),
-            sa.Column('status', sa.Enum('ACTIVE', 'INACTIVE', name='userlocationstatus'), nullable=False),
+            # Enums already created above, use create_type=False to prevent duplicate creation
+            sa.Column('assignment_type', sa.Enum('MANUAL', 'GEOFENCE', name='userlocationassignmenttype', create_type=False), nullable=False),
+            sa.Column('status', sa.Enum('ACTIVE', 'INACTIVE', name='userlocationstatus', create_type=False), nullable=False),
             sa.Column('detected_latitude', sa.Float(), nullable=True),
             sa.Column('detected_longitude', sa.Float(), nullable=True),
             sa.Column('distance_from_center_miles', sa.Float(), nullable=True),
@@ -54,7 +61,7 @@ def upgrade() -> None:
         op.create_index(op.f('ix_user_locations_id'), 'user_locations', ['id'], unique=False)
         op.create_index(op.f('ix_user_locations_user_id'), 'user_locations', ['user_id'], unique=False)
         op.create_index(op.f('ix_user_locations_location_id'), 'user_locations', ['location_id'], unique=False)
-    
+
     # Create user_location_history table if it doesn't exist
     if 'user_location_history' not in existing_tables:
         op.create_table('user_location_history',
@@ -63,9 +70,10 @@ def upgrade() -> None:
             sa.Column('location_id', sa.Integer(), nullable=False),
             sa.Column('user_location_id', sa.Integer(), nullable=True),
             sa.Column('action', sa.String(length=50), nullable=False),
-            sa.Column('assignment_type', sa.Enum('MANUAL', 'GEOFENCE', name='userlocationassignmenttype'), nullable=True),
-            sa.Column('previous_status', sa.Enum('ACTIVE', 'INACTIVE', name='userlocationstatus'), nullable=True),
-            sa.Column('new_status', sa.Enum('ACTIVE', 'INACTIVE', name='userlocationstatus'), nullable=True),
+            # Enums already created above, use create_type=False to prevent duplicate creation
+            sa.Column('assignment_type', sa.Enum('MANUAL', 'GEOFENCE', name='userlocationassignmenttype', create_type=False), nullable=True),
+            sa.Column('previous_status', sa.Enum('ACTIVE', 'INACTIVE', name='userlocationstatus', create_type=False), nullable=True),
+            sa.Column('new_status', sa.Enum('ACTIVE', 'INACTIVE', name='userlocationstatus', create_type=False), nullable=True),
             sa.Column('triggered_by_user_id', sa.Integer(), nullable=True),
             sa.Column('reason', sa.Text(), nullable=True),
             sa.Column('detected_latitude', sa.Float(), nullable=True),
@@ -101,19 +109,19 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_user_location_history_location_id'), table_name='user_location_history')
     op.drop_index(op.f('ix_user_location_history_user_id'), table_name='user_location_history')
     op.drop_index(op.f('ix_user_location_history_id'), table_name='user_location_history')
-    
+
     op.drop_index(op.f('ix_user_locations_location_id'), table_name='user_locations')
     op.drop_index(op.f('ix_user_locations_user_id'), table_name='user_locations')
     op.drop_index(op.f('ix_user_locations_id'), table_name='user_locations')
-    
+
     # Drop tables
     op.drop_table('user_location_history')
     op.drop_table('user_locations')
-    
-    # Drop enum types
+
+    # Drop enum types (using SQLAlchemy DDL)
     sa.Enum(name='userlocationassignmenttype').drop(op.get_bind())
     sa.Enum(name='userlocationstatus').drop(op.get_bind())
-    
+
     # Remove latitude/longitude from users table
     op.drop_column('users', 'longitude')
     op.drop_column('users', 'latitude')

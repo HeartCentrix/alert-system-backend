@@ -1,333 +1,466 @@
 """
-Unit Tests for Messaging Services
+Unit Tests for Messaging Service
 
 Tests cover:
+- Check-in link helpers
 - Twilio SMS service
-- Twilio Voice service
-- AWS SES Email service
-- Webhook services (Slack, Teams)
+- Twilio voice calls
+- Email service (SES)
+- Error handling
 - Mock mode behavior
 """
 import pytest
-from unittest.mock import MagicMock, patch, call
-import httpx
+from unittest.mock import MagicMock, patch
 
 from app.services.messaging import (
+    build_checkin_message,
+    build_checkin_email_html,
     TwilioService,
     EmailService,
-    WebhookService,
-    twilio_service,
-    email_service,
-    webhook_service,
+    _escape_xml,
 )
+
+
+# =============================================================================
+# CHECK-IN LINK HELPER TESTS
+# =============================================================================
+
+class TestBuildCheckinMessage:
+    """Test check-in message building."""
+
+    def test_build_checkin_message_no_deadline(self):
+        """Message without deadline should work."""
+        result = build_checkin_message(
+            notification_message="Are you okay?",
+            checkin_url="https://example.com/checkin/abc123"
+        )
+
+        assert "Are you okay?" in result
+        assert "SAFETY CHECK-IN REQUIRED" in result
+        assert "https://example.com/checkin/abc123" in result
+        assert "Click here to respond" in result
+
+    def test_build_checkin_message_with_deadline(self):
+        """Message with deadline should include time."""
+        result = build_checkin_message(
+            notification_message="Emergency alert",
+            checkin_url="https://example.com/checkin/xyz",
+            deadline_minutes=30
+        )
+
+        assert "Emergency alert" in result
+        assert "within 30 minutes" in result
+        assert "SAFETY CHECK-IN REQUIRED" in result
+
+    def test_build_checkin_message_empty_message(self):
+        """Empty message should still build check-in prompt."""
+        result = build_checkin_message(
+            notification_message="",
+            checkin_url="https://example.com/checkin"
+        )
+
+        assert "SAFETY CHECK-IN REQUIRED" in result
+        assert "Click here to respond" in result
+
+
+class TestBuildCheckinEmailHtml:
+    """Test HTML email building."""
+
+    def test_build_checkin_email_html_basic(self):
+        """Should add check-in button to HTML."""
+        base_html = "<html><body><p>Test</p></body></html>"
+        result = build_checkin_email_html(
+            base_html=base_html,
+            checkin_url="https://example.com/checkin"
+        )
+
+        assert "Safety Check-In Required" in result
+        assert "https://example.com/checkin" in result
+        assert "I'm Safe" in result
+        assert "</body>" in result
+
+    def test_build_checkin_email_html_with_deadline(self):
+        """Should include deadline in HTML."""
+        base_html = "<html><body><p>Test</p></body></html>"
+        result = build_checkin_email_html(
+            base_html=base_html,
+            checkin_url="https://example.com/checkin",
+            deadline_minutes=15
+        )
+
+        assert "within 15 minutes" in result
+
+    def test_build_checkin_email_html_no_body_tag(self):
+        """Should handle HTML without body tag."""
+        base_html = "<div>No body tag</div>"
+        result = build_checkin_email_html(
+            base_html=base_html,
+            checkin_url="https://example.com/checkin"
+        )
+
+        assert "Safety Check-In Required" in result
+        assert "https://example.com/checkin" in result
+
+
+# =============================================================================
+# XML ESCAPE TESTS
+# =============================================================================
+
+class TestEscapeXml:
+    """Test XML escaping for TwiML."""
+
+    def test_escape_ampersand(self):
+        """Should escape ampersands."""
+        assert _escape_xml("A & B") == "A &amp; B"
+
+    def test_escape_less_than(self):
+        """Should escape less than."""
+        assert _escape_xml("5 < 10") == "5 &lt; 10"
+
+    def test_escape_greater_than(self):
+        """Should escape greater than."""
+        assert _escape_xml("10 > 5") == "10 &gt; 5"
+
+    def test_escape_quotes(self):
+        """Should escape quotes."""
+        assert _escape_xml('Say "Hello"') == 'Say &quot;Hello&quot;'
+
+    def test_escape_multiple(self):
+        """Should escape multiple special chars."""
+        result = _escape_xml("5 < 10 & 10 > 5")
+        assert "&lt;" in result
+        assert "&amp;" in result
+        assert "&gt;" in result
+
+    def test_escape_no_special_chars(self):
+        """Should return unchanged if no special chars."""
+        assert _escape_xml("Hello World") == "Hello World"
+
+    def test_escape_none_input(self):
+        """Should handle None input."""
+        assert _escape_xml(None) == ""
 
 
 # =============================================================================
 # TWILIO SERVICE TESTS
 # =============================================================================
 
-class TestTwilioService:
-    """Test Twilio service functionality."""
+class TestTwilioServiceInit:
+    """Test Twilio service initialization."""
 
-    def test_send_sms_success(self, mock_twilio: MagicMock):
-        """SMS sending should succeed with valid data."""
-        result = twilio_service.send_sms("+1234567890", "Test message")
+    @patch('app.services.messaging.settings')
+    @patch('app.services.messaging.Client')
+    def test_init_with_credentials(self, mock_client_class, mock_settings):
+        """Should initialize with valid credentials."""
+        mock_settings.TWILIO_ACCOUNT_SID = "AC123"
+        mock_settings.TWILIO_AUTH_TOKEN = "token123"
+
+        service = TwilioService()
+
+        assert service.client is not None
+        mock_client_class.assert_called_once()
+
+    @patch('app.services.messaging.settings')
+    def test_init_without_credentials(self, mock_settings):
+        """Should handle missing credentials gracefully."""
+        mock_settings.TWILIO_ACCOUNT_SID = None
+        mock_settings.TWILIO_AUTH_TOKEN = None
+
+        service = TwilioService()
+
+        assert service.client is None
+
+
+class TestTwilioSms:
+    """Test Twilio SMS sending."""
+
+    @patch('app.services.messaging.settings')
+    def test_send_sms_mock_mode(self, mock_settings):
+        """Should mock SMS when no credentials."""
+        mock_settings.TWILIO_ACCOUNT_SID = None
+
+        service = TwilioService()
+        result = service.send_sms("+1234567890", "Test message")
+
+        assert result["mock"] is True
         assert result["status"] == "sent"
-        assert "sid" in result
-        mock_twilio.send_sms.assert_called_once_with("+1234567890", "Test message")
+        assert "MOCK" in result["sid"]
 
-    def test_send_sms_empty_phone(self, mock_twilio: MagicMock):
-        """SMS to empty phone should handle gracefully."""
-        result = twilio_service.send_sms("", "Test message")
-        # Should still attempt to send (Twilio will validate)
-        mock_twilio.send_sms.assert_called_once_with("", "Test message")
+    @patch('app.services.messaging.settings')
+    @patch('app.services.messaging.Client')
+    def test_send_sms_real_mode(self, mock_client_class, mock_settings):
+        """Should send real SMS with credentials."""
+        mock_settings.TWILIO_ACCOUNT_SID = "AC123"
+        mock_settings.TWILIO_AUTH_TOKEN = "token"
+        mock_settings.TWILIO_FROM_NUMBER = "+1987654321"
 
-    def test_send_sms_long_message(self, mock_twilio: MagicMock):
-        """Long SMS messages should be sent."""
-        long_message = "A" * 1600  # 10 SMS segments
-        result = twilio_service.send_sms("+1234567890", long_message)
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = MagicMock(
+            sid="SM123",
+            status="sent"
+        )
+        mock_client_class.return_value = mock_client
+
+        service = TwilioService()
+        result = service.send_sms("+1234567890", "Test message")
+
+        assert result["sid"] == "SM123"
         assert result["status"] == "sent"
-        mock_twilio.send_sms.assert_called_once_with("+1234567890", long_message)
+        mock_client.messages.create.assert_called_once()
 
-    def test_send_sms_special_characters(self, mock_twilio: MagicMock):
-        """SMS with special characters should be sent."""
-        message = "Test message with special chars: @#$%^&*() üñíçödé"
-        result = twilio_service.send_sms("+1234567890", message)
-        assert result["status"] == "sent"
+    @patch('app.services.messaging.settings')
+    @patch('app.services.messaging.Client')
+    def test_send_sms_error_handling(self, mock_client_class, mock_settings):
+        """Should handle SMS errors gracefully."""
+        mock_settings.TWILIO_ACCOUNT_SID = "AC123"
+        mock_settings.TWILIO_AUTH_TOKEN = "token"
 
-    def test_send_sms_unicode(self, mock_twilio: MagicMock):
-        """SMS with unicode emojis should be sent."""
-        message = "🚨 Emergency Alert! ⚠️ Stay safe! 🏠"
-        result = twilio_service.send_sms("+1234567890", message)
-        assert result["status"] == "sent"
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = Exception("API Error")
+        mock_client_class.return_value = mock_client
 
-    def test_send_sms_international_number(self, mock_twilio: MagicMock):
-        """SMS to international numbers should work."""
-        international_numbers = [
-            "+441234567890",  # UK
-            "+33123456789",   # France
-            "+811234567890",  # Japan
-            "+61123456789",   # Australia
-        ]
-        for number in international_numbers:
-            result = twilio_service.send_sms(number, "Test")
-            assert result["status"] == "sent"
+        service = TwilioService()
+        result = service.send_sms("+1234567890", "Test")
 
-    def test_voice_call_success(self, mock_twilio: MagicMock):
-        """Voice call should succeed."""
-        result = twilio_service.make_voice_call("+1234567890", "Emergency message")
+        assert result["status"] == "failed"
+        assert "error" in result
+
+
+class TestTwilioVoice:
+    """Test Twilio voice calls."""
+
+    @patch('app.services.messaging.settings')
+    def test_make_voice_call_mock_mode(self, mock_settings):
+        """Should mock voice call when no credentials."""
+        mock_settings.TWILIO_ACCOUNT_SID = None
+
+        service = TwilioService()
+        result = service.make_voice_call("+1234567890", "Emergency alert")
+
+        assert result["mock"] is True
         assert result["status"] == "initiated"
-        assert "sid" in result
-        mock_twilio.make_voice_call.assert_called_once()
 
-    def test_voice_call_twiml_format(self, mock_twilio: MagicMock):
-        """Voice call should generate correct TwiML."""
-        message = "This is a test emergency message"
-        twilio_service.make_voice_call("+1234567890", message)
-        
-        # Check TwiML was generated
-        call_args = mock_twilio.make_voice_call.call_args
-        # TwiML should contain the message
-        assert message in str(call_args)
-        # TwiML should contain Gather action
-        assert "Gather" in str(call_args)
-        assert "Press 1" in str(call_args)
-        assert "Press 2" in str(call_args)
+    @patch('app.services.messaging.settings')
+    @patch('app.services.messaging.Client')
+    def test_make_voice_call_real_mode(self, mock_client_class, mock_settings):
+        """Should make real voice call with credentials."""
+        mock_settings.TWILIO_ACCOUNT_SID = "AC123"
+        mock_settings.TWILIO_AUTH_TOKEN = "token"
+        mock_settings.TWILIO_FROM_NUMBER = "+1987654321"
+        mock_settings.BACKEND_URL = "https://api.example.com"
 
-    def test_twilio_service_without_credentials(self):
-        """Twilio service should use mock mode without credentials."""
-        with patch("app.services.messaging.settings") as mock_settings:
-            mock_settings.TWILIO_ACCOUNT_SID = ""
-            mock_settings.TWILIO_AUTH_TOKEN = ""
-            
-            service = TwilioService()
-            result = service.send_sms("+1234567890", "Test")
-            
-            assert result["mock"] is True
-            assert result["sid"] == "MOCK_SID"
+        mock_client = MagicMock()
+        mock_client.calls.create.return_value = MagicMock(
+            sid="CA123",
+            status="in-progress"
+        )
+        mock_client_class.return_value = mock_client
 
-    def test_twilio_error_handling(self):
-        """Twilio service should handle errors gracefully."""
-        with patch("app.services.messaging.settings") as mock_settings:
-            mock_settings.TWILIO_ACCOUNT_SID = "test"
-            mock_settings.TWILIO_AUTH_TOKEN = "test"
-            
-            with patch("app.services.messaging.Client") as mock_client:
-                mock_client.return_value.messages.create.side_effect = Exception("API Error")
-                
-                service = TwilioService()
-                result = service.send_sms("+1234567890", "Test")
-                
-                assert result["status"] == "failed"
-                assert "error" in result
+        service = TwilioService()
+        result = service.make_voice_call("+1234567890", "Press 1 if safe")
+
+        assert result["sid"] == "CA123"
+        assert result["status"] == "in-progress"
+        mock_client.calls.create.assert_called_once()
+
+    @patch('app.services.messaging.settings')
+    @patch('app.services.messaging.Client')
+    def test_make_voice_call_twiml_format(self, mock_client_class, mock_settings):
+        """Should generate correct TwiML."""
+        mock_settings.TWILIO_ACCOUNT_SID = "AC123"
+        mock_settings.TWILIO_AUTH_TOKEN = "token"
+        mock_settings.TWILIO_FROM_NUMBER = "+1987654321"
+        mock_settings.BACKEND_URL = "https://api.example.com"
+
+        mock_client = MagicMock()
+        mock_client.calls.create.return_value = MagicMock(sid="CA123")
+        mock_client_class.return_value = mock_client
+
+        service = TwilioService()
+        service.make_voice_call("+1234567890", "Test message")
+
+        # Verify TwiML was passed
+        call_args = mock_client.calls.create.call_args
+        assert "twiml" in call_args.kwargs
+        assert "<?xml" in call_args.kwargs["twiml"]
+        assert "<Response>" in call_args.kwargs["twiml"]
+        assert "<Say" in call_args.kwargs["twiml"]
+        assert "<Gather" in call_args.kwargs["twiml"]
+
+    @patch('app.services.messaging.settings')
+    @patch('app.services.messaging.Client')
+    def test_make_voice_call_error_handling(self, mock_client_class, mock_settings):
+        """Should handle voice call errors gracefully."""
+        mock_settings.TWILIO_ACCOUNT_SID = "AC123"
+        mock_settings.TWILIO_AUTH_TOKEN = "token"
+
+        mock_client = MagicMock()
+        mock_client.calls.create.side_effect = Exception("Call failed")
+        mock_client_class.return_value = mock_client
+
+        service = TwilioService()
+        result = service.make_voice_call("+1234567890", "Test")
+
+        assert result["status"] == "failed"
+        assert "error" in result
 
 
 # =============================================================================
 # EMAIL SERVICE TESTS
 # =============================================================================
 
-class TestEmailService:
-    """Test Email (SES) service functionality."""
+class TestEmailServiceInit:
+    """Test Email service initialization."""
 
-    def test_send_email_success(self, mock_email_service: MagicMock):
-        """Email sending should succeed with valid data."""
-        result = email_service.send_email(
-            "test@example.com",
-            "Test Subject",
-            "Test body content"
-        )
-        assert result["status"] == "sent"
-        assert "message_id" in result
-        mock_email_service.send_email.assert_called_once()
+    @patch('app.services.messaging.settings')
+    @patch('app.services.messaging.boto3')
+    def test_init_with_credentials(self, mock_boto3, mock_settings):
+        """Should initialize with valid AWS credentials."""
+        mock_settings.AWS_ACCESS_KEY_ID = "AKIA123"
+        mock_settings.AWS_SECRET_ACCESS_KEY = "secret"
+        mock_settings.AWS_REGION = "us-east-1"
 
-    def test_send_email_with_html(self, mock_email_service: MagicMock):
-        """Email with custom HTML should be sent."""
-        html_body = "<html><body><h1>Test</h1></body></html>"
-        result = email_service.send_email(
-            "test@example.com",
-            "Test Subject",
-            "Plain text",
-            body_html=html_body
-        )
-        assert result["status"] == "sent"
+        service = EmailService()
 
-    def test_send_email_multiple_recipients_separate_calls(self, mock_email_service: MagicMock):
-        """Multiple recipients require separate calls."""
-        recipients = ["user1@example.com", "user2@example.com", "user3@example.com"]
-        for recipient in recipients:
-            email_service.send_email(recipient, "Subject", "Body")
-        
-        assert mock_email_service.send_email.call_count == 3
+        assert service.client is not None
+        mock_boto3.client.assert_called_once()
 
-    def test_send_email_special_characters(self, mock_email_service: MagicMock):
-        """Email with special characters should be sent."""
-        subject = "Test Subject with special chars: @#$%^&*"
-        body = "Body with unicode: üñíçödé"
-        result = email_service.send_email("test@example.com", subject, body)
-        assert result["status"] == "sent"
+    @patch('app.services.messaging.settings')
+    def test_init_without_credentials(self, mock_settings):
+        """Should handle missing credentials gracefully."""
+        mock_settings.AWS_ACCESS_KEY_ID = None
+        mock_settings.AWS_SECRET_ACCESS_KEY = None
 
-    def test_send_password_reset_email(self, mock_email_service: MagicMock):
-        """Password reset email should be formatted correctly."""
-        result = email_service.send_password_reset_email(
-            "test@example.com",
-            "reset_token_123",
-            "John Doe"
-        )
-        assert result["status"] == "sent"
-        mock_email_service.send_password_reset_email.assert_called_once_with(
-            "test@example.com", "reset_token_123", "John Doe"
+        service = EmailService()
+
+        assert service.client is None
+
+
+class TestEmailServiceSend:
+    """Test Email sending."""
+
+    @patch('app.services.messaging.settings')
+    def test_send_email_mock_mode(self, mock_settings):
+        """Should mock email when no AWS credentials."""
+        mock_settings.AWS_ACCESS_KEY_ID = None
+
+        service = EmailService()
+        result = service.send_email(
+            to="test@example.com",
+            subject="Test Subject",
+            body_text="Test body"
         )
 
-    def test_send_welcome_email(self, mock_email_service: MagicMock):
-        """Welcome email should be formatted correctly."""
-        result = email_service.send_welcome_email(
-            "test@example.com",
-            "John Doe",
-            "TempPassword123!"
-        )
+        assert result["mock"] is True
         assert result["status"] == "sent"
-        mock_email_service.send_welcome_email.assert_called_once_with(
-            "test@example.com", "John Doe", "TempPassword123!"
+        assert "MOCK" in result["message_id"]
+
+    @patch('app.services.messaging.settings')
+    @patch('app.services.messaging.boto3')
+    def test_send_email_real_mode(self, mock_boto3, mock_settings):
+        """Should send real email with AWS credentials."""
+        mock_settings.AWS_ACCESS_KEY_ID = "AKIA123"
+        mock_settings.AWS_SECRET_ACCESS_KEY = "secret"
+        mock_settings.AWS_REGION = "us-east-1"
+        mock_settings.SES_FROM_NAME = "Test App"
+        mock_settings.SES_FROM_EMAIL = "noreply@example.com"
+
+        mock_client = MagicMock()
+        mock_client.send_email.return_value = {"MessageId": "MSG123"}
+        mock_boto3.client.return_value = mock_client
+
+        service = EmailService()
+        result = service.send_email(
+            to="user@example.com",
+            subject="Test",
+            body_text="Hello"
         )
 
-    def test_send_email_invalid_email_format(self, mock_email_service: MagicMock):
-        """Invalid email format should still attempt to send (SES validates)."""
-        result = email_service.send_email(
-            "invalid-email",
-            "Subject",
-            "Body"
+        assert result["message_id"] == "MSG123"
+        assert result["status"] == "sent"
+        mock_client.send_email.assert_called_once()
+
+    @patch('app.services.messaging.settings')
+    @patch('app.services.messaging.boto3')
+    def test_send_email_with_html(self, mock_boto3, mock_settings):
+        """Should send HTML email when provided."""
+        mock_settings.AWS_ACCESS_KEY_ID = "AKIA123"
+        mock_settings.AWS_SECRET_ACCESS_KEY = "secret"
+
+        mock_client = MagicMock()
+        mock_client.send_email.return_value = {"MessageId": "MSG123"}
+        mock_boto3.client.return_value = mock_client
+
+        service = EmailService()
+        service.send_email(
+            to="user@example.com",
+            subject="Test",
+            body_text="Plain text",
+            body_html="<html><body>HTML</body></html>"
         )
-        # Service attempts to send, SES will reject
-        assert result["status"] == "sent"  # Mock mode always succeeds
 
-    def test_email_service_without_credentials(self):
-        """Email service should use mock mode without AWS credentials."""
-        with patch("app.services.messaging.settings") as mock_settings:
-            mock_settings.AWS_ACCESS_KEY_ID = ""
-            mock_settings.AWS_SECRET_ACCESS_KEY = ""
-            
-            service = EmailService()
-            result = service.send_email("test@example.com", "Subject", "Body")
-            
-            assert result["mock"] is True
-            assert result["message_id"] == "MOCK_EMAIL_ID"
+        # Verify HTML was included
+        call_args = mock_client.send_email.call_args
+        message = call_args.kwargs["Message"]
+        assert "Html" in message["Body"]
 
-    def test_text_to_html_conversion(self):
-        """Plain text should be converted to HTML."""
-        text = "Line 1\n\nLine 2\n\nLine 3"
-        html = email_service._text_to_html(text)
-        
-        assert "<html>" in html
-        assert "<p>Line 1</p>" in html
-        assert "<p>Line 2</p>" in html
-        assert "<p>Line 3</p>" in html
+    @patch('app.services.messaging.settings')
+    @patch('app.services.messaging.boto3')
+    def test_send_email_error_handling(self, mock_boto3, mock_settings):
+        """Should handle email errors gracefully."""
+        mock_settings.AWS_ACCESS_KEY_ID = "AKIA123"
+        mock_settings.AWS_SECRET_ACCESS_KEY = "secret"
 
-    def test_send_email_empty_body(self, mock_email_service: MagicMock):
-        """Email with empty body should be sent."""
-        result = email_service.send_email("test@example.com", "Subject", "")
-        assert result["status"] == "sent"
+        mock_client = MagicMock()
+        mock_client.send_email.side_effect = Exception("SES Error")
+        mock_boto3.client.return_value = mock_client
 
-    def test_send_email_very_long_body(self, mock_email_service: MagicMock):
-        """Email with very long body should be sent."""
-        long_body = "A" * 100000  # 100KB
-        result = email_service.send_email("test@example.com", "Subject", long_body)
-        assert result["status"] == "sent"
-
-
-# =============================================================================
-# WEBHOOK SERVICE TESTS
-# =============================================================================
-
-class TestWebhookService:
-    """Test Webhook service (Slack/Teams) functionality."""
-
-    def test_send_slack_success(self, mock_webhook_service: MagicMock):
-        """Slack webhook should succeed."""
-        result = webhook_service.send_slack(
-            "https://hooks.slack.com/test",
-            "Test message",
-            "Test Title"
+        service = EmailService()
+        result = service.send_email(
+            to="user@example.com",
+            subject="Test",
+            body_text="Hello"
         )
-        assert result["status"] == "sent"
-        mock_webhook_service.send_slack.assert_called_once()
 
-    def test_send_slack_with_blocks(self, mock_webhook_service: MagicMock):
-        """Slack message should use blocks format."""
-        webhook_service.send_slack("https://hooks.slack.com/test", "Message", "Title")
-        
-        call_args = mock_webhook_service.send_slack.call_args
-        # Should contain header block with emoji
-        assert "🚨" in str(call_args)
+        assert result["status"] == "failed"
+        assert "error" in result
 
-    def test_send_teams_success(self, mock_webhook_service: MagicMock):
-        """Teams webhook should succeed."""
-        result = webhook_service.send_teams(
-            "https://outlook.office.com/webhook/test",
-            "Test message",
-            "Test Title"
+
+class TestEmailServicePasswordReset:
+    """Test password reset email."""
+
+    @patch('app.services.messaging.settings')
+    def test_send_password_reset_email_mock(self, mock_settings):
+        """Should send password reset email."""
+        mock_settings.AWS_ACCESS_KEY_ID = None
+        mock_settings.FRONTEND_URL = "https://app.example.com"
+
+        service = EmailService()
+        result = service.send_password_reset_email(
+            to="user@example.com",
+            reset_token="token123",
+            user_name="John Doe"
         )
+
+        assert result["mock"] is True
         assert result["status"] == "sent"
-        mock_webhook_service.send_teams.assert_called_once()
 
-    def test_send_teams_message_card_format(self, mock_webhook_service: MagicMock):
-        """Teams message should use MessageCard format."""
-        webhook_service.send_teams("https://webhook.test", "Message", "Title")
-        
-        call_args = mock_webhook_service.send_teams.call_args
-        # Should contain MessageCard type
-        assert "MessageCard" in str(call_args)
-        assert "themeColor" in str(call_args)
+    @patch('app.services.messaging.settings')
+    def test_send_password_reset_email_contains_url(self, mock_settings):
+        """Should include reset URL in email."""
+        mock_settings.AWS_ACCESS_KEY_ID = None
+        mock_settings.FRONTEND_URL = "https://app.example.com"
 
-    def test_send_slack_without_webhook_url(self, mock_webhook_service: MagicMock):
-        """Slack without URL should use default or mock."""
-        with patch("app.services.messaging.settings") as mock_settings:
-            mock_settings.SLACK_DEFAULT_WEBHOOK_URL = ""
-            
-            result = webhook_service.send_slack("", "Message", "Title")
-            # In mock mode, returns mock status
-            assert "status" in result
+        service = EmailService()
+        result = service.send_password_reset_email(
+            to="user@example.com",
+            reset_token="abc123",
+            user_name="Jane"
+        )
 
-    def test_send_teams_without_webhook_url(self, mock_webhook_service: MagicMock):
-        """Teams without URL should use default or mock."""
-        with patch("app.services.messaging.settings") as mock_settings:
-            mock_settings.TEAMS_DEFAULT_WEBHOOK_URL = ""
-            
-            result = webhook_service.send_teams("", "Message", "Title")
-            assert "status" in result
-
-    def test_send_slack_error_handling(self):
-        """Slack webhook should handle errors gracefully."""
-        with patch("httpx.post") as mock_post:
-            mock_post.side_effect = httpx.HTTPError("Connection error")
-            
-            service = WebhookService()
-            result = service.send_slack("https://hooks.slack.com/test", "Message", "Title")
-            
-            assert result["status"] == "failed"
-            assert "error" in result
-
-    def test_send_teams_error_handling(self):
-        """Teams webhook should handle errors gracefully."""
-        with patch("httpx.post") as mock_post:
-            mock_post.side_effect = httpx.HTTPError("Connection error")
-            
-            service = WebhookService()
-            result = service.send_teams("https://webhook.test", "Message", "Title")
-            
-            assert result["status"] == "failed"
-            assert "error" in result
-
-    def test_send_slack_http_error_status(self):
-        """Slack webhook should handle HTTP error status codes."""
-        with patch("httpx.post") as mock_post:
-            mock_response = MagicMock()
-            mock_response.status_code = 500
-            mock_post.return_value = mock_response
-            
-            service = WebhookService()
-            result = service.send_slack("https://hooks.slack.com/test", "Message", "Title")
-            
-            assert result["status"] == "failed"
+        # Reset URL should be in the email
+        assert "https://app.example.com/reset-password" in str(result)
+        assert "abc123" in str(result)
 
 
 # =============================================================================
@@ -335,49 +468,29 @@ class TestWebhookService:
 # =============================================================================
 
 class TestMessagingIntegration:
-    """Test messaging service integration scenarios."""
+    """Test messaging service integration."""
 
-    def test_send_all_channels(self, mock_twilio, mock_email_service, mock_webhook_service):
-        """Sending to all channels should work."""
+    @patch('app.services.messaging.settings')
+    def test_all_services_mock_mode(self, mock_settings):
+        """All services should work in mock mode."""
+        mock_settings.TWILIO_ACCOUNT_SID = None
+        mock_settings.AWS_ACCESS_KEY_ID = None
+
+        twilio = TwilioService()
+        email = EmailService()
+
         # SMS
-        sms_result = twilio_service.send_sms("+1234567890", "Alert!")
-        assert sms_result["status"] == "sent"
-
-        # Email
-        email_result = email_service.send_email("test@example.com", "Alert!", "Body")
-        assert email_result["status"] == "sent"
+        sms_result = twilio.send_sms("+1234567890", "Test")
+        assert sms_result["mock"] is True
 
         # Voice
-        voice_result = twilio_service.make_voice_call("+1234567890", "Alert!")
-        assert voice_result["status"] == "initiated"
+        voice_result = twilio.make_voice_call("+1234567890", "Test")
+        assert voice_result["mock"] is True
 
-        # Slack
-        slack_result = webhook_service.send_slack("https://hooks.slack.com/test", "Alert!", "Title")
-        assert slack_result["status"] == "sent"
-
-        # Teams
-        teams_result = webhook_service.send_teams("https://webhook.test", "Alert!", "Title")
-        assert teams_result["status"] == "sent"
-
-    def test_send_to_multiple_recipients(self, mock_email_service: MagicMock):
-        """Sending to multiple recipients should work."""
-        recipients = [
-            "user1@example.com",
-            "user2@example.com",
-            "user3@example.com",
-        ]
-        
-        results = []
-        for recipient in recipients:
-            result = email_service.send_email(recipient, "Alert", "Body")
-            results.append(result)
-        
-        assert all(r["status"] == "sent" for r in results)
-        assert mock_email_service.send_email.call_count == 3
-
-    def test_message_truncation_not_needed(self, mock_twilio: MagicMock):
-        """Long messages should be sent without truncation."""
-        # Twilio handles segmentation automatically
-        long_message = "A" * 2000
-        result = twilio_service.send_sms("+1234567890", long_message)
-        assert result["status"] == "sent"
+        # Email
+        email_result = email.send_email(
+            to="test@example.com",
+            subject="Test",
+            body_text="Test"
+        )
+        assert email_result["mock"] is True

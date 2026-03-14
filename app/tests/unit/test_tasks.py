@@ -576,3 +576,253 @@ class TestUpdateNotificationStatus:
         
         db_session.refresh(notification)
         assert notification.status == NotificationStatus.PARTIALLY_SENT
+
+
+# =============================================================================
+# SMS/EMAIL/VOICE NOTIFICATION TESTS
+# =============================================================================
+
+class TestSendToChannelSms:
+    """Test SMS channel sending."""
+
+    def test_sms_sent_success(
+        self, db_session, test_user, mock_twilio
+    ):
+        """SMS should be sent successfully when user has phone."""
+        # Create notification
+        notification = Notification(
+            title="Test Alert",
+            message="Test message",
+            channels=["sms"],
+            target_all=False,
+            status=NotificationStatus.SENT,
+            created_by_id=test_user.id,
+        )
+        db_session.add(notification)
+        db_session.commit()
+
+        # Create delivery log
+        delivery_log = DeliveryLog(
+            notification_id=notification.id,
+            user_id=test_user.id,
+            channel="sms",
+            status=DeliveryStatus.PENDING,
+        )
+        db_session.add(delivery_log)
+        db_session.commit()
+
+        # Send SMS via _send_to_channel
+        _send_to_channel(
+            db=db_session,
+            notification=notification,
+            user=test_user,
+            channel="sms",
+            delivery_log=delivery_log,
+            checkin_url=None,
+        )
+
+        assert delivery_log.status == DeliveryStatus.SENT
+        mock_twilio.send_sms.assert_called_once()
+
+    def test_sms_fails_no_phone(
+        self, db_session, test_user, mock_twilio
+    ):
+        """SMS should fail when user has no phone number."""
+        # Remove phone number
+        test_user.phone = None
+        db_session.commit()
+
+        notification = Notification(
+            title="Test Alert",
+            message="Test message",
+            channels=["sms"],
+            target_all=False,
+            status=NotificationStatus.SENT,
+            created_by_id=test_user.id,
+        )
+        db_session.add(notification)
+        db_session.commit()
+
+        delivery_log = DeliveryLog(
+            notification_id=notification.id,
+            user_id=test_user.id,
+            channel="sms",
+            status=DeliveryStatus.PENDING,
+        )
+        db_session.add(delivery_log)
+        db_session.commit()
+
+        _send_to_channel(
+            db=db_session,
+            notification=notification,
+            user=test_user,
+            channel="sms",
+            delivery_log=delivery_log,
+            checkin_url=None,
+        )
+
+        assert delivery_log.status == DeliveryStatus.FAILED
+        assert delivery_log.error_message == "No phone number"
+        mock_twilio.send_sms.assert_not_called()
+
+
+class TestSendToChannelEmail:
+    """Test email channel sending."""
+
+    def test_email_sent_success(
+        self, db_session, test_user, mock_email_service
+    ):
+        """Email should be sent successfully when user has email."""
+        notification = Notification(
+            title="Test Alert",
+            message="Test message",
+            subject="Test Subject",
+            channels=["email"],
+            target_all=False,
+            status=NotificationStatus.SENT,
+            created_by_id=test_user.id,
+        )
+        db_session.add(notification)
+        db_session.commit()
+
+        delivery_log = DeliveryLog(
+            notification_id=notification.id,
+            user_id=test_user.id,
+            channel="email",
+            status=DeliveryStatus.PENDING,
+        )
+        db_session.add(delivery_log)
+        db_session.commit()
+
+        _send_to_channel(
+            db=db_session,
+            notification=notification,
+            user=test_user,
+            channel="email",
+            delivery_log=delivery_log,
+            checkin_url=None,
+        )
+
+        assert delivery_log.status == DeliveryStatus.SENT
+        mock_email_service.send_email.assert_called_once()
+
+    def test_email_fails_no_email(
+        self, db_session, test_user, mock_email_service
+    ):
+        """Email should fail when user has no email address."""
+        test_user.email = None
+        db_session.commit()
+
+        notification = Notification(
+            title="Test Alert",
+            message="Test message",
+            subject="Test Subject",
+            channels=["email"],
+            target_all=False,
+            status=NotificationStatus.SENT,
+            created_by_id=test_user.id,
+        )
+        db_session.add(notification)
+        db_session.commit()
+
+        delivery_log = DeliveryLog(
+            notification_id=notification.id,
+            user_id=test_user.id,
+            channel="email",
+            status=DeliveryStatus.PENDING,
+        )
+        db_session.add(delivery_log)
+        db_session.commit()
+
+        _send_to_channel(
+            db=db_session,
+            notification=notification,
+            user=test_user,
+            channel="email",
+            delivery_log=delivery_log,
+            checkin_url=None,
+        )
+
+        assert delivery_log.status == DeliveryStatus.FAILED
+        assert delivery_log.error_message == "No email address"
+        mock_email_service.send_email.assert_not_called()
+
+
+class TestSendToChannelVoice:
+    """Test voice call channel sending."""
+
+    def test_voice_call_sent_success(
+        self, db_session, test_user, mock_twilio
+    ):
+        """Voice call should be sent successfully when user has phone."""
+        notification = Notification(
+            title="Test Alert",
+            message="Test message",
+            channels=["voice"],
+            target_all=False,
+            status=NotificationStatus.SENT,
+            created_by_id=test_user.id,
+        )
+        db_session.add(notification)
+        db_session.commit()
+
+        delivery_log = DeliveryLog(
+            notification_id=notification.id,
+            user_id=test_user.id,
+            channel="voice",
+            status=DeliveryStatus.PENDING,
+        )
+        db_session.add(delivery_log)
+        db_session.commit()
+
+        _send_to_channel(
+            db=db_session,
+            notification=notification,
+            user=test_user,
+            channel="voice",
+            delivery_log=delivery_log,
+            checkin_url=None,
+        )
+
+        assert delivery_log.status == DeliveryStatus.SENT
+        mock_twilio.make_voice_call.assert_called_once()
+
+    def test_voice_call_fails_no_phone(
+        self, db_session, test_user, mock_twilio
+    ):
+        """Voice call should fail when user has no phone number."""
+        test_user.phone = None
+        db_session.commit()
+
+        notification = Notification(
+            title="Test Alert",
+            message="Test message",
+            channels=["voice"],
+            target_all=False,
+            status=NotificationStatus.SENT,
+            created_by_id=test_user.id,
+        )
+        db_session.add(notification)
+        db_session.commit()
+
+        delivery_log = DeliveryLog(
+            notification_id=notification.id,
+            user_id=test_user.id,
+            channel="voice",
+            status=DeliveryStatus.PENDING,
+        )
+        db_session.add(delivery_log)
+        db_session.commit()
+
+        _send_to_channel(
+            db=db_session,
+            notification=notification,
+            user=test_user,
+            channel="voice",
+            delivery_log=delivery_log,
+            checkin_url=None,
+        )
+
+        assert delivery_log.status == DeliveryStatus.FAILED
+        assert "No phone number" in delivery_log.error_message
+        mock_twilio.make_voice_call.assert_not_called()

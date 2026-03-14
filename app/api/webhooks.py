@@ -3,6 +3,8 @@ from fastapi.responses import Response, PlainTextResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from typing import Optional, List
+from urllib.parse import parse_qs
+from twilio.request_validator import RequestValidator
 from app.database import get_db
 from app.core.deps import get_current_user
 from app.config import settings
@@ -46,7 +48,6 @@ def _scrub_email(email: str) -> str:
 
 def _log_user_identity(user_id: Optional[int], email: Optional[str]) -> str:
     """Create safe user identity for logging: user_id=12345, email=jo***@example.com"""
-    from typing import Optional
     parts = []
     if user_id is not None:
         parts.append(f"user_id={user_id}")
@@ -55,34 +56,80 @@ def _log_user_identity(user_id: Optional[int], email: Optional[str]) -> str:
     return ", ".join(parts) if parts else "[UNKNOWN]"
 
 
-@router.post("/voice/response")
-def handle_voice_response(
-    request: Request,
-    db: Session = Depends(get_db),
-    From: str = Form(...),
-    To: Optional[str] = Form(None),
-    Called: Optional[str] = Form(None),
-    Digits: Optional[str] = Form(None),
-    CallSid: str = Form(...),
-):
-    """Handle Twilio voice response when user presses 1 or 2.
-
-    This endpoint receives the digit pressed by the user and records their response.
+async def validate_twilio_request(request: Request, body: bytes) -> bool:
+    """Validate that the request actually came from Twilio using X-Twilio-Signature.
 
     Args:
-        From: Caller's phone number (Twilio number in this case)
-        To: Called number (the user's phone)
-        Called: Same as To
-        Digits: Digit pressed (1 = safe, 2 = need help, other = invalid)
-        CallSid: Twilio call SID
+        request: The incoming FastAPI request
+        body: Raw request body bytes (must be read BEFORE form parsing)
+
+    Returns:
+        True if signature is valid, False otherwise
     """
+    if not settings.TWILIO_AUTH_TOKEN:
+        logger.error("TWILIO_AUTH_TOKEN not configured — cannot validate Twilio requests")
+        return False
+
+    validator = RequestValidator(settings.TWILIO_AUTH_TOKEN)
+
+    signature = request.headers.get("X-Twilio-Signature", "")
+    if not signature:
+        logger.warning("Missing X-Twilio-Signature header")
+        return False
+
+    # Reconstruct the public URL that Twilio actually signed.
+    # Behind Railway's reverse proxy, request.url shows http:// internally
+    # but Twilio was given the public https:// URL via BACKEND_URL.
+    if settings.BACKEND_URL:
+        url = settings.BACKEND_URL.rstrip("/") + request.url.path
+        if request.url.query:
+            url += f"?{request.url.query}"
+    else:
+        url = str(request.url)
+
+    # Parse raw body bytes into dict[str, str] for Twilio's validator.
+    # RequestValidator.validate() expects dict, not bytes or raw string.
+    params = {}
+    if body:
+        parsed = parse_qs(body.decode("utf-8"), keep_blank_values=True)
+        params = {k: v[0] for k, v in parsed.items()}
+
+    is_valid = validator.validate(url, params, signature)
+
+    if not is_valid:
+        logger.warning(f"Invalid Twilio signature for URL: {url}")
+
+    return is_valid
+
+
+@router.post("/voice/response")
+async def handle_voice_response(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Handle Twilio voice response when user presses 1 or 2."""
+    # Read raw body FIRST (before any form parsing)
+    body_bytes = await request.body()
+
+    # Validate Twilio signature
+    if not await validate_twilio_request(request, body_bytes):
+        raise HTTPException(status_code=401, detail="Invalid Twilio signature")
+
+    # Parse form data AFTER body read
+    form_data = await request.form()
+    From = form_data.get("From", "")
+    To = form_data.get("To", "")
+    Called = form_data.get("Called", "")
+    Digits = form_data.get("Digits", "")
+    CallSid = form_data.get("CallSid", "")
+
     try:
-        logger.info(f"Voice response received: From={From}, To={To}, Called={Called}, Digits={Digits}, CallSid={CallSid}")
+        logger.info(f"Voice response received: From={_scrub_phone(From)}, To={_scrub_phone(To)}, Digits={Digits}, CallSid={CallSid}")
 
         # Use To or Called parameter to find the user (the phone that received the call)
         # From will be the Twilio number, not the user's number
         user_phone = To or Called
-        
+
         if not user_phone or not user_phone.strip():
             logger.error("No user phone number in voice webhook (To/Called missing)")
             twiml = """<?xml version="1.0" encoding="UTF-8"?>
@@ -92,23 +139,21 @@ def handle_voice_response(
             return Response(content=twiml, media_type="application/xml")
 
         # Normalize phone number for lookup
-        # Twilio sends in E.164 format (+918700600196), but DB might have various formats
         user_phone_clean = user_phone.replace("+", "").replace("-", "").replace(" ", "").replace("(", "").replace(")", "")
-        
+
         # Try multiple lookup strategies
         user = None
-        
+
         # Strategy 1: Direct match (for E.164 format in DB)
         user = db.query(User).filter(User.phone == user_phone).first()
-        
+
         # Strategy 2: Match without + prefix
         if not user:
             user = db.query(User).filter(User.phone == user_phone_clean).first()
-        
+
         # Strategy 3: Match last 10 digits (for local format in DB)
         if not user and len(user_phone_clean) >= 10:
             last_10_digits = user_phone_clean[-10:]
-            # Get all users with phones and check in Python
             all_users_with_phones = db.query(User).filter(User.phone.isnot(None)).all()
             for u in all_users_with_phones:
                 if u.phone:
@@ -116,29 +161,28 @@ def handle_voice_response(
                     if u_clean.endswith(last_10_digits):
                         user = u
                         break
-        
+
         if not user:
             logger.warning(f"Voice response from unknown number: {_scrub_phone(user_phone)}")
-            # Return TwiML acknowledging the response even for unknown users
             twiml = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say>Thank you for your response.</Say>
 </Response>"""
             return Response(content=twiml, media_type="application/xml")
-        
+
         logger.info(f"Voice response matched user: {_log_user_identity(user.id, user.email)} from phone {_scrub_phone(user_phone)}")
-        
-        # Map digits to response type with proper validation
+
+        # Map digits to response type
         response_type = None
         message = ""
-        
+
         if Digits == "1":
             response_type = ResponseType.SAFE
             message = "You are marked as safe."
         elif Digits == "2":
             response_type = ResponseType.NEED_HELP
             message = "Help is on the way."
-        elif Digits is None or Digits == "":
+        elif not Digits:
             logger.warning(f"No digits received for call {CallSid}")
             twiml = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -152,34 +196,33 @@ def handle_voice_response(
   <Say>Invalid option. Please press 1 or 2. Goodbye.</Say>
 </Response>"""
             return Response(content=twiml, media_type="application/xml")
-        
+
         # Find the most recent active notification for this user
-        # (This is the notification they're responding to)
         notification = db.query(Notification).filter(
             Notification.status.in_(['sending', 'sent', 'scheduled'])
         ).order_by(desc(Notification.created_at)).first()
-        
+
         # Record the response
         if notification and response_type:
             response = NotificationResponse(
                 notification_id=notification.id,
                 user_id=user.id,
                 response_type=response_type,
-                channel="voice",
-                metadata={"call_sid": CallSid, "digits": Digits}
+                channel=AlertChannel.VOICE,
+                from_number=From,
             )
             db.add(response)
-            
+
             # Update delivery log if exists
             delivery_log = db.query(DeliveryLog).filter(
                 DeliveryLog.notification_id == notification.id,
                 DeliveryLog.user_id == user.id,
-                DeliveryLog.channel == "voice"
+                DeliveryLog.channel == AlertChannel.VOICE
             ).first()
-            
+
             if delivery_log:
-                delivery_log.status = "delivered"
-            
+                delivery_log.status = DeliveryStatus.DELIVERED
+
             db.commit()
             logger.info(f"Voice response recorded: User {user.id} - {response_type.value} for Notification {notification.id}")
         else:
@@ -188,24 +231,22 @@ def handle_voice_response(
                 user_id=user.id,
                 from_number=From,
                 body=f"Voice response: {Digits}",
-                channel="voice",
-                metadata={"call_sid": CallSid}
+                channel=AlertChannel.VOICE,
             )
             db.add(incoming)
             db.commit()
             logger.info(f"Voice response recorded as incoming message: User {user.id} - {Digits}")
-        
+
         # Return TwiML response
         twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say>{message}</Say>
 </Response>"""
-        
+
         return Response(content=twiml, media_type="application/xml")
-        
+
     except Exception as e:
         logger.error(f"Error processing voice response: {e}", exc_info=True)
-        # Return generic error TwiML
         twiml = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say>An error occurred. Please try again later.</Say>
@@ -214,44 +255,44 @@ def handle_voice_response(
 
 
 @router.post("/voice/status")
-def handle_voice_status(
+async def handle_voice_status(
     request: Request,
     db: Session = Depends(get_db),
-    CallSid: str = Form(...),
-    CallStatus: str = Form(...),
-    From: Optional[str] = Form(None),
 ):
     """Handle Twilio voice call status callbacks.
-    
+
     This endpoint receives status updates about the call (completed, failed, etc.)
-    
-    Args:
-        CallSid: Twilio call SID
-        CallStatus: Current call status
-        From: Caller's phone number
     """
-    logger.info(f"Voice status update: CallSid={CallSid}, Status={CallStatus}, From={From}")
-    
-    # Update delivery log if exists
-    if From:
-        user = db.query(User).filter(User.phone == From).first()
-        if user:
-            # Find the most recent notification to this user
-            delivery_log = db.query(DeliveryLog).filter(
-                DeliveryLog.user_id == user.id,
-                DeliveryLog.channel == "voice",
-                DeliveryLog.metadata['call_sid'].astext == CallSid
-            ).first()
-            
-            if delivery_log:
-                if CallStatus == "completed":
-                    delivery_log.status = "delivered"
-                elif CallStatus in ["failed", "busy", "no-answer"]:
-                    delivery_log.status = "failed"
-                db.commit()
-                logger.info(f"Voice call status updated: {CallStatus} for user {user.id}")
-    
-    # Always return 200 to Twilio (no content needed for status callbacks)
+    # Read raw body FIRST (before any form parsing)
+    body_bytes = await request.body()
+
+    # Validate Twilio signature
+    if not await validate_twilio_request(request, body_bytes):
+        raise HTTPException(status_code=401, detail="Invalid Twilio signature")
+
+    # Parse form data AFTER body read
+    form_data = await request.form()
+    CallSid = form_data.get("CallSid", "")
+    CallStatus = form_data.get("CallStatus", "")
+    From = form_data.get("From", "")
+
+    logger.info(f"Voice status update: CallSid={CallSid}, Status={CallStatus}, From={_scrub_phone(From)}")
+
+    # Update delivery log using external_id (where Twilio CallSid is stored)
+    if CallSid:
+        delivery_log = db.query(DeliveryLog).filter(
+            DeliveryLog.external_id == CallSid
+        ).first()
+
+        if delivery_log:
+            if CallStatus == "completed":
+                delivery_log.status = DeliveryStatus.DELIVERED
+            elif CallStatus in ["failed", "busy", "no-answer"]:
+                delivery_log.status = DeliveryStatus.FAILED
+            db.commit()
+            logger.info(f"Voice call status updated: {CallStatus} for delivery_log {delivery_log.id}")
+
+    # Always return 200 to Twilio
     return Response(status_code=200)
 
 
