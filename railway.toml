@@ -1,0 +1,19 @@
+# Railway Configuration
+# =====================
+# Default configuration - works for all service types
+# For specific service configs, use:
+#   - railway.api.toml (API service with healthcheck)
+#   - railway.worker.toml (Worker service, no healthcheck)
+#   - railway.beat.toml (Beat service, no healthcheck)
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# Healthcheck disabled by default (works for workers/beat)
+# API service should set healthcheckPath via environment or use railway.api.toml
+healthcheckPath = ""
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
