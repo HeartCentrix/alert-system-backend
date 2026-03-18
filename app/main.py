@@ -17,7 +17,7 @@ from app.middleware.security_headers import SecurityHeadersMiddleware
 from app.middleware.request_id import RequestIDMiddleware
 from app.middleware.csrf import CSRFMiddleware
 from sqlalchemy import text
-from app.database import engine, Base, SessionLocal, ensure_column_exists, ensure_mfa_secret_column_expanded
+from app.database import engine, Base, SessionLocal, ensure_column_exists, ensure_mfa_secret_column_expanded, ensure_sso_columns
 from app.models import (
     User, UserRole, AlertChannel, Location, Group, NotificationTemplate,
     Incident, Notification, DeliveryLog, NotificationResponse, IncomingMessage,
@@ -267,6 +267,13 @@ async def lifespan(app: FastAPI):
         ensure_mfa_secret_column_expanded()
     except Exception as e:
         logger.error(f"Failed to expand mfa_secret column: {e}")
+
+    # Ensure SSO-related columns exist (auth_provider, external_id, is_enabled, is_online)
+    logger.info("Ensuring SSO columns exist...")
+    try:
+        ensure_sso_columns()
+    except Exception as e:
+        logger.error(f"Failed to ensure SSO columns: {e}")
 
     # Ensure audit_logs table has user_email column
     logger.info("Ensuring audit_logs table has user_email column...")

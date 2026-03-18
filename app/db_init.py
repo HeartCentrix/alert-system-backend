@@ -79,16 +79,125 @@ def create_all_enums():
 def create_all_tables():
     """Create all database tables using SQLAlchemy Base.metadata.create_all()."""
     logger.info("Creating database tables...")
-    
+
     try:
         # This creates all tables that inherit from Base
         # Tables are created in the correct order based on foreign key dependencies
         Base.metadata.create_all(bind=engine)
         logger.info("All database tables created successfully")
         
+        # Ensure SSO-related columns exist (added in main branch)
+        _ensure_sso_columns()
+
     except Exception as e:
         logger.error(f"Error creating tables: {e}")
         raise
+
+
+def _ensure_sso_columns():
+    """
+    Ensure SSO-related columns exist in the users table.
+    
+    These columns are required for Entra ID and LDAP authentication:
+    - auth_provider: Authentication provider (local, entra, ldap)
+    - external_id: External identity provider ID (Entra OID or LDAP DN)
+    - is_enabled: Account enabled status (separate from is_online presence)
+    - is_online: Real-time online presence indicator
+    """
+    db = SessionLocal()
+    try:
+        # Check and add auth_provider column
+        result = db.execute(
+            text("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'users'
+                AND column_name = 'auth_provider'
+            """)
+        ).fetchone()
+        
+        if not result:
+            db.execute(
+                text("""
+                    ALTER TABLE users
+                    ADD COLUMN auth_provider VARCHAR(20) DEFAULT 'local' NOT NULL
+                """)
+            )
+            logger.info("Added auth_provider column to users table")
+        else:
+            logger.info("Column auth_provider already exists")
+        
+        # Check and add external_id column
+        result = db.execute(
+            text("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'users'
+                AND column_name = 'external_id'
+            """)
+        ).fetchone()
+        
+        if not result:
+            db.execute(
+                text("""
+                    ALTER TABLE users
+                    ADD COLUMN external_id VARCHAR(255)
+                """)
+            )
+            logger.info("Added external_id column to users table")
+        else:
+            logger.info("Column external_id already exists")
+        
+        # Check and add is_enabled column
+        result = db.execute(
+            text("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'users'
+                AND column_name = 'is_enabled'
+            """)
+        ).fetchone()
+        
+        if not result:
+            db.execute(
+                text("""
+                    ALTER TABLE users
+                    ADD COLUMN is_enabled BOOLEAN DEFAULT TRUE NOT NULL
+                """)
+            )
+            logger.info("Added is_enabled column to users table")
+        else:
+            logger.info("Column is_enabled already exists")
+        
+        # Check and add is_online column
+        result = db.execute(
+            text("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'users'
+                AND column_name = 'is_online'
+            """)
+        ).fetchone()
+        
+        if not result:
+            db.execute(
+                text("""
+                    ALTER TABLE users
+                    ADD COLUMN is_online BOOLEAN DEFAULT FALSE
+                """)
+            )
+            logger.info("Added is_online column to users table")
+        else:
+            logger.info("Column is_online already exists")
+        
+        db.commit()
+        
+    except Exception as e:
+        logger.error(f"Error ensuring SSO columns: {e}")
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 def verify_database():
