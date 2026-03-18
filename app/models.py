@@ -109,7 +109,9 @@ class User(Base):
     title = Column(String(100))
     employee_id = Column(String(50), unique=True)
     role = Column(Enum(UserRole), default=UserRole.VIEWER, nullable=False)
-    is_active = Column(Boolean, default=False)  # Tracks real-time online presence
+    is_enabled = Column(Boolean, default=True, nullable=False)  # Account status - admin controlled
+    is_active = Column(Boolean, default=False)  # DEPRECATED: use is_online instead
+    is_online = Column(Boolean, default=False)  # Real-time online presence (heartbeat)
     is_verified = Column(Boolean, default=False)
     mfa_enabled = Column(Boolean, default=False)
     mfa_secret = Column(String(255))  # Increased from 32 to store Fernet-encrypted secrets

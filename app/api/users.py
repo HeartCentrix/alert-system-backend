@@ -198,7 +198,9 @@ def list_users(
     if role:
         query = query.filter(User.role == role)
     if is_active is not None:
-        query = query.filter(User.is_active == is_active)
+        # Backward compatibility: is_active parameter now filters by is_enabled
+        # For online status filtering, use is_online parameter (if added in future)
+        query = query.filter(User.is_enabled == is_active)
 
     total = query.count()
     users = query.order_by(User.first_name).offset((page - 1) * page_size).limit(page_size).all()
@@ -961,16 +963,18 @@ def heartbeat(
 ):
     """
     Heartbeat endpoint to mark user as online.
-    
+
     Called periodically by the frontend (every 30 seconds) to indicate
     the user is still active and online. Updates last_seen_at timestamp
-    and sets is_active to True.
+    and sets is_online to True.
+    
+    Note: This does NOT affect is_enabled (account status).
     """
     now = datetime.now(timezone.utc)
     current_user.last_seen_at = now
-    current_user.is_active = True
+    current_user.is_online = True
     db.commit()
-    
+
     return HeartbeatResponse(
         status="ok",
         message="Heartbeat received",

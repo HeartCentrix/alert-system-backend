@@ -30,13 +30,16 @@ def get_current_user(
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
+    # Check account status (is_enabled), NOT online presence (is_online)
+    # is_enabled = admin-controlled account status (enabled/disabled)
+    # is_online = real-time presence via heartbeat (changes every 30s)
     user = db.query(User).filter(
         User.id == int(user_id),
-        User.is_active == True
+        User.is_enabled == True
     ).first()
 
     if not user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or account disabled")
 
     # Session invalidation: reject tokens issued before the last password change.
     # token_valid_after is set when the user changes/resets their password.

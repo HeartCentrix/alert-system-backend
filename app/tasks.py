@@ -574,19 +574,25 @@ def _update_notification_status(db, notification_id: int):
 
 
 def _get_recipients(db, notification: Notification) -> List[User]:
-    """Build unique recipient list from target_all, groups, and individual users."""
+    """Build unique recipient list from target_all, groups, and individual users.
+    
+    IMPORTANT: Uses is_enabled (account status) NOT is_online (presence).
+    Emergency alerts MUST be sent to all enabled users, even if they're currently offline.
+    """
     recipient_ids = set()
 
     if notification.target_all:
+        # Send to ALL enabled users (not just currently online)
         users = db.query(User).filter(
-            User.is_active == True
+            User.is_enabled == True
         ).all()
-        logger.info(f"Notification {notification.id}: target_all=True, found {len(users)} active users")
+        logger.info(f"Notification {notification.id}: target_all=True, found {len(users)} enabled users")
         return users
 
     for group in notification.target_groups:
         if group.type == "dynamic" and group.dynamic_filter:
-            query = db.query(User).filter(User.is_active == True)
+            # Filter by group criteria, but include all enabled users
+            query = db.query(User).filter(User.is_enabled == True)
             f = group.dynamic_filter
             # Apply filters only if they have non-empty, non-whitespace values
             if f.get("department") and str(f["department"]).strip():
@@ -616,18 +622,20 @@ def _get_recipients(db, notification: Notification) -> List[User]:
         logger.warning(f"Notification {notification.id}: no recipients found - check target_groups and target_users")
         return []
 
+    # Filter by is_enabled (account status) - NOT is_online (presence)
+    # Emergency alerts must reach all enabled users, even if offline
     recipients = db.query(User).filter(
         User.id.in_(recipient_ids),
-        User.is_active == True
+        User.is_enabled == True
     ).all()
-    
-    logger.info(f"Notification {notification.id}: {len(recipients)} active recipients after filtering")
-    
-    # Log users that were filtered out due to is_active=False
+
+    logger.info(f"Notification {notification.id}: {len(recipients)} enabled recipients after filtering")
+
+    # Log users that were filtered out due to is_enabled=False (account disabled)
     filtered_out = recipient_ids - set(u.id for u in recipients)
     if filtered_out:
-        logger.warning(f"Notification {notification.id}: {len(filtered_out)} users were inactive (IDs: {filtered_out})")
-    
+        logger.warning(f"Notification {notification.id}: {len(filtered_out)} users had disabled accounts (IDs: {filtered_out})")
+
     return recipients
 
 
@@ -682,8 +690,8 @@ def check_safety_response_deadlines(self):
                 for member in group.members:
                     recipient_ids.add(member.id)
             if notification.target_all:
-                # For target_all, get all active users
-                all_users = db.query(User).filter(User.is_active == True).all()
+                # For target_all, get all enabled users (not just online)
+                all_users = db.query(User).filter(User.is_enabled == True).all()
                 recipient_ids = {u.id for u in all_users}
 
             # Get users who actually responded
@@ -785,44 +793,47 @@ def check_safety_response_deadlines(self):
 def mark_offline_users_task(self):
     """
     Periodic task to mark users as offline if no heartbeat received within 30 seconds.
-    
+
     This task runs every 30 seconds via Celery Beat and:
-    1. Finds all users with is_active=True
+    1. Finds all users with is_online=True
     2. Checks if their last_seen_at is older than 30 seconds
-    3. Marks them as inactive (is_active=False)
-    
+    3. Marks them as offline (is_online=False)
+
     This ensures the online status reflects real-time presence.
+    
+    IMPORTANT: This does NOT affect account status (is_enabled).
+    Users can still receive alerts even when offline.
     """
     db = SessionLocal()
     try:
         from datetime import timedelta
         from app.models import User
-        
+
         cutoff_time = datetime.now(timezone.utc) - timedelta(seconds=30)
-        
-        # Find users who are active but haven't sent a heartbeat in 30+ seconds
+
+        # Find users who are online but haven't sent a heartbeat in 30+ seconds
         stale_users = db.query(User).filter(
-            User.is_active == True,
+            User.is_online == True,
             User.last_seen_at.isnot(None),
             User.last_seen_at < cutoff_time
         ).all()
-        
+
         if stale_users:
             user_ids = [u.id for u in stale_users]
             logger.info(f"Marking {len(stale_users)} users as offline due to inactivity: {user_ids}")
-            
-            # Mark them as offline
+
+            # Mark them as offline (does NOT affect is_enabled)
             db.execute(
                 update(User)
                 .where(User.id.in_(user_ids))
-                .values(is_active=False)
+                .values(is_online=False)
             )
             db.commit()
-            
+
             logger.info(f"Successfully marked {len(stale_users)} users as offline")
         else:
-            logger.debug("No stale users found - all active users have recent heartbeats")
-            
+            logger.debug("No stale users found - all online users have recent heartbeats")
+
     except Exception as e:
         logger.error(f"Error marking offline users: {e}")
         db.rollback()

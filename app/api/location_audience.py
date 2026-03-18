@@ -119,12 +119,11 @@ def assign_user_to_location(
         )
     
     # Validate user exists
-    user = db.query(User).filter(
-        User.id == data.user_id,
-        User.is_active == True
-    ).first()
+    # Note: We don't check is_active (tracks online presence) or is_verified (SSO flag)
+    # Any existing user can be assigned to a location
+    user = db.query(User).filter(User.id == data.user_id).first()
     if not user:
-        raise HTTPException(status_code=404, detail="User not found or inactive")
+        raise HTTPException(status_code=404, detail="User not found")
     
     # Validate location exists
     location = db.query(Location).filter(

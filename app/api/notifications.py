@@ -654,9 +654,10 @@ async def submit_response(
             raise HTTPException(status_code=401, detail="Invalid token")
         
         user_id = payload.get("sub")
-        user = db.query(User).filter(User.id == int(user_id), User.is_active == True).first()
+        # Check is_enabled (account status) NOT is_online (presence)
+        user = db.query(User).filter(User.id == int(user_id), User.is_enabled == True).first()
         if not user:
-            raise HTTPException(status_code=401, detail="User not found")
+            raise HTTPException(status_code=401, detail="User not found or account disabled")
         
         user_id = user.id
         user_email = user.email

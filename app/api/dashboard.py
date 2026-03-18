@@ -26,7 +26,8 @@ def get_dashboard_stats(
     week_start = now - timedelta(days=7)
 
     total_users = db.query(User).count()
-    online_users = db.query(User).filter(User.is_active == True).count()
+    # Online users = users with recent heartbeat (is_online=True)
+    online_users = db.query(User).filter(User.is_online == True).count()
     total_groups = db.query(Group).filter(Group.is_active == True).count()
     total_locations = db.query(Location).filter(Location.is_active == True).count()
     active_incidents = db.query(Incident).filter(Incident.status == IncidentStatus.ACTIVE).count()
@@ -91,27 +92,16 @@ def get_map_data(
     current_user: User = Depends(get_current_user)
 ):
     """Return location data with employee counts for the audience map.
-    
+
     Access Control:
-        - Viewer role: Can only see locations where they are assigned
-        - Manager/Admin: Can see all locations
+        - ALL users (including VIEWER): Can see ALL active locations
+        - Location assignment only affects alert targeting, not map visibility
     """
     from app.models import UserLocation, UserLocationStatus
-    
-    # Filter locations based on user role
-    if current_user.role == UserRole.VIEWER:
-        # Viewers can only see locations they are assigned to
-        viewer_location_ids = db.query(UserLocation.location_id).filter(
-            UserLocation.user_id == current_user.id,
-            UserLocation.status == UserLocationStatus.ACTIVE
-        )
-        locations = db.query(Location).filter(
-            Location.is_active == True,
-            Location.id.in_(viewer_location_ids)
-        ).all()
-    else:
-        # Admins/Managers can see all locations
-        locations = db.query(Location).filter(Location.is_active == True).all()
+
+    # ALL users can see all active locations on the map
+    # This is intentional for emergency alert systems - everyone needs visibility
+    locations = db.query(Location).filter(Location.is_active == True).all()
 
     result = []
     for loc in locations:
@@ -136,9 +126,10 @@ def get_map_data(
     # Also return users without a location (only for non-viewers)
     unassigned_count = 0
     if current_user.role != UserRole.VIEWER:
+        # Count enabled users (not just online) without location assignment
         unassigned_count = db.query(User).filter(
             User.location_id == None,
-            User.is_active == True
+            User.is_enabled == True
         ).count()
 
     return {

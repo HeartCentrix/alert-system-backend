@@ -635,7 +635,8 @@ async def entra_callback(
         # Update login state
         user.last_login = datetime.now(timezone.utc)
         user.last_seen_at = datetime.now(timezone.utc)
-        user.is_active = True
+        user.is_online = True  # Mark as online on login
+        user.is_enabled = True  # Ensure account is enabled
 
         # Audit log
         db.add(create_audit_log(
@@ -740,7 +741,8 @@ async def ldap_login(
 
     user.last_login = datetime.now(timezone.utc)
     user.last_seen_at = datetime.now(timezone.utc)
-    user.is_active = True
+    user.is_online = True  # Mark as online on login
+    user.is_enabled = True  # Ensure account is enabled
 
     db.add(create_audit_log(
         user_id=user.id,
@@ -792,9 +794,20 @@ async def login(request: LoginRequest, req: Request, response: Response, db: Ses
     # This prevents enumeration attacks and applies across ALL accounts
     if await is_ip_locked(client_ip):
         logger.warning(f"IP lockout for {client_ip}")
+        
+        # Get remaining lockout time
+        from app.services.rate_limiter import _ip_lock_key
+        from app.services.redis import _get_client
+        r = _get_client()
+        ttl_seconds = await r.ttl(_ip_lock_key(client_ip))
+        
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many login attempts. Please try again later.",
+            detail={
+                "message": "Too many login attempts from this IP. Please try again later.",
+                "retry_after_seconds": max(0, ttl_seconds)
+            },
+            headers={"Retry-After": str(max(0, ttl_seconds))}
         )
 
     # STEP 2: Look up user by email (case-insensitive)
@@ -855,9 +868,16 @@ async def login(request: LoginRequest, req: Request, response: Response, db: Ses
                 timestamp=datetime.now(timezone.utc).isoformat(),
             )
 
+        # Calculate remaining attempts before lockout
+        remaining_attempts = max(0, ACCOUNT_LOCKOUT_THRESHOLD - count)
+        
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials"
+            detail={
+                "message": "Invalid credentials",
+                "remaining_attempts": remaining_attempts,
+                "lockout_threshold": ACCOUNT_LOCKOUT_THRESHOLD
+            }
         )
 
     # STEP 7: Check if MFA is required for this user
@@ -967,7 +987,8 @@ async def login(request: LoginRequest, req: Request, response: Response, db: Ses
     # Update last login and mark user as online
     user.last_login = datetime.now(timezone.utc)
     user.last_seen_at = datetime.now(timezone.utc)
-    user.is_active = True
+    user.is_online = True  # Mark as online on login
+    user.is_enabled = True  # Ensure account is enabled
 
     # Audit log
     db.add(create_audit_log(
@@ -1105,8 +1126,8 @@ def logout(
         if rt:
             rt.revoked = True
 
-    # Mark user as offline
-    current_user.is_active = False
+    # Mark user as offline (does NOT affect is_enabled)
+    current_user.is_online = False
     db.commit()
 
     # Clear the HttpOnly cookie
@@ -1884,7 +1905,8 @@ async def verify_mfa_and_complete_login(
     # Mark user as online (same as successful login)
     user.last_login = datetime.now(timezone.utc)
     user.last_seen_at = datetime.now(timezone.utc)
-    user.is_active = True
+    user.is_online = True  # Mark as online
+    user.is_enabled = True  # Ensure account is enabled
 
     # Audit log
     db.add(create_audit_log(
@@ -1967,9 +1989,11 @@ async def verify_recovery_code_and_login(
         )
 
     # Fetch user from database
+    # Check is_enabled (account status) NOT is_online (presence)
+    # Users can use recovery codes even if currently offline
     user = db.query(User).filter(User.id == user_id).first()
-    if not user or not user.is_active:
-        logger.warning(f"User {user_id} not found or inactive")
+    if not user or not user.is_enabled:
+        logger.warning(f"User {user_id} not found or account disabled")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials or recovery code"
