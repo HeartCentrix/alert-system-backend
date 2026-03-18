@@ -1,12 +1,12 @@
 from typing import Annotated, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import func, desc
+from sqlalchemy import func, desc, or_
 from datetime import datetime, timedelta, timezone
 from app.database import get_db
 from app.models import (
     User, Group, Location, Notification, Incident,
-    NotificationStatus, IncidentStatus
+    NotificationStatus, IncidentStatus, UserRole
 )
 from app.schemas import DashboardStats
 from app.core.deps import get_current_user
@@ -27,13 +27,14 @@ def get_dashboard_stats(
     week_start = now - timedelta(days=7)
 
     total_users = db.query(User).count()
-    online_users = db.query(User).filter(User.is_active == True).count()
+    # Online users = users with recent heartbeat (is_online=True)
+    online_users = db.query(User).filter(User.is_online == True).count()
     total_groups = db.query(Group).filter(Group.is_active == True).count()
     total_locations = db.query(Location).filter(Location.is_active == True).count()
     active_incidents = db.query(Incident).filter(Incident.status == IncidentStatus.ACTIVE).count()
 
     # Count notifications that were actually dispatched today
-    # Include: SENT (completed), PARTIALLY_SENT (mixed results), 
+    # Include: SENT (completed), PARTIALLY_SENT (mixed results),
     #          SENDING (in progress), FAILED (attempted but failed)
     # Exclude: DRAFT (never sent), SCHEDULED (not yet sent)
     dispatched_statuses = [
@@ -42,7 +43,7 @@ def get_dashboard_stats(
         NotificationStatus.SENDING,
         NotificationStatus.FAILED
     ]
-    
+
     notifications_today = db.query(Notification).filter(
         Notification.created_at >= today_start,
         Notification.status.in_(dispatched_statuses)
@@ -53,7 +54,19 @@ def get_dashboard_stats(
         Notification.status.in_(dispatched_statuses)
     ).count()
 
-    recent_notifications = db.query(Notification).order_by(
+    # Get recent notifications - filter by role for security
+    # Viewer-role users can only see notifications where they are recipients
+    recent_query = db.query(Notification)
+    if current_user.role == UserRole.VIEWER:
+        recent_query = recent_query.filter(
+            or_(
+                Notification.target_all == True,
+                Notification.target_users.any(User.id == current_user.id),
+                Notification.target_groups.any(Group.members.any(User.id == current_user.id))
+            )
+        )
+    
+    recent_notifications = recent_query.order_by(
         desc(Notification.created_at)
     ).limit(5).all()
 
@@ -79,8 +92,16 @@ def get_map_data(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Return location data with employee counts for the audience map."""
+    """Return location data with employee counts for the audience map.
+
+    Access Control:
+        - ALL users (including VIEWER): Can see ALL active locations
+        - Location assignment only affects alert targeting, not map visibility
+    """
     from app.models import UserLocation, UserLocationStatus
+
+    # ALL users can see all active locations on the map
+    # This is intentional for emergency alert systems - everyone needs visibility
     locations = db.query(Location).filter(Location.is_active == True).all()
 
     result = []
@@ -103,11 +124,14 @@ def get_map_data(
             "user_count": user_count
         })
 
-    # Also return users without a location
-    unassigned_count = db.query(User).filter(
-        User.location_id == None,
-        User.is_active == True
-    ).count()
+    # Also return users without a location (only for non-viewers)
+    unassigned_count = 0
+    if current_user.role != UserRole.VIEWER:
+        # Count enabled users (not just online) without location assignment
+        unassigned_count = db.query(User).filter(
+            User.location_id == None,
+            User.is_enabled == True
+        ).count()
 
     return {
         "locations": result,
@@ -123,9 +147,13 @@ def get_notification_activity(
     current_user: User = Depends(get_current_user)
 ):
     """Daily notification counts for the last N days.
-    
+
     Args:
         days: Number of days to query (1-365, default 7)
+    
+    Access Control:
+        - Viewer role: Can only see activity for notifications they received
+        - Manager/Admin: Can see all notification activity
     """
     # Validate days parameter to prevent unbounded queries (DoS protection)
     if days < 1:
@@ -138,16 +166,29 @@ def get_notification_activity(
             status_code=400,
             detail=f"Days parameter cannot exceed {MAX_ACTIVITY_DAYS}"
         )
-    
+
     from sqlalchemy import cast, Date
     start = datetime.now(timezone.utc) - timedelta(days=days)
 
-    results = db.query(
+    # Build query - filter by role for security
+    query = db.query(
         func.date(Notification.created_at).label("date"),
         func.count(Notification.id).label("count")
     ).filter(
         Notification.created_at >= start
-    ).group_by(
+    )
+    
+    # Viewer-role users can only see activity for their own notifications
+    if current_user.role == UserRole.VIEWER:
+        query = query.filter(
+            or_(
+                Notification.target_all == True,
+                Notification.target_users.any(User.id == current_user.id),
+                Notification.target_groups.any(Group.members.any(User.id == current_user.id))
+            )
+        )
+
+    results = query.group_by(
         func.date(Notification.created_at)
     ).order_by(
         func.date(Notification.created_at)

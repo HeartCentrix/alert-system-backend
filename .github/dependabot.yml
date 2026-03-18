@@ -1,0 +1,56 @@
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      fastapi-core:
+        patterns:
+          - "fastapi"
+          - "uvicorn"
+          - "pydantic"
+          - "pydantic-settings"
+          - "python-multipart"
+          - "starlette"
+      database:
+        patterns:
+          - "sqlalchemy"
+          - "alembic"
+          - "psycopg2-binary"
+      auth-security:
+        patterns:
+          - "PyJWT"
+          - "python-jose"
+          - "passlib"
+          - "bcrypt"
+          - "cryptography"
+          - "pyotp"
+          - "zxcvbn"
+      celery-redis:
+        patterns:
+          - "celery"
+          - "redis"
+      aws-twilio:
+        patterns:
+          - "boto3"
+          - "botocore"
+          - "twilio"
+      pytest:
+        patterns:
+          - "pytest"
+          - "pytest-*"
+      security-scanning:
+        patterns:
+          - "bandit"
+          - "safety"
+          - "pip-audit"
+      linting:
+        patterns:
+          - "ruff"
+          - "mypy"
+    ignore:
+      - dependency-name: "sqlalchemy"
+        versions: ["3.x"]
+      - dependency-name: "celery"
+        versions: ["6.x"]

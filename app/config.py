@@ -60,6 +60,37 @@ class Settings(BaseSettings):
     TEST_DATABASE_URL: Optional[str] = None
     TEST_REDIS_URL: Optional[str] = None
 
+    # ── Authentication Providers ───────────────────────────────────────
+    # Comma-separated list of enabled auth providers: local, entra, ldap
+    # "local" = email+password (current), "entra" = Microsoft Entra ID, "ldap" = on-prem AD
+    AUTH_PROVIDERS: str = "local"
+
+    # Microsoft Entra ID (Azure AD) — OAuth 2.0 / OIDC
+    ENTRA_ENABLED: bool = False
+    ENTRA_CLIENT_ID: str = ""
+    ENTRA_CLIENT_SECRET: str = ""
+    ENTRA_TENANT_ID: str = ""  # Specific tenant ID, or "common" for multi-tenant
+    ENTRA_REDIRECT_URI: str = ""  # https://your-backend.railway.app/api/v1/auth/entra/callback
+    ENTRA_SCOPES: str = "openid profile email"  # Space-separated OIDC scopes
+
+    # On-prem LDAP / Active Directory
+    LDAP_ENABLED: bool = False
+    LDAP_SERVER_URL: str = ""  # ldaps://ad.company.com:636 (always use ldaps://)
+    LDAP_BIND_DN: str = ""  # Service account DN for searching
+    LDAP_BIND_PASSWORD: str = ""
+    LDAP_USER_SEARCH_BASE: str = ""  # ou=Users,dc=company,dc=com
+    LDAP_USER_SEARCH_FILTER: str = "(&(objectClass=user)(sAMAccountName={username}))"
+    LDAP_EMAIL_ATTRIBUTE: str = "mail"
+    LDAP_FIRST_NAME_ATTRIBUTE: str = "givenName"
+    LDAP_LAST_NAME_ATTRIBUTE: str = "sn"
+    LDAP_GROUP_SEARCH_BASE: str = ""  # Optional: ou=Groups,dc=company,dc=com
+    LDAP_REQUIRED_GROUP: str = ""  # Optional: cn=TM-Alert-Users,ou=Groups,dc=company,dc=com
+    LDAP_USE_TLS: bool = True
+
+    # User provisioning
+    AUTO_PROVISION_USERS: bool = True  # Auto-create users on first SSO/LDAP login
+    ALLOWED_EMAIL_DOMAINS: str = ""  # Comma-separated: company.com,subsidiary.com (empty = allow all)
+
     class Config:
         env_file = ".env"
         case_sensitive = True

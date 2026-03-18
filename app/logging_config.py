@@ -68,6 +68,7 @@ LOGGING_CONFIG = {
             "handlers": ["console"],
             "propagate": False,
         },
+        # Enable access logs - shows every HTTP request
         "uvicorn.access": {
             "level": "INFO",
             "handlers": ["console"],
@@ -120,9 +121,9 @@ LOGGING_CONFIG = {
 def setup_logging() -> None:
     """
     Apply the logging configuration.
-    
-    Call this inside the FastAPI lifespan context (after uvicorn has 
-    already applied its own dictConfig). This ensures our config 
+
+    Call this inside the FastAPI lifespan context (after uvicorn has
+    already applied its own dictConfig). This ensures our config
     overwrites uvicorn's, not the other way around.
     """
     logging.config.dictConfig(LOGGING_CONFIG)

@@ -34,6 +34,10 @@ CSRF_EXEMPT_PATHS = {
     "/api/v1/auth/mfa/recovery-code/verify",
     "/api/v1/auth/forgot-password",
     "/api/v1/auth/reset-password",
+    "/api/v1/auth/entra/callback",  # OAuth callback — uses state/PKCE instead of CSRF
+    "/api/v1/auth/entra/login",     # Login redirect — GET request, no state change
+    "/api/v1/auth/providers",        # Public endpoint — no auth required
+    "/api/v1/auth/ldap/login",       # LDAP login — uses token-based auth
 }
 # Prefixes for paths that don't require CSRF (public endpoints, webhooks, etc.)
 CSRF_EXEMPT_PREFIXES = ("/api/v1/webhooks/",)

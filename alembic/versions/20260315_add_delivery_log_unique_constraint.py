@@ -21,6 +21,11 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # Set lock timeout to prevent indefinite hangs
+    # If we can't get the lock, fail fast instead of hanging forever
+    op.execute("SET lock_timeout = '5s'")
+    op.execute("SET statement_timeout = '30s'")
+    
     # Remove duplicate delivery logs before adding constraint
     # Keep only the log with the lowest id (earliest created) for each duplicate set
     op.execute("""
@@ -35,7 +40,8 @@ def upgrade() -> None:
     op.create_unique_constraint(
         'uq_delivery_log_notification_user_channel',
         'delivery_logs',
-        ['notification_id', 'user_id', 'channel']
+        ['notification_id', 'user_id', 'channel'],
+        if_not_exists=True
     )
 
 

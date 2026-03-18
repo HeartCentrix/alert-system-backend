@@ -76,8 +76,9 @@ def create_group(
     )
 
     # For dynamic groups, auto-populate members based on dynamic_filter
+    # Use is_enabled (account status) NOT is_online (presence)
     if data.type == GroupType.DYNAMIC and data.dynamic_filter:
-        query = db.query(User).filter(User.is_active == True)
+        query = db.query(User).filter(User.is_enabled == True)
         f = data.dynamic_filter
         # Apply filters only if they have non-empty, non-whitespace values
         if f.get("department") and str(f["department"]).strip():
@@ -169,8 +170,9 @@ def update_group(
         setattr(group, field, value)
 
     # For dynamic groups, refresh members when dynamic_filter or type changes
+    # Use is_enabled (account status) NOT is_online (presence)
     if group.type == GroupType.DYNAMIC and group.dynamic_filter:
-        query = db.query(User).filter(User.is_active == True)
+        query = db.query(User).filter(User.is_enabled == True)
         f = group.dynamic_filter
         # Apply filters only if they have non-empty, non-whitespace values
         if f.get("department") and str(f["department"]).strip():
@@ -301,8 +303,9 @@ def preview_dynamic_group(
             status_code=400,
             detail="dynamic_filter is required for preview"
         )
-    
-    query = db.query(User).filter(User.is_active == True)
+
+    # Use is_enabled (account status) NOT is_online (presence)
+    query = db.query(User).filter(User.is_enabled == True)
     f = data.dynamic_filter
 
     # Apply filters only if they have non-empty, non-whitespace values

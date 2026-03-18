@@ -25,58 +25,113 @@ depends_on = None
 def upgrade() -> None:
     """Update incidentstatus and incidentseverity enums to use lowercase values."""
     conn = op.get_bind()
-    
+
     # === FIX INCIDENTSTATUS ENUM ===
     # Step 1: Add the new 'CANCELLED' value to the existing uppercase enum
     result = conn.execute(sa.text("""
         SELECT EXISTS (
-            SELECT 1 FROM pg_enum 
+            SELECT 1 FROM pg_enum
             WHERE enumtypid = (
                 SELECT oid FROM pg_type WHERE typname = 'incidentstatus'
-            ) 
+            )
             AND enumlabel = 'CANCELLED'
         )
     """)).scalar()
-    
+
     if not result:
         conn.execute(sa.text("""
             ALTER TYPE incidentstatus ADD VALUE IF NOT EXISTS 'CANCELLED' AFTER 'RESOLVED'
         """))
+
+    # Step 2: Rename uppercase values to lowercase (only if old value exists)
+    # This prevents crashes when re-running migrations on a fresh database
     
-    # Step 2: Rename uppercase values to lowercase
-    conn.execute(sa.text("""
-        ALTER TYPE incidentstatus RENAME VALUE 'ACTIVE' TO 'active'
-    """))
-    
-    conn.execute(sa.text("""
-        ALTER TYPE incidentstatus RENAME VALUE 'MONITORING' TO 'monitoring'
-    """))
-    
-    conn.execute(sa.text("""
-        ALTER TYPE incidentstatus RENAME VALUE 'RESOLVED' TO 'resolved'
-    """))
-    
-    conn.execute(sa.text("""
-        ALTER TYPE incidentstatus RENAME VALUE 'CANCELLED' TO 'cancelled'
-    """))
-    
+    # Check and rename ACTIVE -> active
+    result = conn.execute(sa.text("""
+        SELECT EXISTS (
+            SELECT 1 FROM pg_enum
+            WHERE enumtypid = (SELECT oid FROM pg_type WHERE typname = 'incidentstatus')
+            AND enumlabel = 'ACTIVE'
+        )
+    """)).scalar()
+    if result:
+        conn.execute(sa.text("ALTER TYPE incidentstatus RENAME VALUE 'ACTIVE' TO 'active'"))
+
+    # Check and rename MONITORING -> monitoring
+    result = conn.execute(sa.text("""
+        SELECT EXISTS (
+            SELECT 1 FROM pg_enum
+            WHERE enumtypid = (SELECT oid FROM pg_type WHERE typname = 'incidentstatus')
+            AND enumlabel = 'MONITORING'
+        )
+    """)).scalar()
+    if result:
+        conn.execute(sa.text("ALTER TYPE incidentstatus RENAME VALUE 'MONITORING' TO 'monitoring'"))
+
+    # Check and rename RESOLVED -> resolved
+    result = conn.execute(sa.text("""
+        SELECT EXISTS (
+            SELECT 1 FROM pg_enum
+            WHERE enumtypid = (SELECT oid FROM pg_type WHERE typname = 'incidentstatus')
+            AND enumlabel = 'RESOLVED'
+        )
+    """)).scalar()
+    if result:
+        conn.execute(sa.text("ALTER TYPE incidentstatus RENAME VALUE 'RESOLVED' TO 'resolved'"))
+
+    # Check and rename CANCELLED -> cancelled
+    result = conn.execute(sa.text("""
+        SELECT EXISTS (
+            SELECT 1 FROM pg_enum
+            WHERE enumtypid = (SELECT oid FROM pg_type WHERE typname = 'incidentstatus')
+            AND enumlabel = 'CANCELLED'
+        )
+    """)).scalar()
+    if result:
+        conn.execute(sa.text("ALTER TYPE incidentstatus RENAME VALUE 'CANCELLED' TO 'cancelled'"))
+
     # === FIX INCIDENTSEVERITY ENUM ===
-    # Rename uppercase values to lowercase
-    conn.execute(sa.text("""
-        ALTER TYPE incidentseverity RENAME VALUE 'HIGH' TO 'high'
-    """))
+    # Check and rename each value only if it exists
     
-    conn.execute(sa.text("""
-        ALTER TYPE incidentseverity RENAME VALUE 'MEDIUM' TO 'medium'
-    """))
-    
-    conn.execute(sa.text("""
-        ALTER TYPE incidentseverity RENAME VALUE 'LOW' TO 'low'
-    """))
-    
-    conn.execute(sa.text("""
-        ALTER TYPE incidentseverity RENAME VALUE 'INFO' TO 'info'
-    """))
+    result = conn.execute(sa.text("""
+        SELECT EXISTS (
+            SELECT 1 FROM pg_enum
+            WHERE enumtypid = (SELECT oid FROM pg_type WHERE typname = 'incidentseverity')
+            AND enumlabel = 'HIGH'
+        )
+    """)).scalar()
+    if result:
+        conn.execute(sa.text("ALTER TYPE incidentseverity RENAME VALUE 'HIGH' TO 'high'"))
+
+    result = conn.execute(sa.text("""
+        SELECT EXISTS (
+            SELECT 1 FROM pg_enum
+            WHERE enumtypid = (SELECT oid FROM pg_type WHERE typname = 'incidentseverity')
+            AND enumlabel = 'MEDIUM'
+        )
+    """)).scalar()
+    if result:
+        conn.execute(sa.text("ALTER TYPE incidentseverity RENAME VALUE 'MEDIUM' TO 'medium'"))
+
+    result = conn.execute(sa.text("""
+        SELECT EXISTS (
+            SELECT 1 FROM pg_enum
+            WHERE enumtypid = (SELECT oid FROM pg_type WHERE typname = 'incidentseverity')
+            AND enumlabel = 'LOW'
+        )
+    """)).scalar()
+    if result:
+        conn.execute(sa.text("ALTER TYPE incidentseverity RENAME VALUE 'LOW' TO 'low'"))
+
+    result = conn.execute(sa.text("""
+        SELECT EXISTS (
+            SELECT 1 FROM pg_enum
+            WHERE enumtypid = (SELECT oid FROM pg_type WHERE typname = 'incidentseverity')
+            AND enumlabel = 'INFO'
+        )
+    """)).scalar()
+    if result:
+        conn.execute(sa.text("ALTER TYPE incidentseverity RENAME VALUE 'INFO' TO 'info'"))
 
 
 def downgrade() -> None:
