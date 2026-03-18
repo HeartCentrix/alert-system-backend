@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 import logging
 
 # ─── CONTENT TYPE CONSTANTS ──────────────────────────────────────────────────
-XML_CONTENT_TYPE = XML_CONTENT_TYPE
+XML_CONTENT_TYPE = "text/xml"
 
 
 router = APIRouter(prefix="/webhooks", tags=["Webhooks"])

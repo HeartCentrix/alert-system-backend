@@ -14,7 +14,7 @@ USERS_ID_FK = "users.id"
 
 # revision identifiers, used by Alembic.
 revision = 'location_audience_v1'
-down_revision = '001_create_enum_types'
+down_revision = None
 branch_labels = None
 depends_on = None
 
@@ -22,6 +22,11 @@ depends_on = None
 def upgrade() -> None:
     conn = op.get_bind()
     inspector = sa.inspect(conn)
+
+    # Create enum types if they don't exist (using raw SQL with IF NOT EXISTS for safety)
+    # This prevents "type already exists" errors in CI/CD where migration may run multiple times
+    op.execute("CREATE TYPE IF NOT EXISTS userlocationassignmenttype AS ENUM ('MANUAL', 'GEOFENCE')")
+    op.execute("CREATE TYPE IF NOT EXISTS userlocationstatus AS ENUM ('ACTIVE', 'INACTIVE')")
 
     # Check if tables already exist
     existing_tables = inspector.get_table_names()
@@ -32,9 +37,9 @@ def upgrade() -> None:
             sa.Column('id', sa.Integer(), nullable=False),
             sa.Column('user_id', sa.Integer(), nullable=False),
             sa.Column('location_id', sa.Integer(), nullable=False),
-            # Enums already created in 001_create_enum_types, use create_type=False
-            sa.Column('assignment_type', sa.Enum('manual', 'geofence', name='userlocationassignmenttype', create_type=False), nullable=False),
-            sa.Column('status', sa.Enum('active', 'inactive', name='userlocationstatus', create_type=False), nullable=False),
+            # Enums already created above, use create_type=False to prevent duplicate creation
+            sa.Column('assignment_type', sa.Enum('MANUAL', 'GEOFENCE', name='userlocationassignmenttype', create_type=False), nullable=False),
+            sa.Column('status', sa.Enum('ACTIVE', 'INACTIVE', name='userlocationstatus', create_type=False), nullable=False),
             sa.Column('detected_latitude', sa.Float(), nullable=True),
             sa.Column('detected_longitude', sa.Float(), nullable=True),
             sa.Column('distance_from_center_miles', sa.Float(), nullable=True),
@@ -104,9 +109,13 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_user_locations_user_id'), table_name='user_locations')
     op.drop_index(op.f('ix_user_locations_id'), table_name='user_locations')
 
-    # Drop tables (enums are managed by 001_create_enum_types migration)
+    # Drop tables
     op.drop_table('user_location_history')
     op.drop_table('user_locations')
+
+    # Drop enum types (using SQLAlchemy DDL)
+    sa.Enum(name='userlocationassignmenttype').drop(op.get_bind())
+    sa.Enum(name='userlocationstatus').drop(op.get_bind())
 
     # Remove latitude/longitude from users table
     op.drop_column('users', 'longitude')

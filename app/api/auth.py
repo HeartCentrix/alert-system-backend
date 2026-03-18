@@ -54,7 +54,7 @@ from app.utils.audit import create_audit_log
 # ─── ERROR MESSAGE CONSTANTS ──────────────────────────────────────────────────
 INVALID_CREDENTIALS_MFA_MSG = "Invalid credentials or MFA code"
 INVALID_CREDENTIALS_RECOVERY_MSG = "Invalid credentials or recovery code"
-PASSWORD_RESET_SENT_MSG = PASSWORD_RESET_SENT_MSG
+PASSWORD_RESET_SENT_MSG = "If an account exists with this email, a password reset link has been sent."
 
 
 logger = logging.getLogger(__name__)

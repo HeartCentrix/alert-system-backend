@@ -35,8 +35,8 @@ from app.services.mfa_recovery import (
 )
 
 # ─── ERROR MESSAGE CONSTANTS ──────────────────────────────────────────────────
-TOTP_REPLAY_MSG = TOTP_REPLAY_MSG
-INVALID_CURRENT_PASSWORD_MSG = INVALID_CURRENT_PASSWORD_MSG
+TOTP_REPLAY_MSG = "This TOTP code was already used. Please enter a fresh code from your authenticator app."
+INVALID_CURRENT_PASSWORD_MSG = "The current password you entered is incorrect."
 
 
 logger = logging.getLogger(__name__)
