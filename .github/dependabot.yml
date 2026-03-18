@@ -21,7 +21,6 @@ updates:
       auth-security:
         patterns:
           - "PyJWT"
-          - "python-jose"
           - "passlib"
           - "bcrypt"
           - "cryptography"
@@ -51,6 +50,6 @@ updates:
           - "mypy"
     ignore:
       - dependency-name: "sqlalchemy"
-        versions: ["3.x"]
+        versions: ["3.*"]
       - dependency-name: "celery"
-        versions: ["6.x"]
+        versions: ["6.*"]
