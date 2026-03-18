@@ -101,7 +101,7 @@ class User(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String(255), unique=True, index=True, nullable=False)
-    hashed_password = Column(String(255), nullable=False)
+    hashed_password = Column(String(255), nullable=True)  # Nullable for SSO/LDAP users
     first_name = Column(String(100), nullable=False)
     last_name = Column(String(100), nullable=False)
     phone = Column(String(20))
@@ -126,6 +126,8 @@ class User(Base):
     password_reset_expires = Column(DateTime(timezone=True))
     token_valid_after = Column(DateTime(timezone=True), nullable=True)
     force_password_change = Column(Boolean, default=False, nullable=False)
+    auth_provider = Column(String(20), default="local", nullable=False, server_default="local")  # "local", "entra", "ldap"
+    external_id = Column(String(255), nullable=True, unique=True, index=True)  # Entra OID or LDAP DN
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

@@ -40,6 +40,11 @@ def _get_client() -> redis.Redis:
     return redis.Redis(connection_pool=_pool)
 
 
+async def get_redis() -> redis.Redis:
+    """Get async Redis client for OAuth state storage and other async operations."""
+    return redis.Redis(connection_pool=_pool, decode_responses=True)
+
+
 # ──────────────────────────────────────────────
 # Key schema
 # ──────────────────────────────────────────────

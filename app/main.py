@@ -241,14 +241,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to initialize location cache: {e}")
 
-    # Run Alembic migrations to create tables and apply all schema changes
-    logger.info("Running Alembic database migrations...")
-    try:
-        alembic_cfg = Config("alembic.ini")
-        command.upgrade(alembic_cfg, "head")
-        logger.info("Database migrations completed successfully")
-    except Exception as e:
-        logger.error(f"Failed to run Alembic migrations: {e}")
+    # Migrations already run in start.sh before uvicorn starts
+    # No need to run them again here
 
     # Ensure alertchannel enum has 'web' value
     logger.info("Ensuring alertchannel enum has 'web' value...")
@@ -362,6 +356,7 @@ app = FastAPI(
 # Build allowed origins list from config with validation
 allowed_origins = [
     "http://localhost:3000",
+    "http://localhost:3001",
     "http://localhost:5173",
     "https://alert-system-frontend-jq7u.vercel.app",
 ]
@@ -545,6 +540,10 @@ async def limit_response_size(request: Request, call_next):
 # to SecurityHeadersMiddleware so their early-return 413/500 responses also receive
 # HSTS, X-Content-Type-Options, CSP, etc.  Placing this call last guarantees it.
 app.add_middleware(SecurityHeadersMiddleware)
+
+# Add custom request logging middleware (after CORS and other middleware)
+# REMOVED - was causing issues
+
 
 # ─── ROUTES ───────────────────────────────────────────────────────────────────
 

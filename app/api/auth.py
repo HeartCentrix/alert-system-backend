@@ -3,12 +3,14 @@ import time
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, status, Request, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Query, Response, Body
+from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, func
 import redis
+import json
 from app.database import get_db
-from app.models import User, RefreshToken, LoginAttempt
+from app.models import User, RefreshToken, LoginAttempt, UserRole
 from app.schemas import (
     LoginRequest, TokenResponse, UserResponse,
     PasswordResetRequest, PasswordResetConfirm, ChangePasswordRequest,
@@ -411,18 +413,375 @@ def reset_account_lockout(user_id: int) -> None:
     r.delete(key)
 
 
+@router.get("/providers")
+def get_auth_providers():
+    """Return the list of enabled authentication providers.
+
+    This is a public endpoint (no auth required) so the login page
+    can show the correct login buttons before the user is authenticated.
+    """
+    providers = [p.strip().lower() for p in settings.AUTH_PROVIDERS.split(",") if p.strip()]
+
+    result = {
+        "providers": providers,
+        "entra_enabled": "entra" in providers and settings.ENTRA_ENABLED,
+        "ldap_enabled": "ldap" in providers and settings.LDAP_ENABLED,
+        "local_enabled": "local" in providers,
+    }
+
+    # Include Entra tenant info for frontend redirect (non-sensitive)
+    if result["entra_enabled"]:
+        result["entra_tenant_id"] = settings.ENTRA_TENANT_ID
+        result["entra_client_id"] = settings.ENTRA_CLIENT_ID
+
+    return result
+
+
+@router.get("/entra/login")
+async def entra_login():
+    """Redirect user to Microsoft Entra ID login page.
+
+    Initiates OAuth 2.0 Authorization Code flow with PKCE.
+    Stores state, nonce, and PKCE verifier in Redis for callback verification.
+    """
+    if not settings.ENTRA_ENABLED or "entra" not in settings.AUTH_PROVIDERS.lower():
+        raise HTTPException(status_code=403, detail="Entra ID authentication is not enabled")
+
+    from app.services.entra_auth import get_entra_service
+    entra = get_entra_service()
+    if not entra.is_configured:
+        raise HTTPException(status_code=500, detail="Entra ID is not properly configured")
+
+    # Generate PKCE, state, and nonce
+    state = entra.generate_state()
+    code_verifier, code_challenge = entra.generate_pkce_pair()
+    nonce = entra.generate_nonce()
+
+    # Store in Redis with 10-minute expiry (time for user to complete Microsoft login)
+    from app.services.rate_limiter import get_redis
+    redis = await get_redis()
+    oauth_data = json.dumps({
+        "code_verifier": code_verifier,
+        "nonce": nonce,
+    })
+    await redis.setex(f"oauth_state:{state}", 600, oauth_data)
+
+    # Build authorization URL and redirect
+    auth_url = await entra.build_authorization_url(state, code_challenge, nonce)
+    return RedirectResponse(url=auth_url, status_code=302)
+
+
+@router.get("/entra/callback")
+async def entra_callback(
+    code: str = Query(None),
+    state: str = Query(None),
+    error: str = Query(None),
+    error_description: str = Query(None),
+    req: Request = None,
+    response: Response = None,
+    db: Session = Depends(get_db),
+):
+    """Handle Microsoft Entra ID OAuth callback.
+
+    Validates the authorization code, exchanges it for tokens,
+    validates the ID token, finds or creates the user, and
+    issues TM Alert JWT tokens.
+
+    Redirects to frontend with tokens in URL fragment on success, or with error on failure.
+    """
+    frontend_url = settings.FRONTEND_URL.rstrip("/")
+
+    # Handle Microsoft error response
+    if error:
+        logger.warning(f"Entra callback error: {error} - {error_description}")
+        return RedirectResponse(
+            url=f"{frontend_url}/#/login?error=entra_auth_failed&detail={error}",
+            status_code=302,
+        )
+
+    if not code or not state:
+        return RedirectResponse(
+            url=f"{frontend_url}/#/login?error=missing_params",
+            status_code=302,
+        )
+
+    # Verify state and retrieve PKCE verifier + nonce from Redis
+    from app.services.rate_limiter import get_redis
+    redis = await get_redis()
+    oauth_data_raw = await redis.get(f"oauth_state:{state}")
+
+    if not oauth_data_raw:
+        logger.warning("Entra callback: invalid or expired state parameter")
+        return RedirectResponse(
+            url=f"{frontend_url}/#/login?error=invalid_state",
+            status_code=302,
+        )
+
+    # Delete state immediately (one-time use)
+    await redis.delete(f"oauth_state:{state}")
+
+    try:
+        oauth_data = json.loads(oauth_data_raw)
+        code_verifier = oauth_data["code_verifier"]
+        expected_nonce = oauth_data["nonce"]
+    except (json.JSONDecodeError, KeyError):
+        return RedirectResponse(
+            url=f"{frontend_url}/#/login?error=corrupted_state",
+            status_code=302,
+        )
+
+    from app.services.entra_auth import get_entra_service
+    entra = get_entra_service()
+
+    try:
+        # Exchange authorization code for tokens
+        token_response = await entra.exchange_code_for_tokens(code, code_verifier)
+        id_token = token_response.get("id_token")
+
+        if not id_token:
+            raise ValueError("No id_token in token response")
+
+        # Validate ID token (signature, audience, issuer, expiry, nonce)
+        claims = await entra.validate_id_token(id_token, expected_nonce)
+        user_info = entra.extract_user_info(claims)
+
+        if not user_info["email"]:
+            raise ValueError("No email in ID token claims")
+
+        # Check email domain restriction
+        if settings.ALLOWED_EMAIL_DOMAINS:
+            allowed = [d.strip().lower() for d in settings.ALLOWED_EMAIL_DOMAINS.split(",") if d.strip()]
+            email_domain = user_info["email"].split("@")[-1]
+            if allowed and email_domain not in allowed:
+                logger.warning(f"Entra login blocked: email domain {email_domain} not in allowed list")
+                return RedirectResponse(
+                    url=f"{frontend_url}/#/login?error=domain_not_allowed",
+                    status_code=302,
+                )
+
+        # Find existing user by external_id (Entra OID) or email
+        user = None
+        if user_info["external_id"]:
+            user = db.query(User).filter(User.external_id == user_info["external_id"]).first()
+
+        if not user:
+            user = db.query(User).filter(func.lower(User.email) == user_info["email"].lower()).first()
+
+        if user:
+            # Existing user — link to Entra if not already linked
+            if user.auth_provider != "entra":
+                user.auth_provider = "entra"
+                user.external_id = user_info["external_id"]
+                logger.info(f"Linked existing user {user.id} to Entra ID")
+
+            # Sync attributes from Entra
+            if user_info["first_name"]:
+                user.first_name = user_info["first_name"]
+            if user_info["last_name"]:
+                user.last_name = user_info["last_name"]
+
+        elif settings.AUTO_PROVISION_USERS:
+            # Auto-create new user (JIT provisioning)
+            name_parts = user_info["name"].split() if user_info["name"] else []
+            first_name = user_info["first_name"] or (name_parts[0] if name_parts else "User")
+            last_name = user_info["last_name"] or (name_parts[-1] if len(name_parts) > 1 else ".")
+
+            user = User(
+                email=user_info["email"],
+                hashed_password=None,  # No local password for SSO users
+                first_name=first_name,
+                last_name=last_name,
+                role=UserRole.VIEWER,  # Default role — admin can upgrade
+                auth_provider="entra",
+                external_id=user_info["external_id"],
+                is_verified=True,  # Entra-authenticated users are pre-verified
+            )
+            db.add(user)
+            db.flush()  # Get user.id before creating tokens
+
+            logger.info(f"JIT provisioned new Entra user: {user.email} (id={user.id})")
+
+            # Audit log for JIT provisioning
+            db.add(create_audit_log(
+                user_id=user.id,
+                user_email=user.email,
+                action="user_provisioned_sso",
+                resource_type="user",
+                resource_id=user.id,
+                details={"provider": "entra", "external_id": user_info["external_id"]},
+                request=req,
+            ))
+        else:
+            # Auto-provisioning disabled, user doesn't exist
+            logger.warning(f"Entra login for unknown user {user_info['email']} — auto-provisioning disabled")
+            return RedirectResponse(
+                url=f"{frontend_url}/#/login?error=user_not_found",
+                status_code=302,
+            )
+
+        # Issue TM Alert tokens (same as local login)
+        from app.core.security import create_access_token, create_refresh_token
+        access_token = create_access_token({"sub": str(user.id), "role": user.role})
+        refresh_token_str = create_refresh_token({"sub": str(user.id)})
+
+        # Save refresh token
+        rt = RefreshToken(
+            user_id=user.id,
+            token=refresh_token_str,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+        )
+        db.add(rt)
+
+        # Update login state
+        user.last_login = datetime.now(timezone.utc)
+        user.last_seen_at = datetime.now(timezone.utc)
+        user.is_active = True
+
+        # Audit log
+        db.add(create_audit_log(
+            user_id=user.id,
+            user_email=user.email,
+            action="login_sso",
+            resource_type="user",
+            resource_id=user.id,
+            details={"provider": "entra"},
+            request=req,
+        ))
+        db.commit()
+
+        # Set refresh token cookie
+        _set_refresh_cookie(response, refresh_token_str, settings.REFRESH_TOKEN_EXPIRE_DAYS)
+
+        # Redirect to frontend with tokens in URL query string
+        # AuthCallbackPage will capture these and store them
+        redirect_url = (
+            f"{frontend_url}/auth/callback"
+            f"?access_token={access_token}"
+            f"&refresh_token={refresh_token_str}"
+        )
+        return RedirectResponse(url=redirect_url, status_code=302)
+
+    except Exception as e:
+        logger.error(f"Entra callback error: {e}", exc_info=True)
+        return RedirectResponse(
+            url=f"{frontend_url}/#/login?error=entra_auth_failed",
+            status_code=302,
+        )
+
+
+@router.post("/ldap/login")
+async def ldap_login(
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+    username: str = Body(...),
+    password: str = Body(...),
+):
+    """Authenticate with on-prem Active Directory via LDAP."""
+    if not settings.LDAP_ENABLED or "ldap" not in settings.AUTH_PROVIDERS.lower():
+        raise HTTPException(status_code=403, detail="LDAP authentication is not enabled")
+
+    from app.services.ldap_auth import get_ldap_service
+    ldap_svc = get_ldap_service()
+
+    if not ldap_svc.is_configured:
+        raise HTTPException(status_code=500, detail="LDAP is not properly configured")
+
+    # Authenticate against LDAP
+    ldap_user = ldap_svc.authenticate(username, password)
+    if not ldap_user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    # Check email domain restriction
+    if settings.ALLOWED_EMAIL_DOMAINS:
+        allowed = [d.strip().lower() for d in settings.ALLOWED_EMAIL_DOMAINS.split(",") if d.strip()]
+        email_domain = ldap_user["email"].split("@")[-1]
+        if allowed and email_domain not in allowed:
+            raise HTTPException(status_code=403, detail="Your email domain is not allowed")
+
+    # Find or create user
+    user = db.query(User).filter(func.lower(User.email) == ldap_user["email"].lower()).first()
+
+    if user:
+        if user.auth_provider != "ldap":
+            user.auth_provider = "ldap"
+            user.external_id = ldap_user["dn"]
+        if ldap_user["first_name"]:
+            user.first_name = ldap_user["first_name"]
+        if ldap_user["last_name"]:
+            user.last_name = ldap_user["last_name"]
+    elif settings.AUTO_PROVISION_USERS:
+        user = User(
+            email=ldap_user["email"],
+            hashed_password=None,
+            first_name=ldap_user["first_name"] or "User",
+            last_name=ldap_user["last_name"] or ".",
+            role=UserRole.VIEWER,
+            auth_provider="ldap",
+            external_id=ldap_user["dn"],
+            is_verified=True,
+        )
+        db.add(user)
+        db.flush()
+        logger.info(f"JIT provisioned LDAP user: {user.email}")
+    else:
+        raise HTTPException(status_code=403, detail="Account not found. Contact your administrator.")
+
+    # Issue tokens (same as local/entra login)
+    access_token = create_access_token({"sub": str(user.id), "role": user.role})
+    refresh_token_str = create_refresh_token({"sub": str(user.id)})
+
+    rt = RefreshToken(
+        user_id=user.id,
+        token=refresh_token_str,
+        expires_at=datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+    )
+    db.add(rt)
+
+    user.last_login = datetime.now(timezone.utc)
+    user.last_seen_at = datetime.now(timezone.utc)
+    user.is_active = True
+
+    db.add(create_audit_log(
+        user_id=user.id,
+        user_email=user.email,
+        action="login_ldap",
+        resource_type="user",
+        resource_id=user.id,
+        request=request,
+    ))
+    db.commit()
+
+    _set_refresh_cookie(response, refresh_token_str, settings.REFRESH_TOKEN_EXPIRE_DAYS)
+
+    return LoginSuccessResponse(
+        status="success",
+        access_token=access_token,
+        token_type="bearer",
+        user=UserResponse.model_validate(user),
+        refresh_token=refresh_token_str,
+    )
+
+
 @router.post("/login")
 async def login(request: LoginRequest, req: Request, response: Response, db: Session = Depends(get_db)):
     """
     Authenticate user with email and password.
-    
+
     Response varies based on MFA status:
     - LoginSuccessResponse: Authentication complete, tokens issued
     - LoginMFASetupResponse: MFA required but not configured, setup needed
     - LoginMFAChallengeResponse: MFA required and configured, OTP needed
-    
+
     No tokens are issued until MFA verification completes (if required).
     """
+    # Check if local auth is enabled
+    if "local" not in settings.AUTH_PROVIDERS.lower():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email/password login is disabled. Please use SSO."
+        )
+
     client_ip = _get_client_ip(req)
 
     # Normalize email to prevent case-based lockout bypass
@@ -773,6 +1132,13 @@ def forgot_password(request: PasswordResetRequest, req: Request, db: Session = D
     - Token hashing: Password reset tokens are hashed before storage (SHA-256)
       Even if the database is compromised, attackers cannot use stolen tokens
     """
+    # Prevent password reset for SSO-only deployments
+    if "local" not in settings.AUTH_PROVIDERS.lower():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Password reset is disabled. Your organization uses Single Sign-On (SSO) for authentication. Please contact your administrator if you need access."
+        )
+
     # Normalize email for rate limiting
     email_normalized = request.email.strip().lower()
 
@@ -792,6 +1158,11 @@ def forgot_password(request: PasswordResetRequest, req: Request, db: Session = D
     if not user:
         # Update rate limit even for non-existent emails
         _password_reset_rate_limit[email_normalized] = current_time
+        return {"message": "If that email exists, we've sent a password reset link."}
+
+    # Don't send reset emails for SSO users
+    if user.auth_provider != "local":
+        # Return success message anyway (don't reveal that user exists or is SSO)
         return {"message": "If that email exists, we've sent a password reset link."}
 
     # Generate reset token (plaintext - sent to user via email)
@@ -851,6 +1222,13 @@ def reset_password(request: PasswordResetConfirm, db: Session = Depends(get_db))
         # Generic error to prevent enumeration of whether token exists
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired reset token")
 
+    # Don't allow password reset for SSO users
+    if matched_user.auth_provider != "local":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Password reset is not available for SSO accounts. Please use your identity provider."
+        )
+
     matched_user.hashed_password = hash_password(request.new_password)
     matched_user.password_reset_token = None
     matched_user.password_reset_expires = None
@@ -874,6 +1252,13 @@ def change_password(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    # Prevent password change for SSO users
+    if current_user.auth_provider != "local":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Password change is not available for SSO accounts. Manage your password through your identity provider."
+        )
+
     if not verify_password(request.current_password, current_user.hashed_password):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current password is incorrect")
 
