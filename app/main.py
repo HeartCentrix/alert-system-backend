@@ -12,8 +12,6 @@ MAX_REQUEST_SIZE = 10 * 1024 * 1024  # 10 MB max request body size
 MAX_JSON_SIZE = 1 * 1024 * 1024  # 1 MB max JSON payload
 
 from sqlalchemy import text
-from alembic import command
-from alembic.config import Config
 from app.config import settings
 from app.middleware.security_headers import SecurityHeadersMiddleware
 from app.middleware.request_id import RequestIDMiddleware
@@ -241,14 +239,9 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to initialize location cache: {e}")
 
-    # Run Alembic migrations to create tables and apply all schema changes
-    logger.info("Running Alembic database migrations...")
-    try:
-        alembic_cfg = Config("alembic.ini")
-        command.upgrade(alembic_cfg, "head")
-        logger.info("Database migrations completed successfully")
-    except Exception as e:
-        logger.error(f"Failed to run Alembic migrations: {e}")
+    # Note: Database tables are created by app.db_init during startup
+    # No Alembic migrations needed for fresh deployments
+    logger.info("Database schema initialized (using db_init)")
 
     # Ensure alertchannel enum has 'web' value
     logger.info("Ensuring alertchannel enum has 'web' value...")

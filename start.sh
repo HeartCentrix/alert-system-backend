@@ -9,14 +9,11 @@ echo "Starting Alert System Backend"
 echo "Service Type: $SERVICE_TYPE"
 echo "========================================="
 
-# Run schema validation and migrations for all service types
-echo "Step 1: Validating database schema..."
-python -m scripts.validate_db_schema --fix || true
+# Run database initialization for all service types
+echo "Step 1: Initializing database (creating enums and tables)..."
+python -m app.db_init || true
 
-echo "Step 2: Running database migrations..."
-alembic upgrade head
-
-echo "Step 3: Starting $SERVICE_TYPE service..."
+echo "Step 2: Starting $SERVICE_TYPE service..."
 
 # Start the appropriate service based on type
 case "$SERVICE_TYPE" in
