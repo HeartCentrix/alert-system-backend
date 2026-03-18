@@ -114,7 +114,7 @@ class User(Base):
     department = Column(String(100))
     title = Column(String(100))
     employee_id = Column(String(50), unique=True)
-    role = Column(Enum(UserRole), default=UserRole.VIEWER, nullable=False)
+    role = Column(Enum(UserRole, values_callable=lambda x: [e.value for e in x]), default=UserRole.VIEWER, nullable=False)
     is_enabled = Column(Boolean, default=True, nullable=False)  # Account status - admin controlled
     is_active = Column(Boolean, default=False)  # DEPRECATED: use is_online instead
     is_online = Column(Boolean, default=False)  # Real-time online presence (heartbeat)
@@ -176,7 +176,7 @@ class Group(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(200), nullable=False)
     description = Column(Text)
-    type = Column(Enum(GroupType), default=GroupType.STATIC, nullable=False)
+    type = Column(Enum(GroupType, values_callable=lambda x: [e.value for e in x]), default=GroupType.STATIC, nullable=False)
     location_id = Column(Integer, ForeignKey(LOCATIONS_ID_FK), nullable=True)
     dynamic_filter = Column(JSON)  # e.g. {"department": "IT", "location_id": 1}
     is_active = Column(Boolean, default=True)
@@ -244,7 +244,7 @@ class Notification(Base):
     message = Column(Text, nullable=False)
     subject = Column(String(500))  # for email
     channels = Column(JSON, nullable=False)  # ["sms","email","voice","slack","teams"]
-    status = Column(Enum(NotificationStatus), default=NotificationStatus.DRAFT)
+    status = Column(Enum(NotificationStatus, values_callable=lambda x: [e.value for e in x]), default=NotificationStatus.DRAFT)
     target_all = Column(Boolean, default=False)
     scheduled_at = Column(DateTime(timezone=True))
     scheduled_timezone = Column(String(100))  # Original timezone (e.g., "America/New_York")
@@ -281,8 +281,8 @@ class DeliveryLog(Base):
     notification_id = Column(Integer, ForeignKey(NOTIFICATIONS_ID_FK, ondelete="CASCADE"), nullable=False)
     user_id = Column(Integer, ForeignKey(USERS_ID_FK, ondelete="CASCADE"), nullable=False)
     user_email = Column(String(255), nullable=True)  # Preserved after user deletion
-    channel = Column(Enum(AlertChannel), nullable=False)
-    status = Column(Enum(DeliveryStatus), default=DeliveryStatus.PENDING)
+    channel = Column(Enum(AlertChannel, values_callable=lambda x: [e.value for e in x]), nullable=False)
+    status = Column(Enum(DeliveryStatus, values_callable=lambda x: [e.value for e in x]), default=DeliveryStatus.PENDING)
     external_id = Column(String(200))  # Twilio SID, SES MessageId, etc.
     to_address = Column(String(255))  # phone or email
     error_message = Column(Text)
@@ -302,8 +302,8 @@ class NotificationResponse(Base):
     notification_id = Column(Integer, ForeignKey(NOTIFICATIONS_ID_FK, ondelete="CASCADE"), nullable=False)
     user_id = Column(Integer, ForeignKey(USERS_ID_FK, ondelete="CASCADE"), nullable=False)
     user_email = Column(String(255), nullable=True)  # Preserved after user deletion
-    channel = Column(Enum(AlertChannel))
-    response_type = Column(Enum(ResponseType), nullable=False)
+    channel = Column(Enum(AlertChannel, values_callable=lambda x: [e.value for e in x]))
+    response_type = Column(Enum(ResponseType, values_callable=lambda x: [e.value for e in x]), nullable=False)
     message = Column(Text)
     latitude = Column(Float)
     longitude = Column(Float)
@@ -321,7 +321,7 @@ class IncomingMessage(Base):
     from_number = Column(String(20), nullable=False)
     to_number = Column(String(20))
     body = Column(Text)
-    channel = Column(Enum(AlertChannel), default=AlertChannel.SMS)
+    channel = Column(Enum(AlertChannel, values_callable=lambda x: [e.value for e in x]), default=AlertChannel.SMS)
     user_id = Column(Integer, ForeignKey(USERS_ID_FK, ondelete="CASCADE"), nullable=False)
     user_email = Column(String(255), nullable=True)  # Preserved after user deletion
     notification_id = Column(Integer, ForeignKey(NOTIFICATIONS_ID_FK), nullable=True)
@@ -397,8 +397,8 @@ class UserLocation(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey(USERS_ID_FK, ondelete="CASCADE"), nullable=False, index=True)
     location_id = Column(Integer, ForeignKey(LOCATIONS_ID_FK, ondelete="CASCADE"), nullable=False, index=True)
-    assignment_type = Column(Enum(UserLocationAssignmentType), nullable=False, default=UserLocationAssignmentType.MANUAL)
-    status = Column(Enum(UserLocationStatus), nullable=False, default=UserLocationStatus.ACTIVE)
+    assignment_type = Column(Enum(UserLocationAssignmentType, values_callable=lambda x: [e.value for e in x]), nullable=False, default=UserLocationAssignmentType.MANUAL)
+    status = Column(Enum(UserLocationStatus, values_callable=lambda x: [e.value for e in x]), nullable=False, default=UserLocationStatus.ACTIVE)
     
     # For geofence assignments: track the coordinates that triggered the assignment
     detected_latitude = Column(Float, nullable=True)
@@ -441,9 +441,9 @@ class UserLocationHistory(Base):
     
     # Action taken
     action = Column(String(50), nullable=False)  # assigned, removed, entered_geofence, exited_geofence, status_changed
-    assignment_type = Column(Enum(UserLocationAssignmentType), nullable=True)
-    previous_status = Column(Enum(UserLocationStatus), nullable=True)
-    new_status = Column(Enum(UserLocationStatus), nullable=True)
+    assignment_type = Column(Enum(UserLocationAssignmentType, values_callable=lambda x: [e.value for e in x]), nullable=True)
+    previous_status = Column(Enum(UserLocationStatus, values_callable=lambda x: [e.value for e in x]), nullable=True)
+    new_status = Column(Enum(UserLocationStatus, values_callable=lambda x: [e.value for e in x]), nullable=True)
     
     # Context
     triggered_by_user_id = Column(Integer, ForeignKey(USERS_ID_FK), nullable=True)  # Admin who triggered (if manual)
