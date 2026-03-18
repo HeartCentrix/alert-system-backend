@@ -757,7 +757,7 @@ class CSVImportResponse(BaseModel):
     failed: int
     errors: List[str]
     # List of newly created users (passwords excluded for security, sent via email)
-    created_users: List[dict] = []  # [{email, first_name, last_name}, ...]
+    created_users: Optional[List[dict]] = None  # [{email, first_name, last_name}, ...]
 
 
 class UserBulkDeleteResponse(BaseModel):
@@ -848,7 +848,7 @@ class GroupCreate(BaseModel):
     type: GroupType = GroupType.STATIC
     location_id: Optional[int] = None
     dynamic_filter: Optional[dict] = None
-    member_ids: Optional[List[int]] = []
+    member_ids: Optional[List[int]] = None
 
 
 class GroupUpdate(BaseModel):
@@ -964,8 +964,8 @@ class NotificationCreate(BaseModel):
     subject: Optional[str] = None
     channels: List[AlertChannel]
     target_all: bool = False
-    target_group_ids: Optional[List[int]] = []
-    target_user_ids: Optional[List[int]] = []
+    target_group_ids: Optional[List[int]] = None
+    target_user_ids: Optional[List[int]] = None
     scheduled_at: Optional[datetime] = None
     scheduled_timezone: Optional[str] = None  # Timezone for scheduled time (e.g., "America/New_York")
     response_required: bool = False

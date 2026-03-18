@@ -90,8 +90,8 @@ _assignment_limiter = RateLimiter(max_requests=100, window_seconds=60)  # 100/mi
 def assign_user_to_location(
     data: UserLocationAssign,
     request: Request,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_admin)] = None
 ):
     """
     Manually assign a user to a location.
@@ -229,8 +229,8 @@ def remove_user_from_location(
     request: Request,
     user_id: int = Query(..., description="User ID to remove"),
     location_id: int = Query(..., description="Location ID to remove from"),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_admin)] = None
 ):
     """
     Remove a user from a location.
@@ -308,8 +308,8 @@ def remove_user_from_location(
 def update_user_geofence(
     data: UserLocationGeofenceUpdate,
     request: Request,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
     """
     Update user's location and trigger geofence check.
@@ -415,8 +415,8 @@ def get_location_members(
     page_size: int = Query(20, ge=1, le=100),
     status_filter: Optional[UserLocationStatus] = Query(None, alias="status"),
     assignment_type: Optional[UserLocationAssignmentType] = None,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_manager)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_manager)] = None
 ):
     """
     Get all users assigned to a location.
@@ -519,8 +519,8 @@ def get_location_members(
 def get_user_locations(
     user_id: int,
     include_inactive: bool = Query(False, description="Include inactive assignments"),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
     """
     Get all locations for a user.
@@ -553,8 +553,8 @@ def get_location_history(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     action_filter: Optional[str] = Query(None, alias="action"),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_admin)] = None
 ):
     """
     Get location membership audit history.
@@ -597,8 +597,8 @@ def get_location_history(
 
 @router.get("/stats")
 def get_location_audience_stats(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_manager)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_manager)] = None
 ):
     """
     Get location audience statistics.

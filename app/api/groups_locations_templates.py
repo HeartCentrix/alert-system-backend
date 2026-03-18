@@ -29,8 +29,8 @@ groups_router = APIRouter(prefix="/groups", tags=["Groups"])
 def list_groups(
     search: Optional[str] = None,
     type: Optional[GroupType] = None,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
     query = db.query(Group).filter(Group.is_active == True)
     
@@ -62,8 +62,8 @@ def list_groups(
 @groups_router.post("", response_model=GroupResponse, status_code=201)
 def create_group(
     data: GroupCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_admin)] = None,
     request: Request = None,
 ):
     group = Group(
@@ -120,29 +120,28 @@ def create_group(
 
 
 @groups_router.get("/{group_id}", response_model=GroupDetailResponse)
+def _assert_group_member_access(group, current_user) -> None:
+    """Raise 403 if a non-admin user is not a member of the group."""
+    if current_user.role not in [UserRole.SUPER_ADMIN, UserRole.ADMIN]:
+        if current_user not in group.members:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only view groups you are a member of",
+            )
+
+
 def get_group(
     group_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
-    # Check both existence AND active status (prevent access to soft-deleted groups)
     group = db.query(Group).filter(
         Group.id == group_id,
         Group.is_active == True
     ).first()
     if not group:
         raise HTTPException(status_code=404, detail=GROUP_NOT_FOUND_MSG)
-    
-    # Filter access based on user role:
-    # - Admin/Super Admin: can view any group
-    # - Manager/Viewer: can only view groups they are members of
-    if current_user.role not in [UserRole.SUPER_ADMIN, UserRole.ADMIN]:
-        if current_user not in group.members:
-            raise HTTPException(
-                status_code=403,
-                detail="You can only view groups you are a member of"
-            )
-    
+    _assert_group_member_access(group, current_user)
     return group
 
 
@@ -150,8 +149,8 @@ def get_group(
 def update_group(
     group_id: int,
     data: GroupUpdate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_admin)] = None
 ):
     # Check both existence AND active status (prevent modifying soft-deleted groups)
     group = db.query(Group).filter(
@@ -216,8 +215,8 @@ def update_group(
 @groups_router.delete("/{group_id}")
 def delete_group(
     group_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_admin)] = None
 ):
     # Check both existence AND active status (can't delete what's already deleted)
     group = db.query(Group).filter(
@@ -235,8 +234,8 @@ def delete_group(
 def add_members(
     group_id: int,
     data: GroupMemberAdd,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_manager)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_manager)] = None
 ):
     group = db.query(Group).filter(Group.id == group_id).first()
     if not group:
@@ -264,8 +263,8 @@ def add_members(
 def remove_member(
     group_id: int,
     user_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_admin)] = None
 ):
     # Check both existence AND active status (prevent modifying soft-deleted groups)
     group = db.query(Group).filter(
@@ -284,8 +283,8 @@ def remove_member(
 @groups_router.post("/preview")
 def preview_dynamic_group(
     data: GroupCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
     """
     Preview which users will be included in a dynamic group based on the filter criteria.
@@ -340,8 +339,8 @@ def preview_dynamic_group(
 
 @groups_router.get("/filters/options")
 def get_filter_options(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
     """
     Get unique values for dynamic group filter options.
@@ -375,8 +374,8 @@ locations_router = APIRouter(prefix="/locations", tags=["Locations"])
 
 @locations_router.get("", response_model=List[LocationResponse])
 def list_locations(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
     locations = db.query(Location).filter(Location.is_active == True).order_by(Location.name).all()
     result = []
@@ -398,70 +397,65 @@ def list_locations(
 
 
 @locations_router.post("", response_model=LocationResponse, status_code=status.HTTP_201_CREATED)
-def create_location(
-    data: LocationCreate,
-    request: Request,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
-):
-    """
-    Create a new location with geofence.
-    
-    Features:
-    - Input validation and sanitization
-    - Overlap detection with existing locations
-    - Redis GEO index sync
-    - Audit logging
-    """
-    from app.core.geofence import validate_location_input, check_location_overlap, get_geo_service
-    
-    # Validate and sanitize input
+def _validate_and_sanitize_location(data: LocationCreate) -> dict:
+    """Validate and sanitize location input. Returns sanitized dict or raises 400."""
+    from app.core.geofence import validate_location_input
     validation = validate_location_input(
         name=data.name,
         latitude=data.latitude,
         longitude=data.longitude,
-        radius_miles=data.geofence_radius_miles
+        radius_miles=data.geofence_radius_miles,
     )
-    
     if not validation["is_valid"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "message": "Validation failed",
-                "errors": validation["errors"]
-            }
+            detail={"message": "Validation failed", "errors": validation["errors"]},
         )
-    
-    # Check for overlaps with existing locations
-    existing_locations = db.query(Location).filter(
-        Location.is_active == True,
-        Location.latitude.isnot(None),
-        Location.longitude.isnot(None)
-    ).all()
-    
-    overlaps = check_location_overlap(
-        new_latitude=validation["sanitized"]["latitude"],
-        new_longitude=validation["sanitized"]["longitude"],
-        new_radius=validation["sanitized"]["geofence_radius_miles"],
-        existing_locations=existing_locations
-    )
-    
-    # Create location
-    location = Location(
-        name=validation["sanitized"]["name"],
+    return validation["sanitized"]
+
+
+def _build_location_object(sanitized: dict, data: LocationCreate) -> Location:
+    """Construct a Location ORM object from validated input."""
+    return Location(
+        name=sanitized["name"],
         address=data.address,
         city=data.city,
         state=data.state,
         zip_code=data.zip_code,
         country=data.country,
-        latitude=validation["sanitized"]["latitude"],
-        longitude=validation["sanitized"]["longitude"],
-        geofence_radius_miles=validation["sanitized"]["geofence_radius_miles"],
-        is_active=True
+        latitude=sanitized["latitude"],
+        longitude=sanitized["longitude"],
+        geofence_radius_miles=sanitized["geofence_radius_miles"],
+        is_active=True,
     )
-    db.add(location)
 
-    # Audit log
+
+def create_location(
+    data: LocationCreate,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_admin)] = None
+):
+    """Create a new location with geofence, overlap detection, and Redis sync."""
+    from app.core.geofence import check_location_overlap
+
+    sanitized = _validate_and_sanitize_location(data)
+
+    existing_locations = db.query(Location).filter(
+        Location.is_active == True,
+        Location.latitude.isnot(None),
+        Location.longitude.isnot(None),
+    ).all()
+
+    overlaps = check_location_overlap(
+        new_latitude=sanitized["latitude"],
+        new_longitude=sanitized["longitude"],
+        new_radius=sanitized["geofence_radius_miles"],
+        existing_locations=existing_locations,
+    )
+
+    location = _build_location_object(sanitized, data)
+    db.add(location)
     db.add(create_audit_log(
         user_id=current_user.id,
         user_email=current_user.email,
@@ -472,21 +466,19 @@ def create_location(
             "latitude": location.latitude,
             "longitude": location.longitude,
             "geofence_radius_miles": location.geofence_radius_miles,
-            "overlaps": len(overlaps)
+            "overlaps": len(overlaps),
         },
         request=request,
     ))
-    
     db.commit()
     db.refresh(location)
-    
-    # Sync to Redis GEO index (async)
+
     try:
         from app.location_tasks import sync_all_locations_to_redis
         sync_all_locations_to_redis.delay()
     except Exception as e:
         logger.warning(f"Failed to sync location to Redis: {e}")
-    
+
     return LocationResponse(**{**location.__dict__, "user_count": 0})
 
 
@@ -495,8 +487,8 @@ def update_location(
     location_id: int,
     data: LocationUpdate,
     request: Request,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_admin)] = None
 ):
     # Check both existence AND active status (prevent modifying soft-deleted locations)
     location = db.query(Location).filter(
@@ -605,8 +597,8 @@ def update_location(
 @locations_router.delete("/{location_id}")
 def delete_location(
     location_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_admin)] = None
 ):
     # Check both existence AND active status (can't delete what's already deleted)
     location = db.query(Location).filter(
@@ -628,8 +620,8 @@ templates_router = APIRouter(prefix="/templates", tags=["Templates"])
 @templates_router.get("", response_model=List[TemplateResponse])
 def list_templates(
     category: Optional[str] = None,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
     query = db.query(NotificationTemplate).filter(NotificationTemplate.is_active == True)
     if category:
@@ -640,8 +632,8 @@ def list_templates(
 @templates_router.post("", response_model=TemplateResponse, status_code=201)
 def create_template(
     data: TemplateCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_admin)] = None
 ):
     template = NotificationTemplate(**data.model_dump(), created_by_id=current_user.id)
     db.add(template)
@@ -653,7 +645,7 @@ def create_template(
 # IMPORTANT: /categories must be defined BEFORE /{template_id} to avoid route shadowing
 # FastAPI matches routes in order, and /{template_id} would match "categories" as an ID
 @templates_router.get("/categories")
-def get_categories(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def get_categories(db: Annotated[Session, Depends(get_db)] = None, current_user: Annotated[User, Depends(get_current_user)] = None):
     """Get all unique template categories."""
     results = db.query(NotificationTemplate.category).filter(
         NotificationTemplate.category != None,
@@ -666,8 +658,8 @@ def get_categories(db: Session = Depends(get_db), current_user: User = Depends(g
 def update_template(
     template_id: int,
     data: TemplateUpdate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_admin)] = None
 ):
     # Check both existence AND active status (prevent modifying soft-deleted templates)
     template = db.query(NotificationTemplate).filter(
@@ -687,8 +679,8 @@ def update_template(
 @templates_router.delete("/{template_id}")
 def delete_template(
     template_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_admin)] = None
 ):
     # Check both existence AND active status (can't delete what's already deleted)
     template = db.query(NotificationTemplate).filter(

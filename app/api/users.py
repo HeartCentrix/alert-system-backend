@@ -163,8 +163,8 @@ def list_users(
     location_id: Optional[int] = None,
     role: Optional[UserRole] = None,
     is_active: Optional[bool] = None,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
     query = db.query(User)
 
@@ -198,8 +198,8 @@ def list_users(
 @router.post("", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 def create_user(
     data: UserCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_admin)] = None,
     request: Request = None,
 ):
     if db.query(User).filter(User.email == data.email).first():
@@ -253,8 +253,8 @@ def create_user(
 @router.get("/{user_id}", response_model=UserResponse)
 def get_user(
     user_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_manager)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_manager)] = None
 ):
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
@@ -262,57 +262,59 @@ def get_user(
     return user
 
 
-@router.put("/{user_id}", response_model=UserResponse)
+def _check_employee_id_unique(db: Session, employee_id_value: str, exclude_user_id: int) -> None:
+    """Raise 400 if the employee_id is already assigned to a different user."""
+    existing = db.query(User).filter(
+        User.employee_id == employee_id_value,
+        User.id != exclude_user_id,
+    ).first()
+    if existing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Employee ID '{employee_id_value}' already assigned to another user",
+        )
+
+
+def _check_email_unique(db: Session, email: str, exclude_user_id: int) -> None:
+    """Raise 400 if the email is already assigned to a different user."""
+    existing = db.query(User).filter(
+        User.email == email,
+        User.id != exclude_user_id,
+    ).first()
+    if existing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Email '{email}' already assigned to another user",
+        )
+
+
 def update_user(
     user_id: int,
     data: UserUpdate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_admin)] = None,
     request: Request = None,
 ):
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail=USER_NOT_FOUND_MSG)
 
-    # Prevent privilege escalation: ADMIN cannot modify SUPER_ADMIN users
     if user.role == UserRole.SUPER_ADMIN and current_user.role != UserRole.SUPER_ADMIN:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only SUPER_ADMIN can modify SUPER_ADMIN users"
+            detail="Only SUPER_ADMIN can modify SUPER_ADMIN users",
         )
-
-    # Prevent privilege escalation: ADMIN cannot escalate user to SUPER_ADMIN
     if data.role is not None:
         _prevent_privilege_escalation(current_user, data.role)
 
-    # Check for duplicate employee_id if it's being updated
     if data.employee_id is not None:
         employee_id_value = data.employee_id if data.employee_id != '' else None
         if employee_id_value:
-            existing = db.query(User).filter(
-                User.employee_id == employee_id_value,
-                User.id != user_id  # Exclude current user from check
-            ).first()
-            if existing:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Employee ID '{employee_id_value}' already assigned to another user"
-                )
+            _check_employee_id_unique(db, employee_id_value, user_id)
 
-    # Check for duplicate email if it's being updated
     if data.email is not None and data.email != user.email:
-        existing = db.query(User).filter(
-            User.email == data.email,
-            User.id != user_id  # Exclude current user from check
-        ).first()
-        if existing:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Email '{data.email}' already assigned to another user"
-            )
+        _check_email_unique(db, data.email, user_id)
 
-    # Use exclude_unset=True to only update fields that were explicitly provided
-    # This allows setting fields to None (to clear them) while not requiring all fields
     for field, value in data.model_dump(exclude_unset=True).items():
         if field == 'employee_id' and value == '':
             value = None
@@ -328,18 +330,15 @@ def update_user(
     ))
     db.commit()
     db.refresh(user)
-    
-    # Refresh dynamic group memberships for the updated user
     refresh_dynamic_groups_for_user(db, user)
-    
     return user
 
 
 @router.delete("/{user_id}")
 def delete_user(
     user_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_admin)] = None,
     request: Request = None,
 ):
     """Permanently delete a user (hard delete). Only ADMIN and SUPER_ADMIN can delete."""
@@ -377,8 +376,8 @@ def delete_user(
 @router.post("/bulk-delete")
 def bulk_delete_users(
     user_ids: List[int],
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_admin)] = None,
     request: Request = None,
 ):
     """
@@ -524,65 +523,89 @@ def bulk_delete_users(
 
 
 
+def _sanitize_row_field(row: dict, field: str) -> str:
+    """Extract, strip, and sanitize a CSV row field against formula injection."""
+    return _sanitize_formula_characters(row.get(field, '').strip())
+
+
+def _parse_csv_row_role(row: dict, row_num: int, current_user: User):
+    """Parse and validate the role field. Returns (role, error_dict_or_None)."""
+    role_str = row.get('role', 'viewer').strip().lower()
+    try:
+        role = UserRole(role_str)
+    except ValueError:
+        role = UserRole.VIEWER
+    if role == UserRole.SUPER_ADMIN and current_user.role != UserRole.SUPER_ADMIN:
+        return None, {"status": "error", "error": f"Row {row_num}: Only SUPER_ADMIN can assign SUPER_ADMIN role"}
+    return role, None
+
+
+def _update_existing_csv_user(existing: User, first_name: str, last_name: str,
+                               row: dict, row_num: int, current_user: User,
+                               valid_users: list) -> dict:
+    """Update an existing user from a CSV row. Returns result dict."""
+    if existing.role == UserRole.SUPER_ADMIN and current_user.role != UserRole.SUPER_ADMIN:
+        return {"status": "error", "error": f"Row {row_num}: Only SUPER_ADMIN can modify SUPER_ADMIN user ({existing.email})"}
+    existing.first_name = first_name
+    existing.last_name = last_name
+    existing.phone = _sanitize_row_field(row, 'phone') or existing.phone
+    existing.department = _sanitize_row_field(row, 'department') or existing.department
+    existing.title = _sanitize_row_field(row, 'title') or existing.title
+    existing.employee_id = _sanitize_row_field(row, 'employee_id') or existing.employee_id
+    valid_users.append(("updated", existing))
+    return {"status": "ok", "action": "updated"}
+
+
+def _create_new_csv_user(email: str, first_name: str, last_name: str, role,
+                          row: dict, db: Session,
+                          created_users: list, valid_users: list) -> dict:
+    """Create a new user from a CSV row. Returns result dict."""
+    import secrets as _secrets
+    default_password = _secrets.token_urlsafe(12)
+    user = User(
+        email=email,
+        hashed_password=hash_password(default_password),
+        first_name=first_name,
+        last_name=last_name,
+        phone=_sanitize_row_field(row, 'phone'),
+        department=_sanitize_row_field(row, 'department'),
+        title=_sanitize_row_field(row, 'title'),
+        employee_id=_sanitize_row_field(row, 'employee_id') or None,
+        role=role,
+        is_active=True,
+    )
+    db.add(user)
+    created_users.append({"email": email, "password": default_password,
+                          "first_name": first_name, "last_name": last_name})
+    valid_users.append(("created", user))
+    return {"status": "ok", "action": "created"}
+
+
 def _process_csv_row(
     row: dict, row_num: int, db: Session,
     current_user: User, created_users: list, valid_users: list
 ) -> dict:
     """Process a single CSV import row. Returns dict with status/action/error."""
-    import secrets as _secrets
     try:
         email = row.get('email', '').strip().lower()
         if not email:
             return {"status": "error", "error": f"Row {row_num}: Email is required"}
 
-        first_name = _sanitize_formula_characters(row.get('first_name', '').strip())
-        last_name = _sanitize_formula_characters(row.get('last_name', '').strip())
+        first_name = _sanitize_row_field(row, 'first_name')
+        last_name = _sanitize_row_field(row, 'last_name')
         if not first_name or not last_name:
             return {"status": "error", "error": f"Row {row_num}: first_name and last_name are required"}
 
-        role_str = row.get('role', 'viewer').strip().lower()
-        try:
-            role = UserRole(role_str)
-        except ValueError:
-            role = UserRole.VIEWER
-
-        if role == UserRole.SUPER_ADMIN and current_user.role != UserRole.SUPER_ADMIN:
-            return {"status": "error", "error": f"Row {row_num}: Only SUPER_ADMIN can assign SUPER_ADMIN role"}
+        role, role_error = _parse_csv_row_role(row, row_num, current_user)
+        if role_error:
+            return role_error
 
         existing = db.query(User).filter(User.email == email).first()
-
         if existing:
-            if existing.role == UserRole.SUPER_ADMIN and current_user.role != UserRole.SUPER_ADMIN:
-                return {"status": "error", "error": f"Row {row_num}: Only SUPER_ADMIN can modify SUPER_ADMIN user ({email})"}
-            existing.first_name = first_name
-            existing.last_name = last_name
-            existing.phone = _sanitize_formula_characters(row.get('phone', '').strip()) or existing.phone
-            existing.department = _sanitize_formula_characters(row.get('department', '').strip()) or existing.department
-            existing.title = _sanitize_formula_characters(row.get('title', '').strip()) or existing.title
-            existing.employee_id = _sanitize_formula_characters(row.get('employee_id', '').strip()) or existing.employee_id
-            valid_users.append(("updated", existing))
-            return {"status": "ok", "action": "updated"}
-        else:
-            default_password = _secrets.token_urlsafe(12)
-            user = User(
-                email=email,
-                hashed_password=hash_password(default_password),
-                first_name=first_name,
-                last_name=last_name,
-                phone=_sanitize_formula_characters(row.get('phone', '').strip()),
-                department=_sanitize_formula_characters(row.get('department', '').strip()),
-                title=_sanitize_formula_characters(row.get('title', '').strip()),
-                employee_id=_sanitize_formula_characters(row.get('employee_id', '').strip()) or None,
-                role=role,
-                is_active=True
-            )
-            db.add(user)
-            created_users.append({
-                "email": email, "password": default_password,
-                "first_name": first_name, "last_name": last_name
-            })
-            valid_users.append(("created", user))
-            return {"status": "ok", "action": "created"}
+            return _update_existing_csv_user(existing, first_name, last_name,
+                                             row, row_num, current_user, valid_users)
+        return _create_new_csv_user(email, first_name, last_name, role,
+                                    row, db, created_users, valid_users)
     except Exception as e:
         logger.warning(f"CSV import row {row_num} failed: {e}")
         return {"status": "error", "error": f"Row {row_num}: {str(e)}"}
@@ -591,8 +614,8 @@ def _process_csv_row(
 @router.post("/import/csv", response_model=CSVImportResponse)
 async def import_users_csv(
     file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_admin)] = None,
     request: Request = None,
 ):
     """
@@ -771,7 +794,7 @@ async def import_users_csv(
 
 
 @router.get("/meta/departments")
-def get_departments(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def get_departments(db: Annotated[Session, Depends(get_db)] = None, current_user: Annotated[User, Depends(get_current_user)] = None):
     """Get all unique departments for filtering."""
     results = db.query(User.department).filter(
         User.department != None,
@@ -785,8 +808,8 @@ def get_departments(db: Session = Depends(get_db), current_user: User = Depends(
 @router.get("/{user_id}/mfa/status", response_model=AdminMFAStatusResponse)
 def admin_get_user_mfa_status(
     user_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_admin)] = None,
     request: Request = None,
 ):
     """
@@ -846,8 +869,8 @@ def admin_get_user_mfa_status(
 def admin_reset_user_mfa(
     user_id: int,
     request_data: AdminMFAResetRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_admin)] = None,
     request: Request = None,
 ):
     """
@@ -942,8 +965,8 @@ def admin_reset_user_mfa(
 
 @router.post("/heartbeat", response_model=HeartbeatResponse)
 def heartbeat(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None,
 ):
     """
     Heartbeat endpoint to mark user as online.

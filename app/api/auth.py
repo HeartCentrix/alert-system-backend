@@ -2,7 +2,7 @@ import secrets
 import time
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Annotated, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Query, Response, Body
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
@@ -56,7 +56,7 @@ from app.utils.audit import create_audit_log
 # ─── ERROR MESSAGE CONSTANTS ──────────────────────────────────────────────────
 INVALID_CREDENTIALS_MFA_MSG = "Invalid credentials or MFA code"
 INVALID_CREDENTIALS_RECOVERY_MSG = "Invalid credentials or recovery code"
-PASSWORD_RESET_SENT_MSG = "If an account exists with this email, a password reset link has been sent."
+PASSWORD_RESET_SENT_MSG = "If an account exists with that email, a password reset link has been sent"
 
 
 logger = logging.getLogger(__name__)
@@ -96,34 +96,29 @@ IP_RATE_LIMIT_WINDOW_SECONDS = 600  # 10 minutes
 MFA_CHALLENGE_EXPIRE_SECONDS = 300  # 5 minutes to complete MFA verification
 
 
+def _get_samesite_policy(is_production: bool) -> str:
+    """Return the SameSite cookie policy based on environment.
+
+    SameSite=None for cross-origin (Vercel → Railway in prod).
+    SameSite=Lax for same-origin localhost in development.
+    """
+    return "none" if is_production else "lax"
+
+
 def _set_refresh_cookie(response: Response, token: str, expire_days: int) -> None:
     """
     Attach the refresh token as an HttpOnly cookie on a FastAPI Response object.
 
-    NOTE: For cross-origin deployments (Vercel + Railway), cookies are set but
-    browsers may block them. Frontend should also accept refresh_token in response body.
-
-    Security properties:
-    - HttpOnly: JS cannot read it — eliminates XSS token theft
-    - Secure: HTTPS only — never sent over plain HTTP
-    - SameSite=None: Required for cross-origin cookie usage
-    - Path=/api/v1/auth: cookie only sent to auth endpoints
-
-    In development mode, secure=False so localhost works without HTTPS.
+    Security: HttpOnly (no XSS), Secure (HTTPS only), SameSite per environment.
+    Path restricted to /api/v1/auth so cookie is not sent to other endpoints.
     """
     is_production = settings.APP_ENV != "development"
-
-    # SameSite=None is required for cross-origin cookie usage (Vercel → Railway).
-    # In development (same-origin localhost), SameSite=Lax is sufficient and avoids
-    # ZAP's "Cookie with SameSite Attribute None" alert.
-    # Secure=True is always set — modern browsers accept Secure cookies on localhost,
-    # and ZAP flags Secure=False as "Cookie Without Secure Flag" regardless of scheme.
     response.set_cookie(
         key="refresh_token",
         value=token,
         httponly=True,
         secure=True,
-        samesite="none" if is_production else "lax",
+        samesite=_get_samesite_policy(is_production),
         path="/api/v1/auth",
         max_age=expire_days * 86400,
     )
@@ -350,6 +345,37 @@ def check_account_lockout(user_id: int) -> tuple[bool, int]:
     return True, 0
 
 
+def _parse_attempt_count(r, key: str, user_id: int) -> int:
+    """Parse the current attempt count from Redis, deleting malformed keys."""
+    data = r.get(key)
+    if data is None:
+        return 0
+    try:
+        parts = data.split("|")
+        if len(parts) != 2:
+            logger.warning(f"Malformed lockout data for user {user_id}: wrong format, resetting counter")
+            r.delete(key)
+            return 0
+        return int(parts[0])
+    except (ValueError, IndexError) as e:
+        logger.warning(f"Malformed lockout data for user {user_id}: {e}, resetting counter")
+        r.delete(key)
+        return 0
+
+
+def _calculate_lockout_seconds(attempt_count: int) -> int:
+    """Return lockout duration in seconds based on exponential backoff tiers."""
+    if attempt_count < ACCOUNT_LOCKOUT_THRESHOLD:
+        return 0
+    if attempt_count < 10:
+        return 60    # 1st tier: 5-9 fails → 1 minute
+    if attempt_count < 15:
+        return 300   # 2nd tier: 10-14 fails → 5 minutes
+    if attempt_count < 20:
+        return 900   # 3rd tier: 15-19 fails → 15 minutes
+    return 3600      # 4th+ tier: 20+ fails → 1 hour
+
+
 def record_failed_login(user_id: int) -> int:
     """
     Record a failed login attempt and apply lockout if threshold reached.
@@ -361,52 +387,14 @@ def record_failed_login(user_id: int) -> int:
     - 4th+ lockout (20+ fails) → 1 hour
 
     Returns the retry_after seconds if locked out, 0 otherwise.
-    
-    Parsing is safe: malformed data is logged, deleted, and treated as 0 attempts.
     """
     r = _get_redis_client()
     key = f"lockout:account:{user_id}"
 
-    data = r.get(key)
-    if data is None:
-        attempt_count = 0
-    else:
-        # Safe parsing: handle malformed data gracefully
-        try:
-            parts = data.split("|")
-            if len(parts) != 2:
-                logger.warning(f"Malformed lockout data for user {user_id}: wrong format, resetting counter")
-                r.delete(key)
-                attempt_count = 0
-            else:
-                attempt_count = int(parts[0])
-        except (ValueError, IndexError) as e:
-            # Malformed data - log, delete corrupted key, reset counter
-            logger.warning(f"Malformed lockout data for user {user_id}: {e}, resetting counter")
-            r.delete(key)
-            attempt_count = 0
-
-    attempt_count += 1
-    
-    # Determine lockout duration based on attempt count tier
-    lockout_seconds = 0
-    if attempt_count >= ACCOUNT_LOCKOUT_THRESHOLD:
-        if attempt_count < 10:
-            # 1st lockout tier: 5-9 fails → 1 minute
-            lockout_seconds = 60
-        elif attempt_count < 15:
-            # 2nd lockout tier: 10-14 fails → 5 minutes
-            lockout_seconds = 300
-        elif attempt_count < 20:
-            # 3rd lockout tier: 15-19 fails → 15 minutes
-            lockout_seconds = 900
-        else:
-            # 4th+ lockout tier: 20+ fails → 1 hour
-            lockout_seconds = 3600
-    
+    attempt_count = _parse_attempt_count(r, key, user_id) + 1
+    lockout_seconds = _calculate_lockout_seconds(attempt_count)
     lockout_until = int(time.time()) + lockout_seconds if lockout_seconds > 0 else 0
     r.setex(key, max(lockout_seconds, 86400), f"{attempt_count}|{lockout_until}")
-    
     return lockout_seconds if lockout_seconds > 0 else 0
 
 
@@ -485,7 +473,7 @@ async def entra_callback(
     error_description: str = Query(None),
     req: Request = None,
     response: Response = None,
-    db: Session = Depends(get_db),
+    db: Annotated[Session, Depends(get_db)] = None,
 ):
     """Handle Microsoft Entra ID OAuth callback.
 
@@ -680,7 +668,7 @@ async def entra_callback(
 async def ldap_login(
     request: Request,
     response: Response,
-    db: Session = Depends(get_db),
+    db: Annotated[Session, Depends(get_db)] = None,
     username: str = Body(...),
     password: str = Body(...),
 ):
@@ -838,7 +826,7 @@ async def _handle_login_mfa(user, request, db, client_ip) -> object:
 
 
 @router.post("/login")
-async def login(request: LoginRequest, req: Request, response: Response, db: Session = Depends(get_db)):
+async def login(request: LoginRequest, req: Request, response: Response, db: Annotated[Session, Depends(get_db)] = None):
     """
     Authenticate user with email and password.
 
@@ -1012,7 +1000,7 @@ async def login(request: LoginRequest, req: Request, response: Response, db: Ses
 
 
 @router.post("/refresh", response_model=TokenResponse)
-async def refresh_token(req: Request, response: Response, db: Session = Depends(get_db)):
+async def refresh_token(req: Request, response: Response, db: Annotated[Session, Depends(get_db)] = None):
     """
     Refresh access token using the refresh token from HttpOnly cookie or request body.
 
@@ -1101,8 +1089,8 @@ async def refresh_token(req: Request, response: Response, db: Session = Depends(
 def logout(
     req: Request,
     response: Response,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user: Annotated[User, Depends(get_current_user)] = None,
+    db: Annotated[Session, Depends(get_db)] = None
 ):
     """
     Logout user by revoking refresh token and clearing cookie.
@@ -1141,7 +1129,7 @@ def logout(
 
 
 @router.post("/forgot-password")
-def forgot_password(request: PasswordResetRequest, req: Request, db: Session = Depends(get_db)):
+def forgot_password(request: PasswordResetRequest, req: Request, db: Annotated[Session, Depends(get_db)] = None):
     """
     Request a password reset email.
 
@@ -1204,7 +1192,7 @@ def forgot_password(request: PasswordResetRequest, req: Request, db: Session = D
 
 
 @router.post("/reset-password")
-def reset_password(request: PasswordResetConfirm, db: Session = Depends(get_db)):
+def reset_password(request: PasswordResetConfirm, db: Annotated[Session, Depends(get_db)] = None):
     """
     Reset password using a valid reset token.
 
@@ -1268,8 +1256,8 @@ def reset_password(request: PasswordResetConfirm, db: Session = Depends(get_db))
 @router.post("/change-password")
 def change_password(
     request: ChangePasswordRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_user: Annotated[User, Depends(get_current_user)] = None,
+    db: Annotated[Session, Depends(get_db)] = None
 ):
     # Prevent password change for SSO users
     if current_user.auth_provider != "local":
@@ -1299,15 +1287,15 @@ def change_password(
 
 
 @router.get("/me", response_model=UserResponse)
-def get_me(current_user: User = Depends(get_current_user)):
+def get_me(current_user: Annotated[User, Depends(get_current_user)] = None):
     return current_user
 
 
 @router.put("/me", response_model=UserResponse)
 def update_my_profile(
     data: UserProfileUpdate,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    current_user: Annotated[User, Depends(get_current_user)] = None,
+    db: Annotated[Session, Depends(get_db)] = None,
     req: Request = None,
 ):
     """Update your own profile.
@@ -1334,12 +1322,23 @@ def update_my_profile(
     return current_user
 
 
+
+def _format_login_attempt(attempt) -> dict:
+    """Serialize a LoginAttempt record to a response dict."""
+    return {
+        "id": attempt.id,
+        "email": attempt.email,
+        "ip_address": attempt.ip_address,
+        "success": attempt.success,
+        "attempted_at": attempt.attempted_at,
+    }
+
 @router.get("/login-attempts")
 def get_login_attempts(
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_admin)] = None
 ):
     """View recent login attempts (for security monitoring).
 
@@ -1349,23 +1348,14 @@ def get_login_attempts(
         desc(LoginAttempt.attempted_at)
     ).offset(offset).limit(limit).all()
 
-    return [
-        {
-            "id": a.id,
-            "email": a.email,
-            "ip_address": a.ip_address,
-            "success": a.success,
-            "attempted_at": a.attempted_at
-        }
-        for a in attempts
-    ]
+    return [_format_login_attempt(a) for a in attempts]
 
 
 @router.post("/debug/reset-rate-limits")
 def reset_rate_limits(
     request: Request,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_admin)] = None
 ):
     """Debug endpoint to reset all rate limits. ADMIN only.
 
@@ -1388,8 +1378,8 @@ def reset_rate_limits(
 @router.post("/mfa/enroll/start", response_model=MFAEnrollStartResponse)
 def start_mfa_enrollment(
     request: MFAEnrollStartRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
     """
     Start MFA enrollment for the current user.
@@ -1446,8 +1436,8 @@ def start_mfa_enrollment(
 @router.post("/mfa/enroll/complete", response_model=MFAEnrollConfirmResponse)
 def complete_mfa_enrollment(
     request: MFAEnrollConfirmRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
     """
     Complete MFA enrollment by verifying OTP code.
@@ -1492,8 +1482,8 @@ def complete_mfa_enrollment(
 @router.post("/mfa/disable", response_model=MFADisableResponse)
 def disable_mfa(
     request: MFADisableRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
     """
     Disable MFA for the current user.
@@ -1540,8 +1530,8 @@ def disable_mfa(
 @router.post("/mfa/reset/start", response_model=MFAEnrollStartResponse)
 def start_mfa_reset(
     request: MFAResetStartRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
     """
     Start MFA reset/replacement flow.
@@ -1591,8 +1581,8 @@ def start_mfa_reset(
 @router.post("/mfa/reset/complete", response_model=MFAResetConfirmResponse)
 def complete_mfa_reset(
     request: MFAResetConfirmRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
     """
     Complete MFA reset by verifying new OTP code.
@@ -1638,8 +1628,8 @@ def complete_mfa_reset(
 async def regenerate_recovery_codes_endpoint(
     request: MFARegenerateRecoveryCodesRequest,
     req: Request,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
     """
     Regenerate recovery codes for the authenticated user with dual-proof verification.
@@ -1733,8 +1723,8 @@ async def regenerate_recovery_codes_endpoint(
 
 @router.get("/mfa/status", response_model=MFAStatusDetailResponse)
 def get_mfa_status(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
     """
     Get the current MFA status for the authenticated user.
@@ -1762,7 +1752,7 @@ async def verify_mfa_and_complete_login(
     request: MFAVerifyLoginRequest,
     req: Request,
     response: Response,
-    db: Session = Depends(get_db)
+    db: Annotated[Session, Depends(get_db)] = None
 ):
     """
     Complete MFA verification and issue auth tokens.
@@ -1946,7 +1936,7 @@ async def verify_recovery_code_and_login(
     request: MFARecoveryCodeVerifyRequest,
     req: Request,
     response: Response,
-    db: Session = Depends(get_db)
+    db: Annotated[Session, Depends(get_db)] = None
 ):
     """
     Complete login using a recovery code.
@@ -2081,8 +2071,8 @@ async def verify_recovery_code_and_login(
 
 @router.get("/account/mfa/recovery-codes/status", response_model=MFARecoveryCodeStatus)
 def get_recovery_codes_status(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
     """
     Get the current status of recovery codes for the authenticated user.
@@ -2097,8 +2087,8 @@ def get_recovery_codes_status(
 @router.post("/account/mfa/recovery-codes/regenerate", response_model=MFARecoveryCodesResponse)
 def regenerate_recovery_codes(
     request: MFARegenerateRecoveryCodesRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
     """
     Regenerate recovery codes for the authenticated user.
@@ -2151,8 +2141,8 @@ def regenerate_recovery_codes(
 
 @router.post("/account/mfa/recovery-codes/generate-initial", response_model=MFARecoveryCodesResponse)
 def generate_initial_recovery_codes(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
     """
     Generate initial recovery codes for a user who just enabled MFA.

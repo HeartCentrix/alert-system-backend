@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, update
-from typing import Optional, List
+from typing import Annotated, Optional, List
 from datetime import datetime, timezone
 import logging
 from app.database import get_db
@@ -33,6 +33,80 @@ NOTIFICATION_NOT_FOUND_MSG = "Notification not found"
 
 
 logger = logging.getLogger(__name__)
+
+
+def _apply_viewer_notification_filter(query, current_user):
+    """Restrict notification query to only records the viewer is a recipient of."""
+    if current_user.role != UserRole.VIEWER:
+        return query
+    from sqlalchemy import or_
+    return query.filter(
+        or_(
+            Notification.target_all == True,
+            Notification.target_users.any(User.id == current_user.id),
+            Notification.target_groups.any(Group.members.any(User.id == current_user.id)),
+        )
+    )
+
+
+def _notification_to_dict(item) -> dict:
+    """Serialize a Notification model to a JSON-safe dict."""
+    return {
+        "id": item.id,
+        "incident_id": item.incident_id,
+        "title": item.title,
+        "message": item.message,
+        "subject": item.subject,
+        "channels": item.channels,
+        "status": item.status.value if item.status else None,
+        "target_all": item.target_all,
+        "scheduled_at": item.scheduled_at.isoformat() if item.scheduled_at else None,
+        "sent_at": item.sent_at.isoformat() if item.sent_at else None,
+        "total_recipients": item.total_recipients,
+        "sent_count": item.sent_count,
+        "delivered_count": item.delivered_count,
+        "failed_count": item.failed_count,
+        "response_required": item.response_required,
+        "response_deadline_minutes": item.response_deadline_minutes,
+        "created_by_id": item.created_by_id,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+    }
+
+
+def _assert_notification_recipient_access(notification, current_user) -> None:
+    """Raise 403 if a VIEWER is not a recipient of the given notification."""
+    if current_user.role == UserRole.VIEWER:
+        is_recipient = (
+            notification.target_all
+            or any(u.id == current_user.id for u in notification.target_users)
+            or any(
+                g.members and any(m.id == current_user.id for m in g.members)
+                for g in notification.target_groups
+            )
+        )
+        if not is_recipient:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied. You can only view notifications where you are a recipient.",
+            )
+
+
+def _build_response_out(r) -> NotificationResponseOut:
+    """Build a NotificationResponseOut from a NotificationResponse ORM row."""
+    return NotificationResponseOut(
+        id=r.id,
+        notification_id=r.notification_id,
+        user_id=r.user_id,
+        user_email=r.user_email,
+        user_name=r.user.full_name if r.user else r.from_number,
+        channel=r.channel,
+        response_type=r.response_type,
+        message=r.message,
+        latitude=r.latitude,
+        longitude=r.longitude,
+        responded_at=r.responded_at,
+    )
+
 
 # ─── INCIDENT STATUS TRANSITIONS ──────────────────────────────────────────────
 
@@ -77,8 +151,8 @@ def list_incidents(
     status: Optional[IncidentStatus] = None,
     severity: Optional[IncidentSeverity] = None,
     limit: int = Query(20, ge=1, le=100),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
     """List incidents with optional filtering by status and severity.
 
@@ -98,8 +172,8 @@ def list_incidents(
 @incidents_router.post("", response_model=IncidentResponse, status_code=201)
 def create_incident(
     data: IncidentCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_manager),
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_manager)] = None,
     request: Request = None,
 ):
     incident = Incident(**data.model_dump(), created_by_id=current_user.id)
@@ -121,8 +195,8 @@ def create_incident(
 def update_incident(
     incident_id: int,
     data: IncidentUpdate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_manager)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_manager)] = None
 ):
     incident = db.query(Incident).filter(Incident.id == incident_id).first()
     if not incident:
@@ -154,8 +228,8 @@ def update_incident(
 @incidents_router.get("/{incident_id}", response_model=IncidentResponse)
 def get_incident(
     incident_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
     incident = db.query(Incident).filter(Incident.id == incident_id).first()
     if not incident:
@@ -174,8 +248,8 @@ def list_notifications(
     page_size: int = Query(20, ge=1, le=100),
     incident_id: Optional[int] = None,
     status: Optional[NotificationStatus] = None,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
     """List notifications with optional filtering.
     
@@ -183,63 +257,21 @@ def list_notifications(
         - Manager and Admin roles: Can see all notifications
         - Viewer role: Can only see notifications where they are recipients
     """
-    query = db.query(Notification)
-    
-    # Viewer-role users can only see notifications where they are recipients
-    if current_user.role == UserRole.VIEWER:
-        # Show notifications where: target_all=True OR user is in target_users OR user is in target_groups
-        from sqlalchemy import or_
-        query = query.filter(
-            or_(
-                Notification.target_all == True,
-                Notification.target_users.any(User.id == current_user.id),
-                Notification.target_groups.any(Group.members.any(User.id == current_user.id))
-            )
-        )
-    
+    query = _apply_viewer_notification_filter(db.query(Notification), current_user)
     if incident_id:
         query = query.filter(Notification.incident_id == incident_id)
     if status:
         query = query.filter(Notification.status == status)
-
-    # Get total count
     total = query.count()
-
-    # Get paginated results and convert to dict
     items = query.order_by(desc(Notification.created_at)).offset((page - 1) * page_size).limit(page_size).all()
-    
-    # Convert SQLAlchemy models to dict for JSON serialization
-    items_data = []
-    for item in items:
-        items_data.append({
-            "id": item.id,
-            "incident_id": item.incident_id,
-            "title": item.title,
-            "message": item.message,
-            "subject": item.subject,
-            "channels": item.channels,
-            "status": item.status.value if item.status else None,
-            "target_all": item.target_all,
-            "scheduled_at": item.scheduled_at.isoformat() if item.scheduled_at else None,
-            "sent_at": item.sent_at.isoformat() if item.sent_at else None,
-            "total_recipients": item.total_recipients,
-            "sent_count": item.sent_count,
-            "delivered_count": item.delivered_count,
-            "failed_count": item.failed_count,
-            "response_required": item.response_required,
-            "response_deadline_minutes": item.response_deadline_minutes,
-            "created_by_id": item.created_by_id,
-            "created_at": item.created_at.isoformat() if item.created_at else None,
-        })
-    
-    return {"items": items_data, "total": total, "page": page, "page_size": page_size}
+    return {"items": [_notification_to_dict(item) for item in items], "total": total, "page": page, "page_size": page_size}
 
 
 @notifications_router.post("", response_model=NotificationResponse, status_code=201)
 async def create_notification(
     data: NotificationCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_manager),
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_manager)] = None,
     request: Request = None,
 ):
     # Rate limiting 1: Check general API rate limit for state-changing operations
@@ -358,8 +390,8 @@ async def create_notification(
 @notifications_router.post("/{notification_id}/send", response_model=NotificationResponse)
 async def send_notification(
     notification_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_manager),
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_manager)] = None,
     request: Request = None,
 ):
     """Manually trigger a draft notification.
@@ -407,8 +439,8 @@ async def send_notification(
 @notifications_router.post("/{notification_id}/cancel")
 def cancel_notification(
     notification_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_manager)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_manager)] = None
 ):
     notification = db.query(Notification).filter(Notification.id == notification_id).first()
     if not notification:
@@ -423,8 +455,8 @@ def cancel_notification(
 @notifications_router.get("/{notification_id}", response_model=NotificationDetailResponse)
 def get_notification(
     notification_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
     """Get notification details.
     
@@ -466,8 +498,8 @@ def get_delivery_logs(
     status: Optional[DeliveryStatus] = None,
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
     """Get delivery logs for a notification with optional filtering.
 
@@ -529,8 +561,8 @@ def get_responses(
     notification_id: int,
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
     """Get notification responses.
 
@@ -543,43 +575,12 @@ def get_responses(
         limit: Maximum number of results (1-1000, default 100)
         offset: Number of results to skip (default 0)
     """
-    # Fetch the notification first to check permissions
     notification = db.query(Notification).filter(Notification.id == notification_id).first()
     if not notification:
         raise HTTPException(status_code=404, detail=NOTIFICATION_NOT_FOUND_MSG)
-
-    # Viewer-role users can only see responses for notifications where they are recipients
-    if current_user.role == UserRole.VIEWER:
-        from sqlalchemy import or_
-        is_recipient = (
-            notification.target_all or
-            any(u.id == current_user.id for u in notification.target_users) or
-            any(g.members and any(m.id == current_user.id for m in g.members) for g in notification.target_groups)
-        )
-        if not is_recipient:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied. You can only view responses for notifications where you are a recipient."
-            )
-
-    query = db.query(NRModel).filter(NRModel.notification_id == notification_id)
-    responses = query.all()
-    result = []
-    for r in responses:
-        result.append(NotificationResponseOut(
-            id=r.id,
-            notification_id=r.notification_id,
-            user_id=r.user_id,
-            user_email=r.user_email,
-            user_name=r.user.full_name if r.user else r.from_number,
-            channel=r.channel,
-            response_type=r.response_type,
-            message=r.message,
-            latitude=r.latitude,
-            longitude=r.longitude,
-            responded_at=r.responded_at
-        ))
-    return result
+    _assert_notification_recipient_access(notification, current_user)
+    responses = db.query(NRModel).filter(NRModel.notification_id == notification_id).all()
+    return [_build_response_out(r) for r in responses]
 
 
 
@@ -633,7 +634,7 @@ async def submit_response(
     notification_id: int,
     data: NotificationResponseCreate,
     token: Optional[str] = None,
-    db: Session = Depends(get_db),
+    db: Annotated[Session, Depends(get_db)] = None,
     request: Request = None
 ):
     """

@@ -36,34 +36,34 @@ def create_all_enums():
                 logger.info(f"ENUM type already exists: {enum_name}")
         
         # User roles
-        create_enum_if_not_exists("userrole", ["SUPER_ADMIN", "ADMIN", "MANAGER", "VIEWER"])
+        create_enum_if_not_exists("userrole", ["super_admin", "admin", "manager", "viewer"])
         
         # Group types
-        create_enum_if_not_exists("grouptype", ["STATIC", "DYNAMIC"])
-        
+        create_enum_if_not_exists("grouptype", ["static", "dynamic"])
+
         # Notification status
-        create_enum_if_not_exists("notificationstatus", ["DRAFT", "SENDING", "SENT", "PARTIALLY_SENT", "FAILED", "SCHEDULED", "CANCELLED"])
-        
+        create_enum_if_not_exists("notificationstatus", ["draft", "sending", "sent", "partially_sent", "failed", "scheduled", "cancelled"])
+
         # Delivery status
-        create_enum_if_not_exists("deliverystatus", ["PENDING", "SENT", "DELIVERED", "FAILED", "BOUNCED"])
-        
+        create_enum_if_not_exists("deliverystatus", ["pending", "sent", "delivered", "failed", "bounced"])
+
         # Response types
-        create_enum_if_not_exists("responsetype", ["SAFE", "NEED_HELP", "ACKNOWLEDGED", "CUSTOM"])
-        
+        create_enum_if_not_exists("responsetype", ["safe", "need_help", "acknowledged", "custom"])
+
         # Alert channels
-        create_enum_if_not_exists("alertchannel", ["SMS", "EMAIL", "VOICE", "SLACK", "TEAMS", "WEB"])
+        create_enum_if_not_exists("alertchannel", ["sms", "email", "voice", "slack", "teams", "web"])
         
         # Incident severity
-        create_enum_if_not_exists("incidentseverity", ["HIGH", "MEDIUM", "LOW", "INFO"])
-        
+        create_enum_if_not_exists("incidentseverity", ["high", "medium", "low", "info"])
+
         # Incident status
-        create_enum_if_not_exists("incidentstatus", ["ACTIVE", "MONITORING", "RESOLVED", "CANCELLED"])
+        create_enum_if_not_exists("incidentstatus", ["active", "monitoring", "resolved", "cancelled"])
         
         # User location assignment types
-        create_enum_if_not_exists("userlocationassignmenttype", ["MANUAL", "GEOFENCE"])
-        
+        create_enum_if_not_exists("userlocationassignmenttype", ["manual", "geofence"])
+
         # User location status
-        create_enum_if_not_exists("userlocationstatus", ["ACTIVE", "INACTIVE"])
+        create_enum_if_not_exists("userlocationstatus", ["active", "inactive"])
         
         db.commit()
         logger.info("All ENUM types created successfully")
@@ -120,7 +120,7 @@ def _ensure_sso_columns():
             db.execute(
                 text("""
                     ALTER TABLE users
-                    ADD COLUMN auth_provider VARCHAR(20) DEFAULT 'local' NOT NULL
+                    ADD COLUMN auth_provider VARCHAR(255) DEFAULT 'local' NOT NULL
                 """)
             )
             logger.info("Added auth_provider column to users table")

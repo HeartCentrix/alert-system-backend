@@ -235,19 +235,19 @@ def ensure_mfa_secret_column_expanded():
 def ensure_sso_columns():
     """
     Ensure SSO-related columns exist in the users table.
-    
+
     These columns are required for Entra ID and LDAP authentication:
     - auth_provider: Authentication provider (local, entra, ldap)
     - external_id: External identity provider ID (Entra OID or LDAP DN)
     - is_enabled: Account enabled status (separate from is_online presence)
     - is_online: Real-time online presence indicator
-    
+
     This function is idempotent - safe to call multiple times.
     """
     db = SessionLocal()
     try:
         # Ensure auth_provider column
-        ensure_column_exists('users', 'auth_provider', 'VARCHAR(20)', nullable=False)
+        ensure_column_exists('users', 'auth_provider', 'VARCHAR(255)', nullable=False)
         
         # Ensure external_id column  
         ensure_column_exists('users', 'external_id', 'VARCHAR(255)', nullable=True)
