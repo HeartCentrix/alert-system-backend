@@ -840,14 +840,14 @@ async def import_users_csv(
             if result.get('status') == 'failed':
                 emails_failed += 1
                 email_failures.append(f"Email to {_scrub_email(user_data['email'])} failed: {result.get('error', 'Unknown error')}")
-                logger.error(f"Welcome email failed for user_id={user.id}, email={_scrub_email(user_data['email'])}: {result.get('error')}")
+                logger.error(f"Welcome email failed for user_id={user_data.get('id', 'N/A')}, email={_scrub_email(user_data['email'])}: {result.get('error')}")
             else:
                 emails_sent += 1
-                logger.info(f"Welcome email sent to user_id={user.id}, email={_scrub_email(user_data['email'])}")
+                logger.info(f"Welcome email sent to user_id={user_data.get('id', 'N/A')}, email={_scrub_email(user_data['email'])}")
         except Exception as e:
             emails_failed += 1
             email_failures.append(f"Email to {_scrub_email(user_data['email'])} error: {str(e)}")
-            logger.error(f"Exception sending welcome email to user_id={user.id}, email={_scrub_email(user_data['email'])}: {e}")
+            logger.error(f"Exception sending welcome email to user_id={user_data.get('id', 'N/A')}, email={_scrub_email(user_data['email'])}: {e}")
 
     # Add secondary audit log for email results if there were newly created users
     if created_users and (emails_sent > 0 or emails_failed > 0):
