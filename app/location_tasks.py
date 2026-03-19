@@ -421,16 +421,16 @@ def _update_primary_location(
 ) -> None:
     """
     Update user's primary location_id based on geofence results.
-    
+
     Sets to the closest location if inside any, or None if outside all.
     """
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         return
-    
+
     # Find closest location user is inside
     inside_locations = [r for r in geofence_results if r.is_inside]
-    
+
     if inside_locations:
         # Sort by distance, pick closest
         closest = min(inside_locations, key=lambda r: r.distance_miles)
@@ -438,6 +438,105 @@ def _update_primary_location(
     else:
         # Not inside any geofence - clear primary location
         user.location_id = None
+
+
+# ─── PERIODIC GEOFENCE HELPERS ────────────────────────────────────────────────
+
+def _get_users_with_location(db: Session) -> List[Dict[str, Any]]:
+    """
+    Get all active users with known coordinates.
+
+    Returns a list of dicts with user_id, latitude, longitude, and location_id.
+    """
+    users_with_location = db.query(
+        User.id,
+        User.latitude,
+        User.longitude,
+        User.location_id
+    ).filter(
+        User.is_active == True,
+        User.latitude.isnot(None),
+        User.longitude.isnot(None)
+    ).all()
+
+    if not users_with_location:
+        logger.info("No users with known coordinates for geofence check")
+        return []
+
+    return [
+        {"user_id": u.id, "latitude": u.latitude, "longitude": u.longitude, "location_id": u.location_id}
+        for u in users_with_location
+    ]
+
+
+def _get_active_geofence_locations(db: Session) -> List[Location]:
+    """Get all active locations with valid coordinates for geofence checking."""
+    return db.query(Location).filter(
+        Location.is_active == True,
+        Location.latitude.isnot(None),
+        Location.longitude.isnot(None)
+    ).all()
+
+
+def _process_single_user_geofence(
+    db: Session,
+    user_loc: Dict[str, Any],
+    locations: List[Location]
+) -> int:
+    """
+    Process geofence check for a single user.
+
+    Args:
+        db: Database session
+        user_loc: Dict with user_id, latitude, longitude
+        locations: List of active locations to check against
+
+    Returns:
+        Number of assignment changes made
+    """
+    uid = user_loc["user_id"]
+    lat = user_loc["latitude"]
+    lng = user_loc["longitude"]
+
+    # Validate coordinates
+    is_valid, error = validate_coordinates(lat, lng)
+    if not is_valid:
+        logger.debug(f"Invalid coordinates for user {_scrub_user_id(uid)}: {error}")
+        return 0
+
+    # Batch geofence check
+    results = check_geofences_batch(lat, lng, locations)
+
+    total_changes = 0
+
+    # Process each geofence result
+    for result in results:
+        if result.is_inside:
+            if _assign_user_to_location(
+                db=db,
+                user_id=uid,
+                location_id=result.location_id,
+                assignment_type=UserLocationAssignmentType.GEOFENCE,
+                detected_latitude=lat,
+                detected_longitude=lng,
+                distance_miles=result.distance_miles,
+                action="entered_geofence"
+            ):
+                total_changes += 1
+        else:
+            if _remove_user_from_location(
+                db=db,
+                user_id=uid,
+                location_id=result.location_id,
+                reason="User exited geofence",
+                action="exited_geofence"
+            ):
+                total_changes += 1
+
+    # Update user's primary location
+    _update_primary_location(db, uid, results)
+
+    return total_changes
 
 
 # ─── REDIS SYNC TASKS ─────────────────────────────────────────────────────────
@@ -610,73 +709,20 @@ def periodic_geofence_check() -> Dict[str, Any]:
     """
     db = SessionLocal()
     try:
-        # Get all active users that have a known location
-        # Only select necessary columns to avoid issues with migrations
-        users_with_location = db.query(
-            User.id,
-            User.latitude,
-            User.longitude,
-            User.location_id
-        ).filter(
-            User.is_active == True,
-            User.latitude.isnot(None),
-            User.longitude.isnot(None)
-        ).all()
-
-        if not users_with_location:
-            logger.info("No users with known coordinates for geofence check")
+        # Get users with locations
+        user_locations = _get_users_with_location(db)
+        if not user_locations:
             return {"processed": 0, "message": "No users with coordinates"}
-
-        # Build user_locations list and call batch check
-        user_locations = [
-            {"user_id": u.id, "latitude": u.latitude, "longitude": u.longitude, "location_id": u.location_id}
-            for u in users_with_location
-        ]
 
         logger.info(f"Running periodic geofence check for {len(user_locations)} users")
 
-        # Reuse batch logic inline to avoid serialization overhead
-        locations = db.query(Location).filter(
-            Location.is_active == True,
-            Location.latitude.isnot(None),
-            Location.longitude.isnot(None)
-        ).all()
-
+        # Get active geofence locations
+        locations = _get_active_geofence_locations(db)
         if not locations:
             return {"processed": len(user_locations), "message": "No active locations"}
 
-        total_changes = 0
-        for user_loc in user_locations:
-            try:
-                uid = user_loc["user_id"]
-                lat = user_loc["latitude"]
-                lng = user_loc["longitude"]
-
-                is_valid, _ = validate_coordinates(lat, lng)
-                if not is_valid:
-                    continue
-
-                results = check_geofences_batch(lat, lng, locations)
-
-                for result in results:
-                    if result.is_inside:
-                        if _assign_user_to_location(
-                            db=db, user_id=uid, location_id=result.location_id,
-                            assignment_type=UserLocationAssignmentType.GEOFENCE,
-                            detected_latitude=lat, detected_longitude=lng,
-                            distance_miles=result.distance_miles, action="entered_geofence"
-                        ):
-                            total_changes += 1
-                    else:
-                        if _remove_user_from_location(
-                            db=db, user_id=uid, location_id=result.location_id,
-                            reason="User exited geofence", action="exited_geofence"
-                        ):
-                            total_changes += 1
-
-                _update_primary_location(db, uid, results)
-            except Exception as e:
-                logger.error(f"Periodic geofence failed for user {_scrub_user_id(user_loc.get('user_id'))}: {type(e).__name__}")
+        # Process each user's geofence
+        total_changes = _process_user_batch(db, user_locations, locations)
 
         db.commit()
         logger.info(
@@ -694,6 +740,37 @@ def periodic_geofence_check() -> Dict[str, Any]:
         return {"error": str(e)}
     finally:
         db.close()
+
+
+def _process_user_batch(
+    db: Session,
+    user_locations: List[Dict[str, Any]],
+    locations: List[Location]
+) -> int:
+    """
+    Process geofence checks for a batch of users.
+
+    Args:
+        db: Database session
+        user_locations: List of user location dicts
+        locations: List of active locations to check against
+
+    Returns:
+        Total number of assignment changes made
+    """
+    total_changes = 0
+
+    for user_loc in user_locations:
+        try:
+            changes = _process_single_user_geofence(db, user_loc, locations)
+            total_changes += changes
+        except Exception as e:
+            logger.error(
+                f"Periodic geofence failed for user {_scrub_user_id(user_loc.get('user_id'))}: "
+                f"{type(e).__name__}"
+            )
+
+    return total_changes
 
 
 @celery_app.task

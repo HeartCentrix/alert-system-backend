@@ -822,7 +822,12 @@ def update_template(
     return template
 
 
-@templates_router.delete("/{template_id}")
+@templates_router.delete(
+    "/{template_id}",
+    responses={
+        404: {"description": "Not Found - Template does not exist"},
+    }
+)
 def delete_template(
     template_id: Annotated[int, Path(..., description="Template ID")],
     db: Annotated[Session, Depends(get_db)] = None,

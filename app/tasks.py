@@ -105,16 +105,26 @@ def _get_group_member_ids(group, db, notification) -> List[int]:
         return [u.id for u in group.members]
 
 
-def _collect_recipient_ids_from_groups_and_users(db, notification: Notification) -> set:
-    """Collect unique recipient IDs from groups and target users."""
+def _collect_group_member_ids(db, notification: Notification) -> set:
+    """Collect member IDs from all target groups."""
     recipient_ids = set()
-
     for group in notification.target_groups:
         member_ids = _get_group_member_ids(group, db, notification)
         recipient_ids.update(member_ids)
+    return recipient_ids
 
+
+def _collect_user_ids(notification: Notification, existing_ids: set) -> set:
+    """Add target user IDs to existing recipient set."""
     for user in notification.target_users:
-        recipient_ids.add(user.id)
+        existing_ids.add(user.id)
+    return existing_ids
+
+
+def _collect_recipient_ids_from_groups_and_users(db, notification: Notification) -> set:
+    """Collect unique recipient IDs from groups and target users."""
+    recipient_ids = _collect_group_member_ids(db, notification)
+    recipient_ids = _collect_user_ids(notification, recipient_ids)
 
     logger.info(f"Notification {notification.id}: total unique recipient IDs before is_active filter: {len(recipient_ids)}")
     return recipient_ids
