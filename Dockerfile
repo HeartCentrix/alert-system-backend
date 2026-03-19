@@ -11,6 +11,7 @@ COPY requirements-prod.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements-prod.txt
 
 # --- Production image ---
+# Rebuild date: 2026-03-19 - Force cache bust
 FROM python:3.11-slim
 
 WORKDIR /app
