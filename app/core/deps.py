@@ -51,6 +51,15 @@ def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db)
 ) -> User:
+    """
+    Get current authenticated user from JWT access token.
+    
+    Security checks:
+    - Token must be valid and not expired
+    - Token type must be 'access'
+    - User must exist and be enabled (is_enabled=True)
+    - Token must be issued after user's last password change (token_valid_after)
+    """
     token = credentials.credentials
     payload = decode_token(token, token_type="access")
     user_id = _validate_token_payload(payload)
@@ -64,7 +73,10 @@ def get_current_user(
     ).first()
 
     if not user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or account disabled")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, 
+            detail="User not found or account disabled"
+        )
 
     # Session invalidation: reject tokens issued before the last password change.
     # Note: wrapped in try-except for cases where column doesn't exist yet (migration).
@@ -78,7 +90,7 @@ def get_current_user(
             )
         else:
             raise
-
+    
     return user
 
 

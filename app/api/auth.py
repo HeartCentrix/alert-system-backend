@@ -1084,7 +1084,6 @@ async def refresh_token(req: Request, response: Response, db: Annotated[Session,
         try:
             content_type = req.headers.get("content-type", "")
             if "application/json" in content_type:
-                # Read body asynchronously
                 import json
                 body_bytes = await req.body()
                 body_data = json.loads(body_bytes.decode())
