@@ -86,24 +86,27 @@ class MFAService:
         Start MFA enrollment for a user.
 
         Security requirements:
-        - Requires current password verification (reauthentication)
+        - Requires current password verification (reauthentication) for local auth users
+        - SSO users (entra/ldap) skip password check - identity already verified via SSO session
         - Generates new pending secret (MFA not enabled yet)
         - Invalidates any previous pending enrollment
 
         Args:
             user: User model instance
-            current_password: User's current password for verification
+            current_password: User's current password for verification (ignored for SSO users)
 
         Returns:
             Tuple of (secret, qr_code_uri, manual_entry_key)
 
         Raises:
-            ValueError: If password verification fails
+            ValueError: If password verification fails (local users only)
         """
-        # Verify current password (reauthentication)
-        if not verify_password(current_password, user.hashed_password):
-            logger.warning(f"Invalid password during MFA enrollment start for user {user.id}")
-            raise ValueError(INVALID_CURRENT_PASSWORD_MSG)
+        # Verify current password (reauthentication) - skip for SSO users
+        if user.auth_provider == "local":
+            if not verify_password(current_password, user.hashed_password):
+                logger.warning(f"Invalid password during MFA enrollment start for user {user.id}")
+                raise ValueError(INVALID_CURRENT_PASSWORD_MSG)
+        # SSO users (entra/ldap) have no local password — identity already verified via SSO session
 
         # Generate new secret
         secret = generate_mfa_secret()
@@ -201,14 +204,15 @@ class MFAService:
 
         Security requirements:
         - Checks if user is allowed to disable (policy)
-        - Requires current password verification
+        - Requires current password verification (local users only)
+        - SSO users (entra/ldap) skip password check - identity already verified via SSO session
         - Requires current MFA code or recovery code verification
         - Clears MFA state and recovery codes
         - Audit logged
 
         Args:
             user: User model instance
-            current_password: User's current password
+            current_password: User's current password (ignored for SSO users)
             mfa_code: Current TOTP code or recovery code
 
         Returns:
@@ -226,10 +230,12 @@ class MFAService:
                 "Contact an administrator if you need assistance."
             )
 
-        # Verify current password
-        if not verify_password(current_password, user.hashed_password):
-            logger.warning(f"Invalid password during MFA disable for user {user.id}")
-            raise ValueError(INVALID_CURRENT_PASSWORD_MSG)
+        # Verify current password - skip for SSO users
+        if user.auth_provider == "local":
+            if not verify_password(current_password, user.hashed_password):
+                logger.warning(f"Invalid password during MFA disable for user {user.id}")
+                raise ValueError(INVALID_CURRENT_PASSWORD_MSG)
+        # SSO users (entra/ldap) have no local password — identity already verified via SSO session
 
         # Verify current MFA code or recovery code
         if not self._verify_mfa_or_recovery_code(user, mfa_code):
@@ -272,7 +278,8 @@ class MFAService:
         - User wants to rotate MFA secrets
 
         Security requirements:
-        - Requires current password verification
+        - Requires current password verification (local users only)
+        - SSO users (entra/ldap) skip password check - identity already verified via SSO session
         - Requires current MFA code OR recovery code (if available)
         - For locked-out users, mfa_code can be None (admin-assisted path)
         - Invalidates old MFA secret and recovery codes
@@ -280,7 +287,7 @@ class MFAService:
 
         Args:
             user: User model instance
-            current_password: User's current password
+            current_password: User's current password (ignored for SSO users)
             mfa_code: Current TOTP code or recovery code (optional for admin reset)
 
         Returns:
@@ -289,10 +296,12 @@ class MFAService:
         Raises:
             ValueError: If verification fails
         """
-        # Verify current password
-        if not verify_password(current_password, user.hashed_password):
-            logger.warning(f"Invalid password during MFA reset for user {user.id}")
-            raise ValueError(INVALID_CURRENT_PASSWORD_MSG)
+        # Verify current password - skip for SSO users
+        if user.auth_provider == "local":
+            if not verify_password(current_password, user.hashed_password):
+                logger.warning(f"Invalid password during MFA reset for user {user.id}")
+                raise ValueError(INVALID_CURRENT_PASSWORD_MSG)
+        # SSO users (entra/ldap) have no local password — identity already verified via SSO session
 
         # Verify current MFA code if provided
         # For locked-out users, this may be None (recovery path)
@@ -466,7 +475,8 @@ class MFAService:
         Regenerate recovery codes for a user with dual-proof verification.
 
         Security requirements (OWASP/NIST):
-        - Requires password verification (knowledge factor)
+        - Requires password verification (knowledge factor) for local users only
+        - SSO users (entra/ldap) skip password check - identity already verified via SSO session
         - Requires MFA proof (possession factor):
           - TOTP code from authenticator app, OR
           - Single unused recovery code (normal users only, when authenticator unavailable)
@@ -477,7 +487,7 @@ class MFAService:
 
         Args:
             user: User model instance
-            current_password: User's current password
+            current_password: User's current password (ignored for SSO users)
             method: Verification method - "totp" or "recovery_code"
             mfa_code: TOTP code (6 digits) - required if method="totp"
             recovery_code: Recovery code - required if method="recovery_code"
@@ -504,10 +514,12 @@ class MFAService:
             logger.warning(f"User {user.id} without MFA attempted recovery code regeneration")
             raise ValueError("MFA must be enabled to regenerate recovery codes")
 
-        # STEP 1: Verify password (knowledge factor)
-        if not verify_password(current_password, user.hashed_password):
-            logger.warning(f"Invalid password during recovery code regeneration for user {user.id}")
-            raise ValueError(INVALID_CURRENT_PASSWORD_MSG)
+        # STEP 1: Verify password (knowledge factor) - skip for SSO users
+        if user.auth_provider == "local":
+            if not verify_password(current_password, user.hashed_password):
+                logger.warning(f"Invalid password during recovery code regeneration for user {user.id}")
+                raise ValueError(INVALID_CURRENT_PASSWORD_MSG)
+        # SSO users (entra/ldap) have no local password — identity already verified via SSO session
 
         # STEP 2: Verify MFA proof (possession factor)
         if policy["requires_mfa_proof"]:

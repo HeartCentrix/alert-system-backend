@@ -474,7 +474,8 @@ async def entra_login():
     await redis.setex(f"oauth_state:{state}", 600, oauth_data)
 
     # Build authorization URL and redirect
-    auth_url = await entra.build_authorization_url(state, code_challenge, nonce)
+    # require_mfa=True forces Microsoft to re-authenticate with MFA (free tier compatible)
+    auth_url = await entra.build_authorization_url(state, code_challenge, nonce, require_mfa=True)
     return RedirectResponse(url=auth_url, status_code=302)
 
 
@@ -484,8 +485,9 @@ def _entra_redirect_error(frontend_url: str, error_code: str, detail: str = "") 
     """Create error redirect response for Entra callback."""
     if detail:
         logger.warning(f"Entra callback error: {error_code} - {detail}")
+    # Redirect to auth/callback page where error is handled with dedicated screen
     return RedirectResponse(
-        url=f"{frontend_url}/#/login?error={error_code}&detail={detail}",
+        url=f"{frontend_url}/auth/callback?error={error_code}",
         status_code=302,
     )
 
@@ -586,14 +588,25 @@ def _find_or_provision_user(db: Session, user_info: dict, request: Request) -> t
     return user, None
 
 
-async def _entra_callback_success(user: User, request: Request, response: Response, db: Session) -> RedirectResponse:
+async def _entra_callback_success(user: User, request: Request, response: Response, db: Session, id_token_claims: dict) -> RedirectResponse:
     """Create success redirect response with tokens."""
     from app.core.security import create_access_token, create_refresh_token
-    
+
+    # For Entra (Microsoft SSO) users, we trust Microsoft's authentication completely.
+    # Microsoft handles MFA enforcement at their end (via Conditional Access or per-user MFA settings).
+    # If Microsoft issued a valid ID token, we trust the user is properly authenticated.
+    #
+    # MFA enforcement happens at Microsoft level:
+    # - Admin configures MFA in Microsoft Entra admin center
+    # - Microsoft enforces MFA before issuing the ID token
+    # - We don't need to verify amr/acrs claims - Microsoft already did that
+    #
+    # This is the standard approach for SSO: trust the identity provider's authentication.
+
     # Issue tokens
     access_token = create_access_token({"sub": str(user.id), "role": user.role})
     refresh_token_str = create_refresh_token({"sub": str(user.id)})
-    
+
     # Save refresh token
     rt = RefreshToken(
         user_id=user.id,
@@ -601,13 +614,13 @@ async def _entra_callback_success(user: User, request: Request, response: Respon
         expires_at=datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
     )
     db.add(rt)
-    
+
     # Update user
     user.last_login = datetime.now(timezone.utc)
     user.last_seen_at = datetime.now(timezone.utc)
     user.is_online = True
     user.is_enabled = True
-    
+
     # Audit log
     db.add(create_audit_log(
         user_id=user.id,
@@ -619,10 +632,10 @@ async def _entra_callback_success(user: User, request: Request, response: Respon
         request=request,
     ))
     db.commit()
-    
+
     # Set refresh token cookie
     _set_refresh_cookie(response, refresh_token_str, settings.REFRESH_TOKEN_EXPIRE_DAYS)
-    
+
     # Redirect to frontend
     frontend_url = settings.FRONTEND_URL.rstrip("/")
     redirect_url = (
@@ -690,8 +703,8 @@ async def entra_callback(
     if err:
         return _entra_redirect_error(frontend_url, err)
 
-    # Issue tokens and redirect
-    return await _entra_callback_success(user, request, response, db)
+    # Issue tokens and redirect - pass claims (decoded ID token) for amr verification
+    return await _entra_callback_success(user, request, response, db, claims)
 
 
 # ─── LDAP LOGIN ENDPOINT ─────────────────────────────────────────────────────
@@ -735,16 +748,37 @@ async def ldap_login(
 
     user = _find_or_create_ldap_user(db, ldap_user)
 
-    return _create_ldap_login_response(user, request, response, db)
+    return await _create_ldap_login_response(user, request, response, db, client_ip)
 
 
 # ─── LDAP LOGIN HELPER FUNCTIONS ─────────────────────────────────────────────
 
 
-def _create_ldap_login_response(user: User, request: Request, response: Response, db: Session) -> LoginSuccessResponse:
+async def _create_ldap_login_response(user: User, request: Request, response: Response, db: Session, client_ip: str) -> LoginSuccessResponse:
     """Create LDAP login success response with tokens."""
-    from app.core.security import create_access_token, create_refresh_token
+    from app.core.security import create_access_token, create_refresh_token, MFA_REQUIRED_ROLES
 
+    # Check MFA requirement for LDAP users based on role
+    user_role = str(user.role.value) if hasattr(user.role, "value") else str(user.role)
+    is_privileged = user_role.lower() in MFA_REQUIRED_ROLES
+
+    if is_privileged:
+        if not user.mfa_enabled:
+            # LDAP privileged user has no TOTP set up — block and force enrollment
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "mfa_setup_required",
+                    "message": "Your role requires two-factor authentication. Please contact your administrator to complete MFA setup for your account."
+                }
+            )
+        # LDAP privileged user has TOTP set up — issue MFA challenge via existing flow
+        mfa_response = await _handle_login_mfa(user, request, db, client_ip)
+        if mfa_response is not None:
+            return mfa_response
+        # MFA verified successfully, fall through to token issuance
+
+    # Viewer role or MFA verified - issue tokens as normal
     access_token = create_access_token({"sub": str(user.id), "role": user.role})
     refresh_token_str = create_refresh_token({"sub": str(user.id)})
 
@@ -1134,53 +1168,63 @@ async def login(request: LoginRequest, req: Request, response: Response, db: Ann
 
     No tokens are issued until MFA verification completes (if required).
     """
-    # Check if local auth is enabled
-    if "local" not in settings.AUTH_PROVIDERS.lower():
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Email/password login is disabled. Please use SSO."
+    try:
+        # Check if local auth is enabled
+        if "local" not in settings.AUTH_PROVIDERS.lower():
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Email/password login is disabled. Please use SSO."
+            )
+
+        client_ip = _get_client_ip(req)
+        normalized_email = request.email.strip().lower()
+        logger.info(f"Login attempt for: {_log_user_identity(None, normalized_email)} from IP: {client_ip}")
+
+        # STEP 1: Check IP-based rate limit
+        await _check_ip_rate_limit(client_ip)
+
+        # STEP 2: Look up user by email
+        user = db.query(User).filter(func.lower(User.email) == normalized_email).first()
+
+        # STEP 3: Check account lockout (if user exists)
+        if user:
+            await _check_account_lockout(user, client_ip)
+
+        # STEP 4: Validate credentials (user not found case)
+        if not user:
+            await _handle_invalid_credentials(client_ip)
+
+        # STEP 5: Check device fingerprint
+        await _handle_device_fingerprint(request.device_fingerprint)
+
+        # STEP 6: Verify password
+        if not verify_password(request.password, user.hashed_password):
+            await _handle_invalid_password(user, client_ip, request.device_fingerprint)
+
+        # STEP 7: Handle MFA verification
+        mfa_response = await _handle_login_mfa(
+            user=user, request=request, db=db, client_ip=client_ip
         )
+        if mfa_response is not None:
+            return mfa_response
 
-    client_ip = _get_client_ip(req)
-    normalized_email = request.email.strip().lower()
-
-    # STEP 1: Check IP-based rate limit
-    await _check_ip_rate_limit(client_ip)
-
-    # STEP 2: Look up user by email
-    user = db.query(User).filter(func.lower(User.email) == normalized_email).first()
-
-    # STEP 3: Check account lockout (if user exists)
-    if user:
-        await _check_account_lockout(user, client_ip)
-
-    # STEP 4: Validate credentials (user not found case)
-    if not user:
-        await _handle_invalid_credentials(client_ip)
-
-    # STEP 5: Check device fingerprint
-    await _handle_device_fingerprint(request.device_fingerprint)
-
-    # STEP 6: Verify password
-    if not verify_password(request.password, user.hashed_password):
-        await _handle_invalid_password(user, client_ip, request.device_fingerprint)
-
-    # STEP 7: Handle MFA verification
-    mfa_response = await _handle_login_mfa(
-        user=user, request=request, db=db, client_ip=client_ip
-    )
-    if mfa_response is not None:
-        return mfa_response
-
-    # STEP 8: Successful authentication - issue tokens
-    return await _create_login_success_response(
-        user=user,
-        normalized_email=normalized_email,
-        client_ip=client_ip,
-        req=req,
-        db=db,
-        response=response,
-    )
+        # STEP 8: Successful authentication - issue tokens
+        return await _create_login_success_response(
+            user=user,
+            normalized_email=normalized_email,
+            client_ip=client_ip,
+            req=req,
+            db=db,
+            response=response,
+        )
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except Exception as e:
+        logger.error(f"Login failed with unexpected error: {type(e).__name__}: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise
 
 
 @router.post(

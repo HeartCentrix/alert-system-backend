@@ -7,6 +7,8 @@ import os
 import re
 import secrets
 import anyio
+import traceback
+from starlette.responses import JSONResponse
 
 # Request size limit constants (in bytes)
 MAX_REQUEST_SIZE = 10 * 1024 * 1024  # 10 MB max request body size
@@ -495,6 +497,54 @@ app.add_middleware(CSRFMiddleware)
 
 # GZip compression
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# ─── EXCEPTION HANDLERS ───────────────────────────────────────────────────────
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """
+    Catch all unhandled exceptions and log them properly.
+    
+    This is critical for debugging Python 3.11+ ExceptionGroup errors
+    from anyio task groups that would otherwise swallow the real exception.
+    """
+    # Log the full exception
+    logger.error(f"=== UNHANDLED EXCEPTION ===")
+    logger.error(f"Type: {type(exc).__name__}")
+    logger.error(f"Message: {exc}")
+    logger.error(f"Path: {request.url.path}")
+    logger.error(f"Method: {request.method}")
+    logger.error(f"Query Params: {request.query_params}")
+    
+    # Handle ExceptionGroup (Python 3.11+)
+    if hasattr(exc, 'exceptions'):
+        logger.error(f"ExceptionGroup with {len(exc.exceptions)} sub-exceptions:")
+        for i, sub_exc in enumerate(exc.exceptions):
+            logger.error(f"\n--- Sub-exception {i+1} ---")
+            logger.error(f"Type: {type(sub_exc).__name__}")
+            logger.error(f"Message: {sub_exc}")
+            tb_lines = traceback.format_exception(type(sub_exc), sub_exc, sub_exc.__traceback__)
+            logger.error("Traceback:")
+            for line in tb_lines:
+                logger.error(line.rstrip())
+    else:
+        tb_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
+        logger.error("Full traceback:")
+        for line in tb_lines:
+            logger.error(line.rstrip())
+    
+    logger.error(f"=== END EXCEPTION ===")
+    
+    # Return user-friendly error (don't leak details in production)
+    is_debug = os.getenv("DEBUG", "false").lower() == "true"
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": "Internal server error occurred",
+            "error_type": type(exc).__name__,
+            "error_message": str(exc) if is_debug else None,
+        }
+    )
 
 
 # Request size limit middleware
