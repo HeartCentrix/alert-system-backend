@@ -317,7 +317,11 @@ def update_user_endpoint(
     if data.email is not None and data.email != user.email:
         _check_email_unique(db, data.email, user_id)
 
+    # Update user fields (exclude user_id - never allow changing user_id)
     for field, value in data.model_dump(exclude_unset=True).items():
+        # Skip user_id - it's the primary key and cannot be changed
+        if field == 'user_id':
+            continue
         if field == 'employee_id' and value == '':
             value = None
         setattr(user, field, value)
@@ -330,12 +334,12 @@ def update_user_endpoint(
         resource_id=user_id,
         request=request,
     ))
-    
+
     # Sync location changes between users.location_id and user_locations table
     if data.location_id is not None:
         from app.api.location_audience import _sync_user_location_primary
         _sync_user_location_primary(db, user_id, data.location_id)
-    
+
     db.commit()
     db.refresh(user)
     from app.location_tasks import refresh_dynamic_groups_for_user

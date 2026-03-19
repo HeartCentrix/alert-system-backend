@@ -635,6 +635,8 @@ class UserCreate(BaseModel):
 
 
 class UserUpdate(BaseModel):
+    model_config = ConfigDict(extra='ignore')
+    
     first_name: Optional[str] = Field(
         None,
         min_length=1,
