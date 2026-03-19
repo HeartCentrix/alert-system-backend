@@ -315,7 +315,11 @@ def get_incoming_messages(
     db: Annotated[Session, Depends(get_db)] = None,
     current_user: Annotated[User, Depends(get_current_user)] = None,
 ):
-    """View incoming messages and voice responses (authenticated users only).
+    """View incoming messages and safety check-in responses (authenticated users only).
+
+    This endpoint combines:
+    1. IncomingMessage table: SMS replies, email responses
+    2. NotificationResponse table: Web, Email, SMS, Voice safety check-in responses
 
     Args:
         limit: Maximum number of results (1-500, default 50)
@@ -324,25 +328,24 @@ def get_incoming_messages(
         - Manager and Admin roles: Can see all incoming messages
         - Viewer role: Can only see their own incoming messages
     """
-    # Get incoming messages
+    # Get incoming messages from IncomingMessage table (SMS replies, etc.)
     incoming_query = (
         db.query(IncomingMessage)
         .outerjoin(User, IncomingMessage.user_id == User.id)
     )
-    
-    # Get voice responses
-    voice_query = (
+
+    # Get safety check-in responses from NotificationResponse table (all channels: web, email, sms, voice)
+    response_query = (
         db.query(NotificationResponse, Notification, User)
         .join(Notification, NotificationResponse.notification_id == Notification.id)
         .join(User, NotificationResponse.user_id == User.id)
-        .filter(NotificationResponse.channel == 'voice')
     )
-    
+
     # Viewer-role users can only see their own messages
     if current_user.role == UserRole.VIEWER:
         incoming_query = incoming_query.filter(IncomingMessage.user_id == current_user.id)
-        voice_query = voice_query.filter(NotificationResponse.user_id == current_user.id)
-    
+        response_query = response_query.filter(NotificationResponse.user_id == current_user.id)
+
     # Order and limit incoming messages
     incoming_messages = (
         incoming_query
@@ -350,19 +353,19 @@ def get_incoming_messages(
         .limit(limit)
         .all()
     )
-    
-    # Order and limit voice responses
-    voice_responses = (
-        voice_query
+
+    # Order and limit safety responses
+    safety_responses = (
+        response_query
         .order_by(desc(NotificationResponse.responded_at))
         .limit(limit)
         .all()
     )
-    
+
     # Combine and format results
     result = []
-    
-    # Add incoming messages
+
+    # Add incoming messages from IncomingMessage table
     for msg in incoming_messages:
         result.append({
             "id": msg.id,
@@ -376,14 +379,14 @@ def get_incoming_messages(
             "is_processed": msg.is_processed,
             "received_at": msg.received_at,
         })
-    
-    # Add voice responses
-    for response, notification, user in voice_responses:
+
+    # Add safety check-in responses from NotificationResponse table (all channels)
+    for response, notification, user in safety_responses:
         result.append({
-            "id": f"voice_{response.id}",
+            "id": f"response_{response.id}",
             "from_number": user.phone or "",
-            "body": f"Voice response: {response.response_type.value}",
-            "channel": "voice",
+            "body": f"Safety response: {response.response_type.value}",
+            "channel": response.channel.value if hasattr(response.channel, 'value') else response.channel,
             "user_id": user.id,
             "user_email": user.email,
             "user_name": user.full_name,
@@ -391,7 +394,7 @@ def get_incoming_messages(
             "is_processed": True,
             "received_at": response.responded_at,
         })
-    
+
     # Sort by received_at descending
     result.sort(key=lambda x: x["received_at"], reverse=True)
 
