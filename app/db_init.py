@@ -7,7 +7,15 @@ This script is idempotent - safe to run multiple times.
 import logging
 from sqlalchemy import text, inspect
 from app.database import SessionLocal, engine, Base
-from app.models import *  # noqa: Import all models to ensure they're registered with Base
+# Import all models to ensure they're registered with Base
+from app.models import (  # noqa: F401
+    User, UserRole, Group, GroupType, Location, Notification, NotificationStatus,
+    NotificationTemplate, Incident, IncidentStatus, IncidentSeverity, DeliveryLog,
+    DeliveryStatus, NotificationResponse, ResponseType, IncomingMessage, AuditLog,
+    RefreshToken, LoginAttempt, UserLocation, UserLocationHistory,
+    UserLocationAssignmentType, UserLocationStatus, AlertChannel,
+    group_members, notification_groups, notification_users,
+)
 
 logger = logging.getLogger(__name__)
 
