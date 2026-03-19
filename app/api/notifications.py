@@ -490,6 +490,7 @@ async def create_notification(
     responses={
         400: {"description": "Bad Request - Cannot send notification in current state"},
         404: {"description": "Not Found - Notification does not exist"},
+        429: {"description": "Too Many Requests - Rate limit exceeded"},
     }
 )
 async def send_notification(
@@ -499,7 +500,7 @@ async def send_notification(
     request: Request = None,
 ):
     """Manually trigger a draft notification.
-    
+
     Rate Limit: Maximum 10 notifications per minute per user.
     """
     # Rate limiting: Check if user has exceeded notification dispatch limit
@@ -760,7 +761,15 @@ async def _resolve_response_user(
     return user.id, user.email
 
 
-@notifications_router.post("/{notification_id}/respond")
+@notifications_router.post(
+    "/{notification_id}/respond",
+    responses={
+        400: {"description": "Bad Request - Invalid/expired token, token mismatch, or user already responded"},
+        401: {"description": "Unauthorized - Authentication required or invalid token"},
+        404: {"description": "Not Found - Notification does not exist"},
+        500: {"description": "Internal Server Error - Failed to record response"},
+    }
+)
 async def submit_response(
     notification_id: int,
     data: NotificationResponseCreate,
@@ -770,14 +779,14 @@ async def submit_response(
 ):
     """
     Employee submits their safety response via the web portal.
-    
+
     Two modes:
     1. Authenticated: Logged-in user responding to their own notification (Authorization header)
     2. Token-based: User clicking link from email/SMS (JWT token query param, no auth header)
     """
     from app.utils.checkin_link import verify_checkin_token
     from fastapi.security import HTTPBearer
-    
+
     notification = db.query(Notification).filter(Notification.id == notification_id).first()
     if not notification:
         raise HTTPException(status_code=404, detail=NOTIFICATION_NOT_FOUND_MSG)
