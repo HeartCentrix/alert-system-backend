@@ -307,16 +307,19 @@ def _assign_user_to_location(
 ) -> bool:
     """
     Assign user to location if not already assigned.
-    
+
     Returns True if assignment was created/updated.
     """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from sqlalchemy.exc import IntegrityError
+    
     # Check for existing active assignment
     existing = db.query(UserLocation).filter(
         UserLocation.user_id == user_id,
         UserLocation.location_id == location_id,
         UserLocation.status == UserLocationStatus.ACTIVE
     ).first()
-    
+
     if existing:
         # Already assigned - update location data if geofence
         if assignment_type == UserLocationAssignmentType.GEOFENCE:
@@ -326,35 +329,57 @@ def _assign_user_to_location(
             existing.updated_at = datetime.now(timezone.utc)
             return False  # No change needed
         return False
-    
-    # Create new assignment
-    assignment = UserLocation(
-        user_id=user_id,
-        location_id=location_id,
-        assignment_type=assignment_type,
-        status=UserLocationStatus.ACTIVE,
-        detected_latitude=detected_latitude,
-        detected_longitude=detected_longitude,
-        distance_from_center_miles=distance_miles
-    )
-    db.add(assignment)
-    db.flush()  # Get ID for history
-    
-    # Record history
-    history = UserLocationHistory(
-        user_id=user_id,
-        location_id=location_id,
-        user_location_id=assignment.id,
-        action=action,
-        assignment_type=assignment_type,
-        new_status=UserLocationStatus.ACTIVE,
-        detected_latitude=detected_latitude,
-        detected_longitude=detected_longitude,
-        distance_from_center_miles=distance_miles
-    )
-    db.add(history)
-    
-    return True
+
+    # Try to create new assignment with PostgreSQL ON CONFLICT
+    try:
+        # Use PostgreSQL's INSERT ... ON CONFLICT DO NOTHING
+        stmt = pg_insert(UserLocation.__table__).values(
+            user_id=user_id,
+            location_id=location_id,
+            assignment_type=assignment_type,
+            status=UserLocationStatus.ACTIVE,
+            detected_latitude=detected_latitude,
+            detected_longitude=detected_longitude,
+            distance_from_center_miles=distance_miles
+        ).on_conflict_do_nothing(
+            index_elements=['user_id', 'location_id', 'status']
+        )
+        
+        result = db.execute(stmt)
+        
+        # If row was inserted, get the ID and create history
+        if result.rowcount > 0:
+            # Get the inserted row's ID
+            new_assignment = db.query(UserLocation).filter(
+                UserLocation.user_id == user_id,
+                UserLocation.location_id == location_id,
+                UserLocation.status == UserLocationStatus.ACTIVE
+            ).first()
+            
+            if new_assignment:
+                # Record history
+                history = UserLocationHistory(
+                    user_id=user_id,
+                    location_id=location_id,
+                    user_location_id=new_assignment.id,
+                    action=action,
+                    assignment_type=assignment_type,
+                    new_status=UserLocationStatus.ACTIVE,
+                    detected_latitude=detected_latitude,
+                    detected_longitude=detected_longitude,
+                    distance_from_center_miles=distance_miles
+                )
+                db.add(history)
+            
+            return True
+        else:
+            # Conflict occurred - another transaction created the assignment
+            return False
+            
+    except IntegrityError:
+        # Fallback: constraint violation means already assigned
+        db.rollback()
+        return False
 
 
 def _remove_user_from_location(

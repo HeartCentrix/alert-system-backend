@@ -172,6 +172,56 @@ def _ensure_incoming_messages_user_email():
         db.close()
 
 
+def _ensure_user_locations_unique_constraint():
+    """Add unique constraint to user_locations table to prevent duplicate assignments.
+    
+    This ensures that even on fresh database deployments, duplicate geofence assignments
+    are prevented at the database level.
+    """
+    db = SessionLocal()
+    try:
+        # Check if constraint already exists
+        result = db.execute(
+            text("""
+                SELECT constraint_name 
+                FROM information_schema.table_constraints 
+                WHERE table_name = 'user_locations' 
+                AND constraint_name = 'uq_user_location_active'
+            """)
+        ).fetchone()
+        
+        if not result:
+            # Clean up any existing duplicates first (keep oldest)
+            db.execute(text("""
+                DELETE FROM user_locations
+                WHERE id NOT IN (
+                    SELECT min_id
+                    FROM (
+                        SELECT MIN(id) as min_id
+                        FROM user_locations
+                        GROUP BY user_id, location_id, status
+                    ) AS keep
+                )
+            """))
+            
+            # Add the unique constraint
+            db.execute(text("""
+                ALTER TABLE user_locations
+                ADD CONSTRAINT uq_user_location_active
+                UNIQUE (user_id, location_id, status)
+            """))
+            
+            db.commit()
+            logger.info("Added unique constraint uq_user_location_active to user_locations table")
+        else:
+            logger.info("user_locations table already has unique constraint uq_user_location_active")
+    except Exception as e:
+        logger.error(f"Error adding user_locations unique constraint: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+
 def _ensure_delivery_log_user_email():
     """Add user_email column to delivery_logs and notification_responses tables if they don't exist."""
     db = SessionLocal()
@@ -298,6 +348,13 @@ def _ensure_database_schema():
         _ensure_notifications_deadline_escalated()
     except Exception as e:
         logger.error(f"Failed to ensure notifications deadline_escalated column: {e}")
+
+    # Ensure user_locations has unique constraint to prevent duplicates
+    logger.info("Ensuring user_locations table has unique constraint...")
+    try:
+        _ensure_user_locations_unique_constraint()
+    except Exception as e:
+        logger.error(f"Failed to ensure user_locations unique constraint: {e}")
 
 
 async def _seed_default_admin():

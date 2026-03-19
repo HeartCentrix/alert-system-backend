@@ -413,11 +413,12 @@ class UserLocation(Base):
     assigned_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     expires_at = Column(DateTime(timezone=True), nullable=True)  # Optional expiration for temporary assignments
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
-    
+
     # Unique constraint: one active assignment per user-location pair
     __table_args__ = (
-        # Prevent duplicate active assignments
-        # (handled at application level for flexibility with status changes)
+        # Prevent duplicate active assignments at database level
+        # This ensures atomicity and prevents race conditions
+        UniqueConstraint('user_id', 'location_id', 'status', name='uq_user_location_active'),
     )
 
     # Relationships
