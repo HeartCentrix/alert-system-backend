@@ -711,23 +711,9 @@ def _get_users_from_dynamic_group(db, notification: Notification, group) -> List
 
 def _collect_recipient_ids_from_groups_and_users(db, notification: Notification) -> set:
     """Collect unique recipient IDs from groups and target users."""
-    recipient_ids = set()
-    
-    for group in notification.target_groups:
-        if group.type == "dynamic" and group.dynamic_filter:
-            users = _get_users_from_dynamic_group(db, notification, group)
-            for u in users:
-                recipient_ids.add(u.id)
-        else:
-            users = group.members
-            logger.info(f"Notification {notification.id}: static group '{group.name}' has {len(users)} members")
-            for u in users:
-                if u.id not in recipient_ids:
-                    recipient_ids.add(u.id)
-    
-    for user in notification.target_users:
-        recipient_ids.add(user.id)
-    
+    recipient_ids = _collect_group_member_ids(db, notification)
+    recipient_ids = _collect_user_ids(notification, recipient_ids)
+
     logger.info(f"Notification {notification.id}: total unique recipient IDs before is_active filter: {len(recipient_ids)}")
     return recipient_ids
 
