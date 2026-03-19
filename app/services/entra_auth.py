@@ -219,13 +219,19 @@ class EntraAuthService:
         jwks_client = self._get_jwks_client(jwks_uri)
         signing_key = jwks_client.get_signing_key_from_jwt(id_token)
 
+        # Add leeway for clock skew (60 seconds) - Microsoft servers and your server
+        # may have slightly different clocks. This is standard practice.
         claims = pyjwt.decode(
             id_token,
             signing_key.key,
             algorithms=["RS256"],
             audience=self.client_id,
             issuer=issuer,
-            options={"require": ["exp", "iss", "aud", "sub", "nonce"]},
+            options={
+                "require": ["exp", "iss", "aud", "sub", "nonce"],
+                "verify_exp": True,
+            },
+            leeway=60,  # Allow 60 seconds of clock skew
         )
 
         # Verify nonce matches
