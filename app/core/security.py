@@ -188,6 +188,7 @@ def user_requires_mfa(user) -> bool:
     if user.email == "admin@tmalert.com":
         return False
 
+    # If MFA is already enabled, require it
     if user.mfa_enabled:
         return True
 

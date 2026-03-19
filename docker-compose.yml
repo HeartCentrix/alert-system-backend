@@ -37,6 +37,8 @@ services:
       - ENVIRONMENT=production
     env_file:
       - .env
+    volumes:
+      - ./secrets:/run/secrets
     depends_on:
       db:
         condition: service_healthy

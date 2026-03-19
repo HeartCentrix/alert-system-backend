@@ -396,7 +396,6 @@ def list_locations(
     return result
 
 
-@locations_router.post("", response_model=LocationResponse, status_code=status.HTTP_201_CREATED)
 def _validate_and_sanitize_location(data: LocationCreate) -> dict:
     """Validate and sanitize location input. Returns sanitized dict or raises 400."""
     from app.core.geofence import validate_location_input
@@ -430,6 +429,7 @@ def _build_location_object(sanitized: dict, data: LocationCreate) -> Location:
     )
 
 
+@locations_router.post("", response_model=LocationResponse, status_code=status.HTTP_201_CREATED)
 def create_location(
     data: LocationCreate,
     request: Request,

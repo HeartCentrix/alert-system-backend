@@ -676,6 +676,27 @@ async def ldap_login(
     if not settings.LDAP_ENABLED or "ldap" not in settings.AUTH_PROVIDERS.lower():
         raise HTTPException(status_code=403, detail="LDAP authentication is not enabled")
 
+    client_ip = _get_client_ip(request)
+    
+    # Check IP-based rate limit (same as local login)
+    if await is_ip_locked(client_ip):
+        logger.warning(f"IP lockout for LDAP login from {client_ip}")
+        
+        from app.services.rate_limiter import _ip_lock_key
+        from app.services.rate_limiter import _get_client
+        r = _get_client()
+        ttl_seconds = await r.ttl(_ip_lock_key(client_ip))
+        
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "message": "Too many login attempts from this IP. Please try again later.",
+                "retry_after_seconds": max(0, ttl_seconds),
+                "retry_after": format_lockout_time(max(0, ttl_seconds))
+            },
+            headers={"Retry-After": str(max(0, ttl_seconds))}
+        )
+
     from app.services.ldap_auth import get_ldap_service
     ldap_svc = get_ldap_service()
 
@@ -685,7 +706,24 @@ async def ldap_login(
     # Authenticate against LDAP
     ldap_user = ldap_svc.authenticate(username, password)
     if not ldap_user:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        # Record failed attempt for IP tracking
+        await record_ip_failure(client_ip)
+        
+        # Get current IP failure count for remaining attempts
+        from app.services.rate_limiter import _ip_fail_key
+        from app.services.rate_limiter import _get_client
+        r = _get_client()
+        ip_fail_count = await r.get(_ip_fail_key(client_ip)) or 0
+        ip_remaining = max(0, IP_RATE_LIMIT_MAX_ATTEMPTS - int(ip_fail_count))
+        
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={
+                "message": "Invalid credentials",
+                "remaining_attempts": ip_remaining,
+                "lockout_threshold": IP_RATE_LIMIT_MAX_ATTEMPTS
+            }
+        )
 
     # Check email domain restriction
     if settings.ALLOWED_EMAIL_DOMAINS:
@@ -764,17 +802,21 @@ async def _handle_login_mfa(user, request, db, client_ip) -> object:
     or None if authentication can proceed to token issuance.
     """
     from app.core.security import encrypt_mfa_secret, decrypt_mfa_secret
+    
+    # Check if MFA is required for this user (by role or explicit enablement)
     if not user_requires_mfa(user):
         return None
 
-    mfa_fully_configured = user.mfa_enabled and user.mfa_secret and user.mfa_secret.strip()
-
-    if not mfa_fully_configured:
+    # Check if user has MFA secret configured (even if not explicitly enabled)
+    has_mfa_secret = user.mfa_secret and user.mfa_secret.strip()
+    
+    # For privileged roles without MFA setup, force enrollment
+    if not has_mfa_secret:
         # MFA required but not set up — initiate setup
         temp_secret = generate_mfa_secret()
         qr_code_uri = generate_mfa_qr_code_uri(user.email, temp_secret)
         user.mfa_secret = encrypt_mfa_secret(temp_secret)
-        user.mfa_enabled = False
+        user.mfa_enabled = False  # Will be set to True after first successful verification
         db.add(user)
         db.commit()
         challenge_token = _generate_challenge_token(user.id)
@@ -786,9 +828,10 @@ async def _handle_login_mfa(user, request, db, client_ip) -> object:
             challenge_token=challenge_token,
             qr_code_uri=qr_code_uri,
             secret=temp_secret,
-            message="MFA is required for your account. Please scan the QR code with your authenticator app and enter the code to complete login."
+            message="MFA is required for your account role. Please scan the QR code with your authenticator app and enter the code to complete login."
         )
 
+    # User has MFA secret - verify code
     if not request.mfa_code:
         # MFA configured but code not provided — issue challenge
         challenge_token = _generate_challenge_token(user.id)
@@ -854,18 +897,19 @@ async def login(request: LoginRequest, req: Request, response: Response, db: Ann
     # This prevents enumeration attacks and applies across ALL accounts
     if await is_ip_locked(client_ip):
         logger.warning(f"IP lockout for {client_ip}")
-        
+
         # Get remaining lockout time
         from app.services.rate_limiter import _ip_lock_key
-        from app.services.redis import _get_client
+        from app.services.rate_limiter import _get_client
         r = _get_client()
         ttl_seconds = await r.ttl(_ip_lock_key(client_ip))
-        
+
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail={
                 "message": "Too many login attempts from this IP. Please try again later.",
-                "retry_after_seconds": max(0, ttl_seconds)
+                "retry_after_seconds": max(0, ttl_seconds),
+                "retry_after": format_lockout_time(max(0, ttl_seconds))
             },
             headers={"Retry-After": str(max(0, ttl_seconds))}
         )
@@ -883,9 +927,20 @@ async def login(request: LoginRequest, req: Request, response: Response, db: Ann
             # Record this failed attempt for IP tracking
             await record_ip_failure(client_ip)
             logger.warning(f"Account lockout for user {user.id}")
+            
+            # Get remaining lockout time
+            from app.services.rate_limiter import _account_lock_key
+            from app.services.rate_limiter import _get_client
+            r = _get_client()
+            ttl_seconds = await r.ttl(_account_lock_key(user.id))
+            
             raise HTTPException(
                 status_code=status.HTTP_423_LOCKED,
-                detail="Account temporarily locked.",
+                detail={
+                    "message": "Account temporarily locked due to too many failed attempts.",
+                    "retry_after_seconds": max(0, ttl_seconds),
+                    "retry_after": format_lockout_time(max(0, ttl_seconds))
+                },
             )
 
     # STEP 4: Validate credentials
@@ -893,9 +948,21 @@ async def login(request: LoginRequest, req: Request, response: Response, db: Ann
     if not user:
         # Record failed attempt for IP tracking
         await record_ip_failure(client_ip)
+        
+        # Get current IP failure count for remaining attempts estimate
+        from app.services.rate_limiter import _ip_fail_key
+        from app.services.rate_limiter import _get_client
+        r = _get_client()
+        ip_fail_count = await r.get(_ip_fail_key(client_ip)) or 0
+        ip_remaining = max(0, IP_RATE_LIMIT_MAX_ATTEMPTS - int(ip_fail_count))
+        
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials"
+            detail={
+                "message": "Invalid credentials",
+                "remaining_attempts": ip_remaining,
+                "lockout_threshold": IP_RATE_LIMIT_MAX_ATTEMPTS
+            }
         )
 
     # STEP 5: Device fingerprint tracking (if provided)
@@ -1317,6 +1384,12 @@ def update_my_profile(
         details={"updated_fields": list(data.model_dump(exclude_unset=True).keys())},
         request=req,
     ))
+    
+    # Sync location changes between users.location_id and user_locations table
+    if data.location_id is not None:
+        from app.api.location_audience import _sync_user_location_primary
+        _sync_user_location_primary(db, current_user.id, data.location_id)
+    
     db.commit()
     db.refresh(current_user)
     return current_user
@@ -1776,9 +1849,20 @@ async def verify_mfa_and_complete_login(
     # This prevents brute-force attacks on the TOTP code (6 digits = 1M combinations)
     if await is_ip_locked(client_ip):
         logger.warning(f"IP lockout for {client_ip} at MFA verify")
+        
+        from app.services.rate_limiter import _ip_lock_key
+        from app.services.rate_limiter import _get_client
+        r = _get_client()
+        ttl_seconds = await r.ttl(_ip_lock_key(client_ip))
+        
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many failed attempts. Please try again later.",
+            detail={
+                "message": "Too many failed attempts. Please try again later.",
+                "retry_after_seconds": max(0, ttl_seconds),
+                "retry_after": format_lockout_time(max(0, ttl_seconds))
+            },
+            headers={"Retry-After": str(max(0, ttl_seconds))}
         )
 
     # Verify JWT challenge token — signature, expiry, and type all checked in one call
@@ -1825,9 +1909,17 @@ async def verify_mfa_and_complete_login(
             logger.error(f"Error recording failed login: {e}")
 
         logger.warning(f"Invalid MFA code for user {user_id}")
+        
+        # Calculate remaining attempts
+        remaining_attempts = max(0, ACCOUNT_LOCKOUT_THRESHOLD - count)
+        
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=INVALID_CREDENTIALS_MFA_MSG
+            detail={
+                "message": INVALID_CREDENTIALS_MFA_MSG,
+                "remaining_attempts": remaining_attempts,
+                "lockout_threshold": ACCOUNT_LOCKOUT_THRESHOLD
+            }
         )
 
     # Replay protection — reject reuse within the same 30-second window

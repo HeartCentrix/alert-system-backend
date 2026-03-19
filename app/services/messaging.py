@@ -37,9 +37,9 @@ def build_checkin_email_html(base_html: str, checkin_url: str, deadline_minutes:
         HTML with check-in button added
     """
     deadline_text = f" within {deadline_minutes} minutes" if deadline_minutes else ""
-    
+
     # Create check-in button HTML
-    checkin_section = """
+    checkin_section = f"""
     <div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 20px; margin: 20px 0; border-radius: 4px; text-align: center;">
         <p style="color: #92400e; margin: 0 0 15px 0; font-weight: 600; font-size: 16px;">
             🔔 Safety Check-In Required{deadline_text}
@@ -52,7 +52,7 @@ def build_checkin_email_html(base_html: str, checkin_url: str, deadline_minutes:
         </p>
     </div>
     """
-    
+
     # Insert before closing body tag
     if "</body>" in base_html:
         return base_html.replace("</body>", f"{checkin_section}</body>")
@@ -111,7 +111,7 @@ class TwilioService:
             
             # Escape message to prevent XSS in TwiML
             safe_message = _escape_xml(message)
-            twiml = """<?xml version="1.0" encoding="UTF-8"?>
+            twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say voice="alice" loop="2">{safe_message}</Say>
   <Pause length="1"/>
@@ -300,7 +300,7 @@ Taylor Morrison"""
     def _text_to_html(self, text: str) -> str:
         paragraphs = text.split("\n\n")
         html_parts = [f"<p>{p.replace(chr(10), '<br>')}</p>" for p in paragraphs]
-        return """<html><body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        return f"""<html><body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <div style="background: #1e40af; padding: 20px; text-align: center;">
             <h1 style="color: white; margin: 0;">🚨 TM Alert</h1>
         </div>

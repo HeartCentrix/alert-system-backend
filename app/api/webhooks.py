@@ -70,6 +70,11 @@ async def validate_twilio_request(request: Request, body: bytes) -> bool:
     Returns:
         True if signature is valid, False otherwise
     """
+    # Skip validation in development mode for local testing with ngrok
+    if settings.APP_ENV == "development":
+        logger.debug("Skipping Twilio signature validation in development mode")
+        return True
+
     if not settings.TWILIO_AUTH_TOKEN:
         logger.error("TWILIO_AUTH_TOKEN not configured — cannot validate Twilio requests")
         return False

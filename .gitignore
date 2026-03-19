@@ -96,3 +96,5 @@ test_location_members_api.py
 
 # Local documentation (not for git)
 AUTHENTICATION_ARCHITECTURE.md
+
+secrets/

@@ -735,7 +735,8 @@ class UserResponse(BaseModel):
     title: Optional[str] = None
     employee_id: Optional[str] = None
     role: UserRole
-    is_active: Optional[bool] = None
+    is_enabled: Optional[bool] = None  # Account enabled status
+    is_online: Optional[bool] = None   # Real-time online presence (heartbeat)
     location_id: Optional[int] = None
     preferred_channels: Optional[List[str]] = None
     created_at: datetime

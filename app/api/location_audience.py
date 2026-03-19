@@ -39,6 +39,72 @@ from app.core.geofence import (
 )
 from app.location_tasks import check_user_geofence_task
 
+
+# ──────────────────────────────────────────────
+# Helper: Sync user_locations with users.location_id
+# ──────────────────────────────────────────────
+
+def _sync_user_location_primary(db: Session, user_id: int, location_id: Optional[int]) -> None:
+    """
+    Sync between users.location_id and user_locations table.
+    
+    When user.location_id is set:
+    - Create/update active assignment in user_locations for that location
+    - Deactivate all other assignments
+    
+    When user.location_id is None:
+    - Deactivate all assignments
+    """
+    # Deactivate all existing assignments for this user
+    all_assignments = db.query(UserLocation).filter(
+        UserLocation.user_id == user_id,
+        UserLocation.status == UserLocationStatus.ACTIVE
+    ).all()
+    
+    for assignment in all_assignments:
+        if assignment.location_id != location_id:
+            assignment.status = UserLocationStatus.INACTIVE
+    
+    # If location_id is provided, ensure there's an active assignment
+    if location_id is not None:
+        existing = db.query(UserLocation).filter(
+            UserLocation.user_id == user_id,
+            UserLocation.location_id == location_id,
+        ).first()
+        
+        if existing:
+            existing.status = UserLocationStatus.ACTIVE
+        else:
+            # Create new assignment
+            new_assignment = UserLocation(
+                user_id=user_id,
+                location_id=location_id,
+                assignment_type=UserLocationAssignmentType.MANUAL,
+                status=UserLocationStatus.ACTIVE,
+            )
+            db.add(new_assignment)
+
+
+def _sync_user_primary_location(db: Session, user_id: int) -> None:
+    """
+    Update users.location_id to match the primary (most recent) active assignment in user_locations.
+    
+    When user has active assignments:
+    - Set users.location_id to the most recently assigned location
+    
+    When user has no active assignments:
+    - Set users.location_id to None
+    """
+    # Get most recent active assignment
+    latest_assignment = db.query(UserLocation).filter(
+        UserLocation.user_id == user_id,
+        UserLocation.status == UserLocationStatus.ACTIVE
+    ).order_by(UserLocation.assigned_at.desc()).first()
+    
+    user = db.query(User).filter(User.id == user_id).first()
+    if user:
+        user.location_id = latest_assignment.location_id if latest_assignment else None
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/location-audience", tags=["Location Audience Management"])
@@ -91,19 +157,20 @@ def assign_user_to_location(
     data: UserLocationAssign,
     request: Request,
     db: Annotated[Session, Depends(get_db)] = None,
-    current_user: Annotated[User, Depends(require_admin)] = None
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
     """
     Manually assign a user to a location.
-    
+
     **Requirements:**
-    - Admin role required
+    - Any authenticated user can assign themselves
+    - Manager+ can assign other users
     - User must exist and be active
     - Location must exist and be active
     - Prevents duplicate active assignments
-    
+
     **Security:**
-    - RBAC validation
+    - RBAC validation (prevents assigning others if not manager+)
     - Input validation
     - Audit logging
     - Rate limiting
@@ -117,14 +184,21 @@ def assign_user_to_location(
             detail=f"Too many assignment requests. Try again in {retry_after} seconds.",
             headers={"Retry-After": str(retry_after)}
         )
-    
+
+    # Check permissions: users can assign themselves, or managers+ can assign anyone
+    if current_user.id != data.user_id and current_user.role not in [UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.MANAGER]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied. You can only assign yourself to locations."
+        )
+
     # Validate user exists
     # Note: We don't check is_active (tracks online presence) or is_verified (SSO flag)
     # Any existing user can be assigned to a location
     user = db.query(User).filter(User.id == data.user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
+
     # Validate location exists
     location = db.query(Location).filter(
         Location.id == data.location_id,
@@ -195,6 +269,10 @@ def assign_user_to_location(
     ))
     
     db.commit()
+    
+    # Sync: Update users.location_id to match this new primary location
+    _sync_user_primary_location(db, data.user_id)
+    
     db.refresh(assignment)
 
     # Build response - fetch related data explicitly to avoid ambiguous joins
@@ -230,17 +308,18 @@ def remove_user_from_location(
     user_id: int = Query(..., description="User ID to remove"),
     location_id: int = Query(..., description="Location ID to remove from"),
     db: Annotated[Session, Depends(get_db)] = None,
-    current_user: Annotated[User, Depends(require_admin)] = None
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
     """
     Remove a user from a location.
-    
+
     **Requirements:**
-    - Admin role required
+    - Any authenticated user can remove themselves
+    - Manager+ can remove other users
     - Assignment must exist
-    
+
     **Security:**
-    - RBAC validation
+    - RBAC validation (prevents removing others if not manager+)
     - Audit logging
     """
     # Find active assignment
@@ -249,16 +328,23 @@ def remove_user_from_location(
         UserLocation.location_id == location_id,
         UserLocation.status == UserLocationStatus.ACTIVE
     ).first()
-    
+
     if not assignment:
         raise HTTPException(
             status_code=404,
             detail="No active assignment found for this user and location"
         )
-    
+
+    # Check permissions: users can remove themselves, or managers+ can remove anyone
+    if current_user.id != user_id and current_user.role not in [UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.MANAGER]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied. You can only remove yourself from locations."
+        )
+
     # Store previous state
     previous_status = assignment.status
-    
+
     # Update status
     assignment.status = UserLocationStatus.INACTIVE
     assignment.updated_at = datetime.now(timezone.utc)
@@ -291,9 +377,12 @@ def remove_user_from_location(
         },
         request=request,
     ))
-    
+
     db.commit()
     
+    # Sync: Update users.location_id based on remaining active assignments
+    _sync_user_primary_location(db, user_id)
+
     return {
         "message": "User removed from location successfully",
         "assignment_id": assignment.id,
@@ -416,13 +505,14 @@ def get_location_members(
     status_filter: Optional[UserLocationStatus] = Query(None, alias="status"),
     assignment_type: Optional[UserLocationAssignmentType] = None,
     db: Annotated[Session, Depends(get_db)] = None,
-    current_user: Annotated[User, Depends(require_manager)] = None
+    current_user: Annotated[User, Depends(get_current_user)] = None
 ):
     """
     Get all users assigned to a location.
 
     **Requirements:**
-    - Manager role or higher required
+    - Any authenticated user can view location members
+    - Manager role or higher required to modify members
     - Location must exist
 
     **Features:**

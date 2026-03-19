@@ -262,6 +262,87 @@ def get_user(
     return user
 
 
+@router.put("/{user_id}", response_model=UserResponse)
+def update_user_endpoint(
+    user_id: int,
+    data: UserUpdate,
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None,
+    request: Request = None,
+):
+    """
+    Update a user's profile.
+
+    **Permissions:**
+    - Any authenticated user can update their own profile (including location_id)
+    - Manager+ can update other users
+    """
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail=USER_NOT_FOUND_MSG)
+
+    # Check permissions: users can update themselves, or managers+ can update anyone
+    if current_user.id != user_id and current_user.role not in [UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.MANAGER]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied. You can only update your own profile."
+        )
+
+    # Prevent privilege escalation: non-admins cannot change role to admin
+    # Only check if role is being changed to a different value
+    if data.role is not None and data.role != user.role:
+        if current_user.role not in [UserRole.SUPER_ADMIN, UserRole.ADMIN]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only admins can change user roles"
+            )
+
+    # Prevent editing sensitive fields for other users
+    if current_user.id != user_id:
+        # Managers cannot edit these fields for other users (but users can edit their own)
+        # Only block if actually trying to change these fields
+        fields_being_changed = data.model_dump(exclude_unset=True)
+        if 'role' in fields_being_changed or 'is_active' in fields_being_changed or 'employee_id' in fields_being_changed:
+            if current_user.role not in [UserRole.SUPER_ADMIN, UserRole.ADMIN]:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Only the user themselves can update role, is_active, or employee_id"
+                )
+
+    if data.employee_id is not None:
+        employee_id_value = data.employee_id if data.employee_id != '' else None
+        if employee_id_value:
+            _check_employee_id_unique(db, employee_id_value, user_id)
+
+    if data.email is not None and data.email != user.email:
+        _check_email_unique(db, data.email, user_id)
+
+    for field, value in data.model_dump(exclude_unset=True).items():
+        if field == 'employee_id' and value == '':
+            value = None
+        setattr(user, field, value)
+
+    db.add(create_audit_log(
+        user_id=current_user.id,
+        user_email=current_user.email,
+        action="update_user",
+        resource_type="user",
+        resource_id=user_id,
+        request=request,
+    ))
+    
+    # Sync location changes between users.location_id and user_locations table
+    if data.location_id is not None:
+        from app.api.location_audience import _sync_user_location_primary
+        _sync_user_location_primary(db, user_id, data.location_id)
+    
+    db.commit()
+    db.refresh(user)
+    from app.location_tasks import refresh_dynamic_groups_for_user
+    refresh_dynamic_groups_for_user(db, user)
+    return user
+
+
 def _check_employee_id_unique(db: Session, employee_id_value: str, exclude_user_id: int) -> None:
     """Raise 400 if the employee_id is already assigned to a different user."""
     existing = db.query(User).filter(
