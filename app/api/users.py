@@ -354,7 +354,6 @@ def update_user_endpoint(
 
     db.commit()
     db.refresh(user)
-    from app.location_tasks import refresh_dynamic_groups_for_user
     refresh_dynamic_groups_for_user(db, user)
     return user
 
