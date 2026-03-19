@@ -67,20 +67,31 @@ MAX_CSV_FILE_SIZE = 5 * 1024 * 1024
 MAX_CSV_ROWS = 1000
 
 
+def _user_field_matches_filter(user_value: str, filter_value: str) -> bool:
+    """Check if a user field matches a filter value."""
+    if not filter_value or not str(filter_value).strip():
+        return True  # Empty filter matches anything
+    return user_value == filter_value.strip()
+
+
+def _user_location_matches_filter(user_location_id: int, filter_location_id: str) -> bool:
+    """Check if user location matches filter location."""
+    if not filter_location_id or not str(filter_location_id).strip():
+        return True  # Empty filter matches anything
+    return user_location_id == int(filter_location_id)
+
+
 def _user_matches_dynamic_filter(user: User, f: dict) -> bool:
     """Check if a user matches a dynamic group's filter criteria."""
-    if f.get("department") and str(f["department"]).strip():
-        if user.department != f["department"].strip():
-            return False
-    if f.get("title") and str(f["title"]).strip():
-        if user.title != f["title"].strip():
-            return False
-    if f.get("role") and str(f["role"]).strip():
-        if user.role != f["role"].strip():
-            return False
-    if f.get("location_id") and str(f["location_id"]).strip():
-        if user.location_id != int(f["location_id"]):
-            return False
+    # Check each filter field - all must match (AND logic)
+    if not _user_field_matches_filter(user.department, f.get("department")):
+        return False
+    if not _user_field_matches_filter(user.title, f.get("title")):
+        return False
+    if not _user_field_matches_filter(user.role, f.get("role")):
+        return False
+    if not _user_location_matches_filter(user.location_id, f.get("location_id")):
+        return False
     return True
 
 
