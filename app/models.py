@@ -110,7 +110,7 @@ class User(Base):
     hashed_password = Column(String(255), nullable=True)  # Nullable for SSO/LDAP users
     first_name = Column(String(100), nullable=False)
     last_name = Column(String(100), nullable=False)
-    phone = Column(String(20))
+    phone = Column(String(20), unique=True, index=True, nullable=True)  # Unique phone number per user
     department = Column(String(100))
     title = Column(String(100))
     employee_id = Column(String(50), unique=True)

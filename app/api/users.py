@@ -202,8 +202,14 @@ def create_user(
     current_user: Annotated[User, Depends(require_admin)] = None,
     request: Request = None,
 ):
+    # Check email uniqueness
     if db.query(User).filter(User.email == data.email).first():
         raise HTTPException(status_code=400, detail="Email already registered")
+
+    # Check phone uniqueness (if provided)
+    if data.phone:
+        if db.query(User).filter(User.phone == data.phone).first():
+            raise HTTPException(status_code=400, detail="Phone number already registered. Each user must have a unique phone number.")
 
     if data.employee_id:
         if db.query(User).filter(User.employee_id == data.employee_id).first():
@@ -232,19 +238,22 @@ def create_user(
         user_email=current_user.email,
         action="create_user",
         resource_type="user",
-        details={"email": data.email},
+        details={"email": data.email, "phone": data.phone},
         request=request,
     ))
     try:
         db.commit()
         db.refresh(user)
-        
+
         # Refresh dynamic group memberships for the new user
         refresh_dynamic_groups_for_user(db, user)
-        
+
     except Exception as e:
         db.rollback()
-        if "unique" in str(e).lower() or "duplicate" in str(e).lower():
+        error_msg = str(e).lower()
+        if "unique" in error_msg or "duplicate" in error_msg:
+            if "phone" in error_msg or "phone" in str(data):
+                raise HTTPException(status_code=400, detail="Phone number already registered. Each user must have a unique phone number.")
             raise HTTPException(status_code=400, detail="A user with this email or employee ID already exists")
         raise HTTPException(status_code=500, detail="Failed to create user")
     return user
@@ -317,6 +326,9 @@ def update_user_endpoint(
     if data.email is not None and data.email != user.email:
         _check_email_unique(db, data.email, user_id)
 
+    if data.phone is not None and data.phone != user.phone:
+        _check_phone_unique(db, data.phone, user_id)
+
     # Update user fields (exclude user_id - never allow changing user_id)
     for field, value in data.model_dump(exclude_unset=True).items():
         # Skip user_id - it's the primary key and cannot be changed
@@ -342,7 +354,6 @@ def update_user_endpoint(
 
     db.commit()
     db.refresh(user)
-    from app.location_tasks import refresh_dynamic_groups_for_user
     refresh_dynamic_groups_for_user(db, user)
     return user
 
@@ -373,6 +384,21 @@ def _check_email_unique(db: Session, email: str, exclude_user_id: int) -> None:
         )
 
 
+def _check_phone_unique(db: Session, phone: str, exclude_user_id: int) -> None:
+    """Raise 400 if the phone number is already assigned to a different user."""
+    if not phone:  # Allow null/empty phone
+        return
+    existing = db.query(User).filter(
+        User.phone == phone,
+        User.id != exclude_user_id,
+    ).first()
+    if existing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Phone number '{phone}' already assigned to another user. Each user must have a unique phone number.",
+        )
+
+
 def update_user(
     user_id: int,
     data: UserUpdate,
@@ -399,6 +425,9 @@ def update_user(
 
     if data.email is not None and data.email != user.email:
         _check_email_unique(db, data.email, user_id)
+
+    if data.phone is not None and data.phone != user.phone:
+        _check_phone_unique(db, data.phone, user_id)
 
     for field, value in data.model_dump(exclude_unset=True).items():
         if field == 'employee_id' and value == '':
