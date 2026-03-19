@@ -1,3 +1,33 @@
+"""
+Messaging Services for Multi-Channel Notifications.
+
+This module provides services for sending notifications via multiple channels:
+- SMS (Twilio)
+- Email (SMTP)
+- Voice calls (Twilio)
+- Webhooks (Slack, Teams)
+
+Features:
+- Check-in link generation for safety responses
+- HTML email templates with check-in buttons
+- SSRF protection for webhook URLs
+- Mock mode for development/testing
+
+Security:
+- Webhook URLs validated against private IP ranges (SSRF protection)
+- DNS rebinding protection via IP resolution checks
+- Credentials loaded from environment variables
+
+Usage:
+    from app.services.messaging import twilio_service, email_service, webhook_service
+    
+    # Send SMS
+    result = twilio_service.send_sms("+1234567890", "Alert message")
+    
+    # Send email with check-in link
+    html = build_checkin_email_html(base_html, checkin_url, deadline_minutes=15)
+    result = email_service.send_email(to, subject, body, html)
+"""
 import logging
 from typing import Optional
 from app.config import settings
