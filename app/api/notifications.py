@@ -237,104 +237,65 @@ def get_incident(
     return incident
 
 
-# ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
+# ─── NOTIFICATION CREATION HELPERS ───────────────────────────────────────────
 
-notifications_router = APIRouter(prefix="/notifications", tags=["Notifications"])
-
-
-@notifications_router.get("", response_model=dict)
-def list_notifications(
-    page: Annotated[int, Query(ge=1)] = 1,
-    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
-    incident_id: Annotated[Optional[int], Query()] = None,
-    status: Annotated[Optional[NotificationStatus], Query()] = None,
-    db: Annotated[Session, Depends(get_db)] = None,
-    current_user: Annotated[User, Depends(get_current_user)] = None
-):
-    """List notifications with optional filtering.
-    
-    Access Control:
-        - Manager and Admin roles: Can see all notifications
-        - Viewer role: Can only see notifications where they are recipients
-    """
-    query = _apply_viewer_notification_filter(db.query(Notification), current_user)
-    if incident_id:
-        query = query.filter(Notification.incident_id == incident_id)
-    if status:
-        query = query.filter(Notification.status == status)
-    total = query.count()
-    items = query.order_by(desc(Notification.created_at)).offset((page - 1) * page_size).limit(page_size).all()
-    return {"items": [_notification_to_dict(item) for item in items], "total": total, "page": page, "page_size": page_size}
-
-
-@notifications_router.post("", response_model=NotificationResponse, status_code=201)
-async def create_notification(
-    data: NotificationCreate,
-    db: Annotated[Session, Depends(get_db)] = None,
-    current_user: Annotated[User, Depends(require_manager)] = None,
-    request: Request = None,
-):
-    # Rate limiting 1: Check general API rate limit for state-changing operations
-    is_allowed, retry_after = await check_api_rate_limit(current_user.id, "create_notification")
-    if not is_allowed:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Rate limit exceeded. Maximum {API_RATE_LIMIT_MAX} requests per minute for this endpoint.",
-            headers={"Retry-After": str(retry_after)}
-        )
-    
-    # Rate limiting 2: Check notification-specific dispatch limit
-    is_allowed, retry_after = await check_notification_rate_limit(current_user.id)
-    if not is_allowed:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Rate limit exceeded. Maximum {NOTIFICATION_RATE_LIMIT_MAX} notifications per minute.",
-            headers={"Retry-After": str(retry_after)}
-        )
-    
-    # Record both rate limit counters
-    await record_api_request(current_user.id, "create_notification")
-    await record_notification_dispatch(current_user.id)
-
-    # Validate at least one recipient method
+def _validate_recipients(data: NotificationCreate) -> None:
+    """Validate that at least one recipient method is specified."""
     if not data.target_all and not data.target_group_ids and not data.target_user_ids:
-        raise HTTPException(status_code=400, detail="Must specify recipients: target_all, groups, or users")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Must specify recipients: target_all, groups, or users"
+        )
 
-    # Validate webhook URLs to prevent SSRF attacks
+
+def _validate_webhook_urls(data: NotificationCreate) -> None:
+    """Validate webhook URLs to prevent SSRF attacks."""
     if data.slack_webhook_url and not _is_safe_url(data.slack_webhook_url):
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid Slack webhook URL. URLs must use HTTP/HTTPS and cannot point to internal/private addresses"
         )
     if data.teams_webhook_url and not _is_safe_url(data.teams_webhook_url):
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid Teams webhook URL. URLs must use HTTP/HTTPS and cannot point to internal/private addresses"
         )
 
-    # Validate timezone if provided
+
+def _convert_scheduled_time_to_utc(data: NotificationCreate) -> tuple:
+    """Convert scheduled time from local timezone to UTC.
+    
+    Returns:
+        tuple: (scheduled_at_utc, scheduled_timezone)
+    """
     scheduled_timezone = data.scheduled_timezone
     scheduled_at_utc = data.scheduled_at
 
     if data.scheduled_at and scheduled_timezone:
-        # Convert scheduled time from local timezone to UTC
         try:
             from zoneinfo import ZoneInfo
             local_tz = ZoneInfo(scheduled_timezone)
-            # Assume the incoming datetime is naive (no timezone) and localize it
             local_dt = data.scheduled_at.replace(tzinfo=local_tz)
-            # Convert to UTC
             scheduled_at_utc = local_dt.astimezone(timezone.utc)
         except Exception as e:
             logger.warning(f"Invalid timezone '{scheduled_timezone}', using UTC: {e}")
             scheduled_at_utc = data.scheduled_at.replace(tzinfo=timezone.utc)
             scheduled_timezone = "UTC"
     elif data.scheduled_at and not scheduled_timezone:
-        # Assume UTC if no timezone provided
         scheduled_at_utc = data.scheduled_at.replace(tzinfo=timezone.utc)
         scheduled_timezone = "UTC"
 
-    notification = Notification(
+    return scheduled_at_utc, scheduled_timezone
+
+
+def _create_notification_record(
+    data: NotificationCreate,
+    scheduled_at_utc: datetime,
+    scheduled_timezone: str,
+    current_user: User
+) -> Notification:
+    """Create a Notification ORM object from validated data."""
+    return Notification(
         incident_id=data.incident_id,
         template_id=data.template_id,
         title=data.title,
@@ -349,10 +310,16 @@ async def create_notification(
         slack_webhook_url=data.slack_webhook_url,
         teams_webhook_url=data.teams_webhook_url,
         created_by_id=current_user.id,
-        # Set status to SENDING for immediate send, SCHEDULED for future
         status=NotificationStatus.SCHEDULED if data.scheduled_at else NotificationStatus.SENDING
     )
 
+
+def _assign_notification_recipients(
+    db: Session,
+    notification: Notification,
+    data: NotificationCreate
+) -> None:
+    """Assign target groups and users to notification."""
     if data.target_group_ids:
         groups = db.query(Group).filter(Group.id.in_(data.target_group_ids)).all()
         notification.target_groups = groups
@@ -361,6 +328,124 @@ async def create_notification(
         users = db.query(User).filter(User.id.in_(data.target_user_ids)).all()
         notification.target_users = users
 
+
+@notifications_router.get("", response_model=dict)
+def list_notifications(
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    incident_id: Annotated[Optional[int], Query()] = None,
+    status: Annotated[Optional[NotificationStatus], Query()] = None,
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = None
+):
+    """List notifications with optional filtering.
+
+    Access Control:
+        - Manager and Admin roles: Can see all notifications
+        - Viewer role: Can only see notifications where they are recipients
+    """
+    query = _apply_viewer_notification_filter(db.query(Notification), current_user)
+    if incident_id:
+        query = query.filter(Notification.incident_id == incident_id)
+    if status:
+        query = query.filter(Notification.status == status)
+    total = query.count()
+    items = query.order_by(desc(Notification.created_at)).offset((page - 1) * page_size).limit(page_size).all()
+    return {"items": [_notification_to_dict(item) for item in items], "total": total, "page": page, "page_size": page_size}
+
+
+# ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
+
+notifications_router = APIRouter(prefix="/notifications", tags=["Notifications"])
+
+
+@notifications_router.post(
+    "",
+    response_model=NotificationResponse,
+    status_code=201,
+    responses={
+        400: {
+            "description": "Bad Request - Invalid input data",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Must specify recipients: target_all, groups, or users"}
+                }
+            }
+        },
+        404: {
+            "description": "Not Found - Referenced incident or template not found",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Incident not found"}
+                }
+            }
+        },
+        429: {
+            "description": "Too Many Requests - Rate limit exceeded",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Rate limit exceeded. Maximum 10 notifications per minute."}
+                }
+            }
+        },
+    }
+)
+async def create_notification(
+    data: NotificationCreate,
+    db: Annotated[Session, Depends(get_db)] = None,
+    current_user: Annotated[User, Depends(require_manager)] = None,
+    request: Request = None,
+):
+    """Create a new notification.
+
+    Args:
+        data: Notification creation data
+        db: Database session
+        current_user: Authenticated manager user
+        request: HTTP request for audit logging
+
+    Returns:
+        Created notification with status SENDING (immediate) or SCHEDULED (future)
+
+    Raises:
+        HTTPException: 400 - Invalid recipients or webhook URLs
+        HTTPException: 404 - Referenced incident/template not found
+        HTTPException: 429 - Rate limit exceeded
+    """
+    # Rate limiting checks
+    is_allowed, retry_after = await check_api_rate_limit(current_user.id, "create_notification")
+    if not is_allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit exceeded. Maximum {API_RATE_LIMIT_MAX} requests per minute for this endpoint.",
+            headers={"Retry-After": str(retry_after)}
+        )
+
+    is_allowed, retry_after = await check_notification_rate_limit(current_user.id)
+    if not is_allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit exceeded. Maximum {NOTIFICATION_RATE_LIMIT_MAX} notifications per minute.",
+            headers={"Retry-After": str(retry_after)}
+        )
+
+    await record_api_request(current_user.id, "create_notification")
+    await record_notification_dispatch(current_user.id)
+
+    # Validate input
+    _validate_recipients(data)
+    _validate_webhook_urls(data)
+
+    # Convert scheduled time to UTC
+    scheduled_at_utc, scheduled_timezone = _convert_scheduled_time_to_utc(data)
+
+    # Create notification record
+    notification = _create_notification_record(data, scheduled_at_utc, scheduled_timezone, current_user)
+
+    # Assign recipients
+    _assign_notification_recipients(db, notification, data)
+
+    # Save to database
     db.add(notification)
     db.add(create_audit_log(
         user_id=current_user.id,
@@ -373,10 +458,10 @@ async def create_notification(
     db.commit()
     db.refresh(notification)
 
-    # Record this dispatch for rate limiting
+    # Record dispatch for rate limiting
     await record_notification_dispatch(current_user.id)
 
-    # Send immediately if not scheduled (task will change status to SENT when complete)
+    # Send immediately if not scheduled
     if not data.scheduled_at:
         send_notification_task.delay(
             notification.id,
