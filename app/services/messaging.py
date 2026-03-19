@@ -201,7 +201,7 @@ class EmailService:
         if settings.APP_ENV == "development":
             dev_note = f"\n\n--- LOCAL DEVELOPMENT ---\nDirect link (copy-paste to browser): {reset_url}\n--------------------------"
         
-        body_html = """
+        body_html = f"""
         <html><body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <div style="background: #1e40af; padding: 20px; text-align: center;">
             <h1 style="color: white; margin: 0;">TM Alert</h1>
@@ -229,7 +229,7 @@ class EmailService:
         # Escape password to prevent HTML injection (defense in depth)
         safe_password = _escape_xml(password)
 
-        body_text = """Hi {user_name},
+        body_text = f"""Hi {user_name},
 
 Welcome to TM Alert! You've been added to the Taylor Morrison emergency notification system.
 
@@ -250,7 +250,7 @@ Stay safe,
 TM Alert Team
 Taylor Morrison"""
 
-        body_html = """
+        body_html = f"""
         <html><body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #f1f5f9;">
         <div style="background: #1e40af; padding: 25px; text-align: center;">
             <h1 style="color: white; margin: 0; font-size: 24px;">🚨 TM Alert</h1>

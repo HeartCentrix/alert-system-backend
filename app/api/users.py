@@ -317,7 +317,11 @@ def update_user_endpoint(
     if data.email is not None and data.email != user.email:
         _check_email_unique(db, data.email, user_id)
 
+    # Update user fields (exclude user_id - never allow changing user_id)
     for field, value in data.model_dump(exclude_unset=True).items():
+        # Skip user_id - it's the primary key and cannot be changed
+        if field == 'user_id':
+            continue
         if field == 'employee_id' and value == '':
             value = None
         setattr(user, field, value)
@@ -330,12 +334,12 @@ def update_user_endpoint(
         resource_id=user_id,
         request=request,
     ))
-    
+
     # Sync location changes between users.location_id and user_locations table
     if data.location_id is not None:
         from app.api.location_audience import _sync_user_location_primary
         _sync_user_location_primary(db, user_id, data.location_id)
-    
+
     db.commit()
     db.refresh(user)
     from app.location_tasks import refresh_dynamic_groups_for_user
@@ -435,11 +439,17 @@ def delete_user(
         Group.type == GroupType.DYNAMIC,
         Group.is_active == True
     ).all()
-    
+
     for group in dynamic_groups:
         if user in group.members:
             group.members.remove(user)
+
+    # Delete user_locations entries first (to avoid NOT NULL violation)
+    db.query(UserLocation).filter(UserLocation.user_id == user_id).delete()
     
+    # Delete user_location_history entries
+    db.query(UserLocationHistory).filter(UserLocationHistory.user_id == user_id).delete()
+
     db.delete(user)
     db.add(create_audit_log(
         user_id=current_user.id,
@@ -830,14 +840,14 @@ async def import_users_csv(
             if result.get('status') == 'failed':
                 emails_failed += 1
                 email_failures.append(f"Email to {_scrub_email(user_data['email'])} failed: {result.get('error', 'Unknown error')}")
-                logger.error(f"Welcome email failed for user_id={user.id}, email={_scrub_email(user_data['email'])}: {result.get('error')}")
+                logger.error(f"Welcome email failed for user_id={user_data.get('id', 'N/A')}, email={_scrub_email(user_data['email'])}: {result.get('error')}")
             else:
                 emails_sent += 1
-                logger.info(f"Welcome email sent to user_id={user.id}, email={_scrub_email(user_data['email'])}")
+                logger.info(f"Welcome email sent to user_id={user_data.get('id', 'N/A')}, email={_scrub_email(user_data['email'])}")
         except Exception as e:
             emails_failed += 1
             email_failures.append(f"Email to {_scrub_email(user_data['email'])} error: {str(e)}")
-            logger.error(f"Exception sending welcome email to user_id={user.id}, email={_scrub_email(user_data['email'])}: {e}")
+            logger.error(f"Exception sending welcome email to user_id={user_data.get('id', 'N/A')}, email={_scrub_email(user_data['email'])}: {e}")
 
     # Add secondary audit log for email results if there were newly created users
     if created_users and (emails_sent > 0 or emails_failed > 0):
