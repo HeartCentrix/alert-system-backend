@@ -58,6 +58,7 @@ INVALID_CREDENTIALS_MFA_MSG = "Invalid credentials or MFA code"
 INVALID_CREDENTIALS_RECOVERY_MSG = "Invalid credentials or recovery code"
 INVALID_CREDENTIALS_MSG = "Invalid credentials"
 PASSWORD_RESET_SENT_MSG = "If an account exists with that email, a password reset link has been sent"
+IP_LOCKOUT_MSG = "Too many login attempts from this IP. Please try again later."
 
 
 logger = logging.getLogger(__name__)
@@ -693,131 +694,16 @@ async def entra_callback(
     return await _entra_callback_success(user, request, response, db)
 
 
-# ─── LDAP LOGIN HELPER FUNCTIONS ─────────────────────────────────────────────
-
-async def _check_ldap_ip_lockout(client_ip: str) -> None:
-    """Check IP rate limit for LDAP login and raise HTTPException if locked."""
-    if await is_ip_locked(client_ip):
-        logger.warning(f"IP lockout for LDAP login from {client_ip}")
-        from app.services.rate_limiter import _ip_lock_key, _get_client
-        r = _get_client()
-        ttl_seconds = await r.ttl(_ip_lock_key(client_ip))
-        
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail={
-                "message": "Too many login attempts from this IP. Please try again later.",
-                "retry_after_seconds": max(0, ttl_seconds),
-                "retry_after": format_lockout_time(max(0, ttl_seconds))
-            },
-            headers={"Retry-After": str(max(0, ttl_seconds))}
-        )
-
-
-async def _handle_ldap_auth_failure(client_ip: str) -> None:
-    """Handle failed LDAP authentication with rate limiting."""
-    await record_ip_failure(client_ip)
-    
-    from app.services.rate_limiter import _ip_fail_key, _get_client
-    r = _get_client()
-    ip_fail_count = await r.get(_ip_fail_key(client_ip)) or 0
-    ip_remaining = max(0, IP_RATE_LIMIT_MAX_ATTEMPTS - int(ip_fail_count))
-    
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail={
-            "message": INVALID_CREDENTIALS_MSG,
-            "remaining_attempts": ip_remaining,
-            "lockout_threshold": IP_RATE_LIMIT_MAX_ATTEMPTS
-        }
-    )
-
-
-def _check_ldap_email_domain(email: str) -> bool:
-    """Check if LDAP user email domain is allowed."""
-    if not settings.ALLOWED_EMAIL_DOMAINS:
-        return True
-    
-    allowed = [d.strip().lower() for d in settings.ALLOWED_EMAIL_DOMAINS.split(",") if d.strip()]
-    email_domain = email.split("@")[-1]
-    return not allowed or email_domain in allowed
-
-
-def _find_or_provision_ldap_user(db: Session, ldap_user: dict) -> User:
-    """Find existing user or provision new LDAP user."""
-    user = db.query(User).filter(func.lower(User.email) == ldap_user["email"].lower()).first()
-    
-    if user:
-        if user.auth_provider != "ldap":
-            user.auth_provider = "ldap"
-            user.external_id = ldap_user["dn"]
-        if ldap_user.get("first_name"):
-            user.first_name = ldap_user["first_name"]
-        if ldap_user.get("last_name"):
-            user.last_name = ldap_user["last_name"]
-        return user
-    
-    if not settings.AUTO_PROVISION_USERS:
-        raise HTTPException(status_code=403, detail="Account not found. Contact your administrator.")
-    
-    user = User(
-        email=ldap_user["email"],
-        hashed_password=None,
-        first_name=ldap_user.get("first_name") or "User",
-        last_name=ldap_user.get("last_name") or ".",
-        role=UserRole.VIEWER,
-        auth_provider="ldap",
-        external_id=ldap_user["dn"],
-        is_verified=True,
-    )
-    db.add(user)
-    db.flush()
-    logger.info(f"JIT provisioned LDAP user: {user.email}")
-    return user
-
-
-async def _ldap_login_success(user: User, request: Request, response: Response, db: Session) -> LoginSuccessResponse:
-    """Create LDAP login success response with tokens."""
-    from app.core.security import create_access_token, create_refresh_token
-    
-    access_token = create_access_token({"sub": str(user.id), "role": user.role})
-    refresh_token_str = create_refresh_token({"sub": str(user.id)})
-    
-    rt = RefreshToken(
-        user_id=user.id,
-        token=refresh_token_str,
-        expires_at=datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
-    )
-    db.add(rt)
-    
-    user.last_login = datetime.now(timezone.utc)
-    user.last_seen_at = datetime.now(timezone.utc)
-    user.is_online = True
-    user.is_enabled = True
-    
-    db.add(create_audit_log(
-        user_id=user.id,
-        user_email=user.email,
-        action="login_ldap",
-        resource_type="user",
-        resource_id=user.id,
-        request=request,
-    ))
-    db.commit()
-    
-    _set_refresh_cookie(response, refresh_token_str, settings.REFRESH_TOKEN_EXPIRE_DAYS)
-    
-    return LoginSuccessResponse(
-        status="success",
-        access_token=access_token,
-        token_type="bearer",
-        user=UserResponse.model_validate(user),
-        refresh_token=refresh_token_str,
-    )
-
-
 # ─── LDAP LOGIN ENDPOINT ─────────────────────────────────────────────────────
-@router.post("/ldap/login")
+@router.post(
+    "/ldap/login",
+    responses={
+        401: {"description": "Unauthorized - Invalid LDAP credentials"},
+        403: {"description": "Forbidden - LDAP disabled, email domain not allowed, or account not found"},
+        429: {"description": "Too Many Requests - IP address rate limit exceeded"},
+        500: {"description": "Internal Server Error - LDAP service not properly configured"},
+    }
+)
 async def ldap_login(
     request: Request,
     response: Response,
@@ -830,25 +716,9 @@ async def ldap_login(
         raise HTTPException(status_code=403, detail="LDAP authentication is not enabled")
 
     client_ip = _get_client_ip(request)
-    
-    # Check IP-based rate limit (same as local login)
+
     if await is_ip_locked(client_ip):
-        logger.warning(f"IP lockout for LDAP login from {client_ip}")
-        
-        from app.services.rate_limiter import _ip_lock_key
-        from app.services.rate_limiter import _get_client
-        r = _get_client()
-        ttl_seconds = await r.ttl(_ip_lock_key(client_ip))
-        
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail={
-                "message": "Too many login attempts from this IP. Please try again later.",
-                "retry_after_seconds": max(0, ttl_seconds),
-                "retry_after": format_lockout_time(max(0, ttl_seconds))
-            },
-            headers={"Retry-After": str(max(0, ttl_seconds))}
-        )
+        await _handle_ldap_ip_lockout(client_ip)
 
     from app.services.ldap_auth import get_ldap_service
     ldap_svc = get_ldap_service()
@@ -856,64 +726,25 @@ async def ldap_login(
     if not ldap_svc.is_configured:
         raise HTTPException(status_code=500, detail="LDAP is not properly configured")
 
-    # Authenticate against LDAP
     ldap_user = ldap_svc.authenticate(username, password)
     if not ldap_user:
-        # Record failed attempt for IP tracking
-        await record_ip_failure(client_ip)
-        
-        # Get current IP failure count for remaining attempts
-        from app.services.rate_limiter import _ip_fail_key
-        from app.services.rate_limiter import _get_client
-        r = _get_client()
-        ip_fail_count = await r.get(_ip_fail_key(client_ip)) or 0
-        ip_remaining = max(0, IP_RATE_LIMIT_MAX_ATTEMPTS - int(ip_fail_count))
+        await _handle_ldap_auth_failure(client_ip)
 
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={
-                "message": INVALID_CREDENTIALS_MSG,
-                "remaining_attempts": ip_remaining,
-                "lockout_threshold": IP_RATE_LIMIT_MAX_ATTEMPTS
-            }
-        )
+    if not _validate_email_domain(ldap_user["email"]):
+        raise HTTPException(status_code=403, detail="Your email domain is not allowed")
 
-    # Check email domain restriction
-    if settings.ALLOWED_EMAIL_DOMAINS:
-        allowed = [d.strip().lower() for d in settings.ALLOWED_EMAIL_DOMAINS.split(",") if d.strip()]
-        email_domain = ldap_user["email"].split("@")[-1]
-        if allowed and email_domain not in allowed:
-            raise HTTPException(status_code=403, detail="Your email domain is not allowed")
+    user = _find_or_create_ldap_user(db, ldap_user)
 
-    # Find or create user
-    user = db.query(User).filter(func.lower(User.email) == ldap_user["email"].lower()).first()
+    return _create_ldap_login_response(user, request, response, db)
 
-    if user:
-        if user.auth_provider != "ldap":
-            user.auth_provider = "ldap"
-            user.external_id = ldap_user["dn"]
-        if ldap_user["first_name"]:
-            user.first_name = ldap_user["first_name"]
-        if ldap_user["last_name"]:
-            user.last_name = ldap_user["last_name"]
-    elif settings.AUTO_PROVISION_USERS:
-        user = User(
-            email=ldap_user["email"],
-            hashed_password=None,
-            first_name=ldap_user["first_name"] or "User",
-            last_name=ldap_user["last_name"] or ".",
-            role=UserRole.VIEWER,
-            auth_provider="ldap",
-            external_id=ldap_user["dn"],
-            is_verified=True,
-        )
-        db.add(user)
-        db.flush()
-        logger.info(f"JIT provisioned LDAP user: {user.email}")
-    else:
-        raise HTTPException(status_code=403, detail="Account not found. Contact your administrator.")
 
-    # Issue tokens (same as local/entra login)
+# ─── LDAP LOGIN HELPER FUNCTIONS ─────────────────────────────────────────────
+
+
+def _create_ldap_login_response(user: User, request: Request, response: Response, db: Session) -> LoginSuccessResponse:
+    """Create LDAP login success response with tokens."""
+    from app.core.security import create_access_token, create_refresh_token
+
     access_token = create_access_token({"sub": str(user.id), "role": user.role})
     refresh_token_str = create_refresh_token({"sub": str(user.id)})
 
@@ -926,8 +757,8 @@ async def ldap_login(
 
     user.last_login = datetime.now(timezone.utc)
     user.last_seen_at = datetime.now(timezone.utc)
-    user.is_online = True  # Mark as online on login
-    user.is_enabled = True  # Ensure account is enabled
+    user.is_online = True
+    user.is_enabled = True
 
     db.add(create_audit_log(
         user_id=user.id,
@@ -949,13 +780,108 @@ async def ldap_login(
         refresh_token=refresh_token_str,
     )
 
+
+# ─── LDAP LOGIN HELPER FUNCTIONS ─────────────────────────────────────────────
+
+
+def _validate_email_domain(email: str) -> bool:
+    """Check if email domain is allowed. Returns True if allowed."""
+    if not settings.ALLOWED_EMAIL_DOMAINS:
+        return True
+
+    allowed = [d.strip().lower() for d in settings.ALLOWED_EMAIL_DOMAINS.split(",") if d.strip()]
+    email_domain = email.split("@")[-1]
+    return not allowed or email_domain in allowed
+
+
+def _provision_ldap_user(db: Session, ldap_user: dict) -> User:
+    """Create a new user from LDAP data with JIT provisioning."""
+    user = User(
+        email=ldap_user["email"],
+        hashed_password=None,
+        first_name=ldap_user["first_name"] or "User",
+        last_name=ldap_user["last_name"] or ".",
+        role=UserRole.VIEWER,
+        auth_provider="ldap",
+        external_id=ldap_user["dn"],
+        is_verified=True,
+    )
+    db.add(user)
+    db.flush()
+    logger.info(f"JIT provisioned LDAP user: {user.email}")
+    return user
+
+
+def _sync_ldap_user_attributes(user: User, ldap_user: dict) -> None:
+    """Sync user attributes from LDAP data."""
+    if user.auth_provider != "ldap":
+        user.auth_provider = "ldap"
+        user.external_id = ldap_user["dn"]
+    if ldap_user["first_name"]:
+        user.first_name = ldap_user["first_name"]
+    if ldap_user["last_name"]:
+        user.last_name = ldap_user["last_name"]
+
+
+def _find_or_create_ldap_user(db: Session, ldap_user: dict) -> User:
+    """Find existing user or create new one from LDAP."""
+    user = db.query(User).filter(func.lower(User.email) == ldap_user["email"].lower()).first()
+
+    if user:
+        _sync_ldap_user_attributes(user, ldap_user)
+        return user
+
+    if not settings.AUTO_PROVISION_USERS:
+        raise HTTPException(status_code=403, detail="Account not found. Contact your administrator.")
+
+    return _provision_ldap_user(db, ldap_user)
+
+
+async def _handle_ldap_ip_lockout(client_ip: str) -> None:
+    """Handle IP lockout for LDAP login and raise HTTPException."""
+    logger.warning(f"IP lockout for LDAP login from {client_ip}")
+
+    from app.services.rate_limiter import _ip_lock_key, _get_client
+    r = _get_client()
+    ttl_seconds = await r.ttl(_ip_lock_key(client_ip))
+
+    raise HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail={
+            "message": IP_LOCKOUT_MSG,
+            "retry_after_seconds": max(0, ttl_seconds),
+            "retry_after": format_lockout_time(max(0, ttl_seconds))
+        },
+        headers={"Retry-After": str(max(0, ttl_seconds))}
+    )
+
+
+async def _handle_ldap_auth_failure(client_ip: str) -> None:
+    """Handle failed LDAP authentication with rate limiting."""
+    await record_ip_failure(client_ip)
+
+    from app.services.rate_limiter import _ip_fail_key, _get_client
+    r = _get_client()
+    ip_fail_count = await r.get(_ip_fail_key(client_ip)) or 0
+    ip_remaining = max(0, IP_RATE_LIMIT_MAX_ATTEMPTS - int(ip_fail_count))
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail={
+            "message": INVALID_CREDENTIALS_MSG,
+            "remaining_attempts": ip_remaining,
+            "lockout_threshold": IP_RATE_LIMIT_MAX_ATTEMPTS
+        }
+    )
+
+
 async def _handle_login_mfa(user, request, db, client_ip) -> object:
     """
     Handle MFA check during login. Returns a response object if MFA is pending,
     or None if authentication can proceed to token issuance.
     """
     from app.core.security import encrypt_mfa_secret, decrypt_mfa_secret
-    
+
     # Check if MFA is required for this user (by role or explicit enablement)
     if not user_requires_mfa(user):
         return None
@@ -1030,11 +956,11 @@ async def _check_ip_rate_limit(client_ip: str) -> None:
         from app.services.rate_limiter import _ip_lock_key, _get_client
         r = _get_client()
         ttl_seconds = await r.ttl(_ip_lock_key(client_ip))
-        
+
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail={
-                "message": "Too many login attempts from this IP. Please try again later.",
+                "message": IP_LOCKOUT_MSG,
                 "retry_after_seconds": max(0, ttl_seconds),
                 "retry_after": format_lockout_time(max(0, ttl_seconds))
             },
@@ -2052,62 +1978,35 @@ def get_mfa_status(
     return MFAStatusDetailResponse(**status_data)
 
 
-@router.post("/mfa/verify-login", response_model=LoginSuccessResponse)
-async def verify_mfa_and_complete_login(
-    request: MFAVerifyLoginRequest,
-    req: Request,
-    response: Response,
-    db: Annotated[Session, Depends(get_db)] = None
-):
-    """
-    Complete MFA verification and issue auth tokens.
-    
-    Use this endpoint after receiving a challenge token from /login:
-    1. Call /login with credentials
-    2. Receive challenge token (and QR code if setup needed)
-    3. User scans QR and gets OTP from authenticator app
-    4. Call this endpoint with challenge_token + OTP code
-    5. Receive full auth tokens on success
-    
-    Security:
-    - Challenge token must be valid and not expired
-    - OTP code must match user's TOTP secret
-    - No tokens issued until both verifications pass
-    - Failed attempts counted toward rate limiting
-    """
-    client_ip = _get_client_ip(req)
+# ─── MFA LOGIN VERIFICATION HELPER FUNCTIONS ─────────────────────────────────
 
-    # Check IP-based rate limit FIRST (before processing challenge token)
-    # This prevents brute-force attacks on the TOTP code (6 digits = 1M combinations)
-    if await is_ip_locked(client_ip):
-        logger.warning(f"IP lockout for {client_ip} at MFA verify")
-        
-        from app.services.rate_limiter import _ip_lock_key
-        from app.services.rate_limiter import _get_client
-        r = _get_client()
-        ttl_seconds = await r.ttl(_ip_lock_key(client_ip))
-        
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail={
-                "message": "Too many failed attempts. Please try again later.",
-                "retry_after_seconds": max(0, ttl_seconds),
-                "retry_after": format_lockout_time(max(0, ttl_seconds))
-            },
-            headers={"Retry-After": str(max(0, ttl_seconds))}
-        )
 
-    # Verify JWT challenge token — signature, expiry, and type all checked in one call
-    is_valid, user_id = _verify_challenge_token(request.challenge_token)
-    if not is_valid:
-        logger.warning(f"Invalid or expired MFA challenge token from IP {client_ip}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=INVALID_CREDENTIALS_MFA_MSG
-        )
+def _verify_mfa_challenge_token(token: str) -> tuple[bool, int]:
+    """Verify MFA challenge token and return user_id. Returns (is_valid, user_id)."""
+    return _verify_challenge_token(token)
 
-    # Fetch user from database
-    user = db.query(User).filter(User.id == user_id).first()
+
+async def _handle_mfa_ip_lockout(client_ip: str) -> None:
+    """Handle IP lockout during MFA verification."""
+    logger.warning(f"IP lockout for {client_ip} at MFA verify")
+
+    from app.services.rate_limiter import _ip_lock_key, _get_client
+    r = _get_client()
+    ttl_seconds = await r.ttl(_ip_lock_key(client_ip))
+
+    raise HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail={
+            "message": "Too many failed attempts. Please try again later.",
+            "retry_after_seconds": max(0, ttl_seconds),
+            "retry_after": format_lockout_time(max(0, ttl_seconds))
+        },
+        headers={"Retry-After": str(max(0, ttl_seconds))}
+    )
+
+
+def _validate_user_mfa_state(user: User, user_id: int) -> None:
+    """Validate user exists and MFA is still required."""
     if not user:
         logger.warning(f"User {user_id} not found")
         raise HTTPException(
@@ -2115,15 +2014,13 @@ async def verify_mfa_and_complete_login(
             detail=INVALID_CREDENTIALS_MFA_MSG
         )
 
-    # Verify MFA is still required (user might have completed setup in another session)
     if not user_requires_mfa(user):
         logger.warning(f"MFA no longer required for user {user_id}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="MFA not required"
         )
-    
-    # Verify OTP code
+
     if not user.mfa_secret:
         logger.warning(f"No MFA secret for user {user_id}")
         raise HTTPException(
@@ -2131,20 +2028,25 @@ async def verify_mfa_and_complete_login(
             detail=INVALID_CREDENTIALS_MFA_MSG
         )
 
+
+async def _verify_totp_and_record_failure(
+    user: User,
+    code: str,
+    client_ip: str
+) -> None:
+    """Verify TOTP code and record failure if invalid. Raises HTTPException on failure."""
     _plain_secret_for_totp_verify = decrypt_mfa_secret(user.mfa_secret) or user.mfa_secret
-    if not verify_totp_code(_plain_secret_for_totp_verify, request.code):
-        # Invalid MFA code - record as failed attempt
+
+    if not verify_totp_code(_plain_secret_for_totp_verify, code):
         try:
             count = await redis_record_failed_login(user.id)
             await record_ip_failure(client_ip)
         except Exception as e:
             logger.error(f"Error recording failed login: {e}")
 
-        logger.warning(f"Invalid MFA code for user {user_id}")
-        
-        # Calculate remaining attempts
+        logger.warning(f"Invalid MFA code for user {user.id}")
         remaining_attempts = max(0, ACCOUNT_LOCKOUT_THRESHOLD - count)
-        
+
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={
@@ -2154,49 +2056,67 @@ async def verify_mfa_and_complete_login(
             }
         )
 
-    # Replay protection — reject reuse within the same 30-second window
-    if is_totp_replay(user, request.code):
-        logger.warning(f"TOTP replay attempt detected for user {user_id}")
+
+def _check_totp_replay(user: User, code: str) -> None:
+    """Check if TOTP code was already used. Raises HTTPException on replay."""
+    if is_totp_replay(user, code):
+        logger.warning(f"TOTP replay attempt detected for user {user.id}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="TOTP code already used. Please wait for the next code."
         )
 
-    # Record this code as used — will be committed with the final db.commit()
-    user.last_used_totp_code = request.code
+
+def _record_totp_usage(user: User, code: str, db: Session) -> None:
+    """Record TOTP code usage to prevent replay."""
+    user.last_used_totp_code = code
     user.last_used_totp_at = datetime.now(timezone.utc)
     db.add(user)
+
+
+def _enable_mfa_and_generate_recovery_codes(user: User, db: Session) -> tuple[bool, Optional[list[str]]]:
+    """Enable MFA and generate recovery codes if not already enabled.
     
-    # MFA verified successfully - enable MFA if not already enabled
-    was_new_mfa = False
+    Returns:
+        tuple: (was_new_mfa, recovery_codes)
+    """
+    if user.mfa_enabled:
+        return False, None
+
+    user.mfa_enabled = True
     recovery_codes = None
-    if not user.mfa_enabled:
-        user.mfa_enabled = True
-        was_new_mfa = True
 
-        # Generate initial recovery codes for new MFA users
-        try:
-            plaintext_codes, batch_id = generate_recovery_codes(
-                db=db,
-                user_id=user.id,
-                generated_by_user_id=user.id,
-                reason='initial_setup'
-            )
-            recovery_codes = plaintext_codes
-            logger.info(f"Generated {len(plaintext_codes)} recovery codes for user {user_id}")
-        except Exception as e:
-            logger.error(f"Failed to generate recovery codes: {e}")
-            # Don't fail the login, but log the issue
+    try:
+        plaintext_codes, batch_id = generate_recovery_codes(
+            db=db,
+            user_id=user.id,
+            generated_by_user_id=user.id,
+            reason='initial_setup'
+        )
+        recovery_codes = plaintext_codes
+        logger.info(f"Generated {len(plaintext_codes)} recovery codes for user {user.id}")
+    except Exception as e:
+        logger.error(f"Failed to generate recovery codes: {e}")
 
-        logger.info(f"MFA enabled for user {user_id} during login")
-    
-    # Issue tokens (same as successful login)
+    logger.info(f"MFA enabled for user {user.id} during login")
+    return True, recovery_codes
+
+
+async def _finalize_mfa_login(
+    user: User,
+    client_ip: str,
+    req: Request,
+    response: Response,
+    db: Session,
+    was_new_mfa: bool,
+    recovery_codes: Optional[list[str]]
+) -> LoginSuccessResponse:
+    """Issue tokens and complete MFA login flow."""
     try:
         await clear_account_failures(user.id)
     except Exception as e:
         logger.error(f"Error clearing account failures: {e}")
 
-    # Log successful attempt
     db.add(LoginAttempt(
         email=user.email,
         ip_address=client_ip,
@@ -2206,7 +2126,6 @@ async def verify_mfa_and_complete_login(
     access_token = create_access_token({"sub": str(user.id), "role": user.role})
     refresh_token_str = create_refresh_token({"sub": str(user.id)})
 
-    # Save refresh token
     rt = RefreshToken(
         user_id=user.id,
         token=refresh_token_str,
@@ -2214,13 +2133,11 @@ async def verify_mfa_and_complete_login(
     )
     db.add(rt)
 
-    # Mark user as online (same as successful login)
     user.last_login = datetime.now(timezone.utc)
     user.last_seen_at = datetime.now(timezone.utc)
-    user.is_online = True  # Mark as online
-    user.is_enabled = True  # Ensure account is enabled
+    user.is_online = True
+    user.is_enabled = True
 
-    # Audit log
     db.add(create_audit_log(
         user_id=user.id,
         user_email=user.email,
@@ -2231,19 +2148,16 @@ async def verify_mfa_and_complete_login(
     ))
     db.commit()
 
-    logger.info(f"MFA verification complete, login successful for user {user_id}")
+    logger.info(f"MFA verification complete, login successful for user {user.id}")
 
-    # Set refresh token as HttpOnly cookie
     _set_refresh_cookie(response, refresh_token_str, settings.REFRESH_TOKEN_EXPIRE_DAYS)
 
-    # Build response with recovery codes if this was first MFA setup
-    # Include refresh_token in body for cross-origin deployments (Vercel + Railway)
     response_data = {
         "status": "success",
         "access_token": access_token,
         "token_type": "bearer",
         "user": UserResponse.model_validate(user),
-        "refresh_token": refresh_token_str,  # For cross-origin deployments
+        "refresh_token": refresh_token_str,
     }
 
     if was_new_mfa and recovery_codes:
@@ -2251,6 +2165,64 @@ async def verify_mfa_and_complete_login(
         response_data["recovery_codes_warning"] = "Store these codes securely. They will not be shown again."
 
     return LoginSuccessResponse(**response_data)
+
+
+# ─── MFA LOGIN VERIFICATION ENDPOINT ─────────────────────────────────────────
+
+@router.post("/mfa/verify-login", response_model=LoginSuccessResponse)
+async def verify_mfa_and_complete_login(
+    request: MFAVerifyLoginRequest,
+    req: Request,
+    response: Response,
+    db: Annotated[Session, Depends(get_db)] = None
+):
+    """
+    Complete MFA verification and issue auth tokens.
+
+    Use this endpoint after receiving a challenge token from /login:
+    1. Call /login with credentials
+    2. Receive challenge token (and QR code if setup needed)
+    3. User scans QR and gets OTP from authenticator app
+    4. Call this endpoint with challenge_token + OTP code
+    5. Receive full auth tokens on success
+
+    Security:
+    - Challenge token must be valid and not expired
+    - OTP code must match user's TOTP secret
+    - No tokens issued until both verifications pass
+    - Failed attempts counted toward rate limiting
+    """
+    client_ip = _get_client_ip(req)
+
+    if await is_ip_locked(client_ip):
+        await _handle_mfa_ip_lockout(client_ip)
+
+    is_valid, user_id = _verify_mfa_challenge_token(request.challenge_token)
+    if not is_valid:
+        logger.warning(f"Invalid or expired MFA challenge token from IP {client_ip}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=INVALID_CREDENTIALS_MFA_MSG
+        )
+
+    user = db.query(User).filter(User.id == user_id).first()
+    _validate_user_mfa_state(user, user_id)
+
+    _verify_totp_and_record_failure(user, request.code, client_ip)
+    _check_totp_replay(user, request.code)
+    _record_totp_usage(user, request.code, db)
+
+    was_new_mfa, recovery_codes = _enable_mfa_and_generate_recovery_codes(user, db)
+
+    return await _finalize_mfa_login(
+        user=user,
+        client_ip=client_ip,
+        req=req,
+        response=response,
+        db=db,
+        was_new_mfa=was_new_mfa,
+        recovery_codes=recovery_codes
+    )
 
 
 # ─── MFA RECOVERY CODE ENDPOINTS ──────────────────────────────────────────────
