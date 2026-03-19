@@ -1130,7 +1130,7 @@ async def import_users_csv(
         created=created,
         updated=updated,
         failed=failed,
-        errors=all_errors if all_errors else None,
+        errors=all_errors,  # Always pass list (can be empty)
         created_users=[
             {"email": u["email"], "first_name": u["first_name"], "last_name": u["last_name"]}
             for u in created_users

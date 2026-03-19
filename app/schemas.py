@@ -760,7 +760,7 @@ class CSVImportResponse(BaseModel):
     created: int
     updated: int
     failed: int
-    errors: List[str]
+    errors: List[str] = []  # List of error messages (empty if no errors)
     # List of newly created users (passwords excluded for security, sent via email)
     created_users: Optional[List[dict]] = None  # [{email, first_name, last_name}, ...]
 
