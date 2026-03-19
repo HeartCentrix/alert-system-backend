@@ -407,21 +407,6 @@ app.add_middleware(CSRFMiddleware)
 # GZip compression
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
-# CORSMiddleware must be added last so it becomes the outermost middleware layer,
-# ensuring CORS headers are always present on every response (including errors).
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_origin_regex=r'^https://[a-zA-Z0-9-]+\.railway\.(app|com)$',  # Allow Railway subdomains for migration flexibility
-    allow_credentials=True,
-    # Only allow necessary HTTP methods
-    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    # Only allow necessary headers - added X-CSRF-Token for CSRF protection
-    allow_headers=["Authorization", "Content-Type", "Accept", "X-CSRF-Token"],
-    # Expose Retry-After and X-CSRF-Token headers for client use
-    expose_headers=["Retry-After", "X-Request-ID", "X-CSRF-Token"],
-)
-
 
 # Request size limit middleware
 @app.middleware("http")
@@ -550,6 +535,24 @@ async def limit_response_size(request: Request, call_next):
 # to SecurityHeadersMiddleware so their early-return 413/500 responses also receive
 # HSTS, X-Content-Type-Options, CSP, etc.  Placing this call last guarantees it.
 app.add_middleware(SecurityHeadersMiddleware)
+
+# CORSMiddleware MUST be added LAST (after SecurityHeadersMiddleware) so it becomes
+# the outermost middleware layer in Starlette's LIFO stack. This ensures:
+# - CORS headers are present on ALL responses (including 413/500 errors from size limiters)
+# - Security headers are applied first, then CORS wraps everything
+# - Browser CORS checks pass for error responses from inner middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_origin_regex=r'^https://[a-zA-Z0-9-]+\.railway\.(app|com)$',  # Allow Railway subdomains for migration flexibility
+    allow_credentials=True,
+    # Only allow necessary HTTP methods
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    # Only allow necessary headers - added X-CSRF-Token for CSRF protection
+    allow_headers=["Authorization", "Content-Type", "Accept", "X-CSRF-Token"],
+    # Expose Retry-After and X-CSRF-Token headers for client use
+    expose_headers=["Retry-After", "X-Request-ID", "X-CSRF-Token"],
+)
 
 # Add custom request logging middleware (after CORS and other middleware)
 # REMOVED - was causing issues
