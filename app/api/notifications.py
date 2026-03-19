@@ -774,6 +774,7 @@ async def submit_response(
     notification_id: int,
     data: NotificationResponseCreate,
     token: Optional[str] = None,
+    channel: Optional[str] = None,  # email, sms, or web (default)
     db: Annotated[Session, Depends(get_db)] = None,
     request: Request = None
 ):
@@ -783,6 +784,11 @@ async def submit_response(
     Two modes:
     1. Authenticated: Logged-in user responding to their own notification (Authorization header)
     2. Token-based: User clicking link from email/SMS (JWT token query param, no auth header)
+    
+    Channel parameter:
+    - email: User clicked link from email
+    - sms: User clicked link from SMS
+    - web: User logged in and responded from portal (default)
     """
     from app.utils.checkin_link import verify_checkin_token
     from fastapi.security import HTTPBearer
@@ -790,17 +796,24 @@ async def submit_response(
     notification = db.query(Notification).filter(Notification.id == notification_id).first()
     if not notification:
         raise HTTPException(status_code=404, detail=NOTIFICATION_NOT_FOUND_MSG)
-    
+
     # Determine user from token or current_user
     user_id, user_email = await _resolve_response_user(
         db=db, request=request, token=token,
         notification_id=notification_id
     )
 
+    # Determine channel from parameter or default to WEB
+    response_channel = AlertChannel.WEB
+    if channel:
+        channel_lower = channel.lower()
+        if channel_lower in ["email", "sms", "web"]:
+            response_channel = AlertChannel(channel_lower)
+
     # Use database row-level locking to prevent race conditions
     # Lock the notification row to prevent concurrent response creation
     from sqlalchemy import select, func
-    
+
     # Use a transaction with proper locking for race condition prevention
     try:
         # Check if user already responded using row-level locking (SELECT FOR UPDATE)
@@ -827,7 +840,7 @@ async def submit_response(
                 notification_id=notification_id,
                 user_id=user_id,
                 user_email=user_email,
-                channel=AlertChannel.WEB,
+                channel=response_channel,  # Use detected channel
                 response_type=data.response_type,
                 message=data.message,
                 latitude=data.latitude,

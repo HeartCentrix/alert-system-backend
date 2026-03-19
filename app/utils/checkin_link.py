@@ -65,18 +65,19 @@ def verify_checkin_token(token: str) -> Optional[dict]:
         return None
 
 
-def generate_checkin_url(notification_id: int, user_id: int, deadline_minutes: Optional[int] = None) -> str:
+def generate_checkin_url(notification_id: int, user_id: int, deadline_minutes: Optional[int] = None, channel: str = "email") -> str:
     """
     Generate a full check-in URL for a user to respond to a safety notification.
-    
+
     Args:
         notification_id: The notification ID
         user_id: The user ID
         deadline_minutes: Optional deadline in minutes
-    
+        channel: The channel this link is for ("email" or "sms")
+
     Returns:
         Full URL string for the check-in page
     """
     token = generate_checkin_token(notification_id, user_id, deadline_minutes)
-    # Frontend route: /notifications/{id}/respond?token={token}
-    return f"{settings.FRONTEND_URL}/notifications/{notification_id}/respond?token={token}"
+    # Frontend route: /notifications/{id}/respond?token={token}&channel={channel}
+    return f"{settings.FRONTEND_URL}/notifications/{notification_id}/respond?token={token}&channel={channel}"

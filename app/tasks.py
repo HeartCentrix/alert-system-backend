@@ -418,12 +418,14 @@ def _dispatch_channel_delivery(
     """Dispatch delivery to specific channel. Returns result dict."""
     checkin_url = None
     if notification.response_required and notification.response_deadline_minutes:
+        # Pass channel parameter so responses are tracked correctly
         checkin_url = generate_checkin_url(
             notification.id,
             user.id,
-            notification.response_deadline_minutes
+            notification.response_deadline_minutes,
+            channel=channel.value  # "email" or "sms"
         )
-    
+
     if channel == AlertChannel.SMS:
         return _send_sms_channel(db, notification, user, log, checkin_url)
     elif channel == AlertChannel.EMAIL:
