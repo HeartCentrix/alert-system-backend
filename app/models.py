@@ -17,63 +17,63 @@ LOCATIONS_ID_FK = "locations.id"
 # ─── ENUMS ────────────────────────────────────────────────────────────────────
 
 class UserRole(str, enum.Enum):
-    SUPER_ADMIN = "SUPER_ADMIN"
-    ADMIN = "ADMIN"
-    MANAGER = "MANAGER"
-    VIEWER = "VIEWER"
+    SUPER_ADMIN = "super_admin"
+    ADMIN = "admin"
+    MANAGER = "manager"
+    VIEWER = "viewer"
 
 
 class GroupType(str, enum.Enum):
-    STATIC = "STATIC"
-    DYNAMIC = "DYNAMIC"
+    STATIC = "static"
+    DYNAMIC = "dynamic"
 
 
 class NotificationStatus(str, enum.Enum):
-    DRAFT = "DRAFT"
-    SENDING = "SENDING"
-    SENT = "SENT"
-    PARTIALLY_SENT = "PARTIALLY_SENT"
-    FAILED = "FAILED"
-    SCHEDULED = "SCHEDULED"
-    CANCELLED = "CANCELLED"
+    DRAFT = "draft"
+    SENDING = "sending"
+    SENT = "sent"
+    PARTIALLY_SENT = "partially_sent"
+    FAILED = "failed"
+    SCHEDULED = "scheduled"
+    CANCELLED = "cancelled"
 
 
 class DeliveryStatus(str, enum.Enum):
-    PENDING = "PENDING"
-    SENT = "SENT"
-    DELIVERED = "DELIVERED"
-    FAILED = "FAILED"
-    BOUNCED = "BOUNCED"
+    PENDING = "pending"
+    SENT = "sent"
+    DELIVERED = "delivered"
+    FAILED = "failed"
+    BOUNCED = "bounced"
 
 
 class ResponseType(str, enum.Enum):
-    SAFE = "SAFE"
-    NEED_HELP = "NEED_HELP"
-    ACKNOWLEDGED = "ACKNOWLEDGED"
-    CUSTOM = "CUSTOM"
+    SAFE = "safe"
+    NEED_HELP = "need_help"
+    ACKNOWLEDGED = "acknowledged"
+    CUSTOM = "custom"
 
 
 class AlertChannel(str, enum.Enum):
-    SMS = "SMS"
-    EMAIL = "EMAIL"
-    VOICE = "VOICE"
-    SLACK = "SLACK"
-    TEAMS = "TEAMS"
-    WEB = "WEB"
+    SMS = "sms"
+    EMAIL = "email"
+    VOICE = "voice"
+    SLACK = "slack"
+    TEAMS = "teams"
+    WEB = "web"
 
 
 class IncidentSeverity(str, enum.Enum):
-    HIGH = "HIGH"
-    MEDIUM = "MEDIUM"
-    LOW = "LOW"
-    INFO = "INFO"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+    INFO = "info"
 
 
 class IncidentStatus(str, enum.Enum):
-    ACTIVE = "ACTIVE"
-    MONITORING = "MONITORING"
-    RESOLVED = "RESOLVED"
-    CANCELLED = "CANCELLED"
+    ACTIVE = "active"
+    MONITORING = "monitoring"
+    RESOLVED = "resolved"
+    CANCELLED = "cancelled"
 
 
 # ─── ASSOCIATION TABLES ───────────────────────────────────────────────────────
@@ -375,14 +375,14 @@ class LoginAttempt(Base):
 
 class UserLocationAssignmentType(str, enum.Enum):
     """How the user was assigned to this location."""
-    MANUAL = "MANUAL"  # Admin manually assigned
-    GEOFENCE = "GEOFENCE"  # Auto-assigned via geofence detection
+    MANUAL = "manual"  # Admin manually assigned
+    GEOFENCE = "geofence"  # Auto-assigned via geofence detection
 
 
 class UserLocationStatus(str, enum.Enum):
     """Current status of the location membership."""
-    ACTIVE = "ACTIVE"
-    INACTIVE = "INACTIVE"  # User exited geofence or was removed
+    ACTIVE = "active"
+    INACTIVE = "inactive"  # User exited geofence or was removed
 
 
 class UserLocation(Base):
