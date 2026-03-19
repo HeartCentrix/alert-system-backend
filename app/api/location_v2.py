@@ -442,8 +442,8 @@ async def autocomplete(
     request: Request,
     q: Annotated[str, Query(..., description="Search query (minimum 3 characters)", min_length=3, max_length=200)],
     limit: Annotated[int, Query(ge=1, le=20)] = 10,
-    countrycodes: Annotated[Optional[str], Query(default=None, description="Comma-separated ISO country codes")] = None,
-    viewbox: Annotated[Optional[str], Query(default=None, description="Bounding box: x1,y1,x2,y2")] = None,
+    countrycodes: Annotated[Optional[str], Query(description="Comma-separated ISO country codes")] = None,
+    viewbox: Annotated[Optional[str], Query(description="Bounding box: x1,y1,x2,y2")] = None,
     bounded: Annotated[bool, Query()] = False,
 ):
     """
