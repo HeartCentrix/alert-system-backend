@@ -29,8 +29,8 @@ PyJWT==2.12.1
 
 
 # External Services
-twilio==9.1.0
-boto3==1.34.120
+twilio==9.10.4
+boto3==1.42.75
 aiosmtplib==3.0.1
 
 # Location Services
