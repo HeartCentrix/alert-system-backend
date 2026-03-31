@@ -23,8 +23,8 @@ psycopg2-binary==2.9.9
 email-validator==2.1.1
 
 # Cache & Queue
-redis==5.0.4
-celery==5.4.0
+redis==7.4.0
+celery==5.6.3
 
 # Authentication
 PyJWT==2.12.1
