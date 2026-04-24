@@ -633,16 +633,16 @@ async def _entra_callback_success(user: User, request: Request, response: Respon
     ))
     db.commit()
 
-    # Set refresh token cookie
+    # Set refresh token cookie — the frontend will exchange this for an
+    # access token by calling /auth/refresh on landing at /auth/callback.
     _set_refresh_cookie(response, refresh_token_str, settings.REFRESH_TOKEN_EXPIRE_DAYS)
 
-    # Redirect to frontend
+    # Redirect to frontend without any tokens in the URL. Tokens in a
+    # redirect URL are logged by browsers, proxies, and Referer headers; a
+    # single log scrape then compromises long-lived sessions for every
+    # Entra user (security review finding B-C2 / F-C3).
     frontend_url = settings.FRONTEND_URL.rstrip("/")
-    redirect_url = (
-        f"{frontend_url}/auth/callback"
-        f"?access_token={access_token}"
-        f"&refresh_token={refresh_token_str}"
-    )
+    redirect_url = f"{frontend_url}/auth/callback?sso=entra"
     return RedirectResponse(url=redirect_url, status_code=302)
 
 
