@@ -240,6 +240,19 @@ class EntraAuthService:
                 f"Nonce mismatch: expected {expected_nonce}, got {claims.get('nonce')}"
             )
 
+        # When a specific tenant is configured (not 'common'), reject tokens
+        # minted in any other tenant. Relying on `issuer=` alone is not
+        # enough because the v2.0 'common' endpoint uses a templated issuer
+        # string (`.../{tenantid}/...`) — the real tenant is in the `tid`
+        # claim. Security review B-H4.
+        if self.tenant_id and self.tenant_id.lower() != "common":
+            expected_tid = self.tenant_id
+            actual_tid = claims.get("tid")
+            if actual_tid != expected_tid:
+                raise ValueError(
+                    f"Tenant mismatch: expected tid={expected_tid}, got {actual_tid}"
+                )
+
         return claims
 
     def extract_user_info(self, claims: dict) -> dict:

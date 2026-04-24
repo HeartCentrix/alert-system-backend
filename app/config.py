@@ -95,3 +95,46 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def _validate_auth_provider_safety() -> None:
+    """
+    Refuse to start with an auth configuration that silently admits any
+    Microsoft account / any LDAP identity. Security review B-H4 / M6.
+
+    Rules:
+      - If ENTRA_ENABLED is on and the tenant is 'common' (multi-tenant,
+        effectively anyone with an MS account can sign in), at least one
+        allow-listed email domain must be configured, otherwise any Azure
+        user self-provisions as a VIEWER on first login.
+      - If AUTO_PROVISION_USERS is on for any external provider, an email
+        domain allow-list is required.
+    """
+    providers = {p.strip().lower() for p in settings.AUTH_PROVIDERS.split(",") if p.strip()}
+    allowed_domains_set = any(
+        d.strip() for d in settings.ALLOWED_EMAIL_DOMAINS.split(",") if d.strip()
+    )
+    external_providers_enabled = (
+        ("entra" in providers and settings.ENTRA_ENABLED)
+        or ("ldap" in providers and settings.LDAP_ENABLED)
+    )
+
+    if settings.ENTRA_ENABLED and (not settings.ENTRA_TENANT_ID or settings.ENTRA_TENANT_ID.lower() == "common"):
+        if not allowed_domains_set:
+            raise RuntimeError(
+                "Unsafe Entra configuration: ENTRA_TENANT_ID is unset or 'common' "
+                "(accepts any Microsoft tenant) and ALLOWED_EMAIL_DOMAINS is empty. "
+                "Set ENTRA_TENANT_ID to a specific tenant GUID or populate "
+                "ALLOWED_EMAIL_DOMAINS with at least one domain before starting."
+            )
+
+    if external_providers_enabled and settings.AUTO_PROVISION_USERS and not allowed_domains_set:
+        raise RuntimeError(
+            "Unsafe auth configuration: AUTO_PROVISION_USERS=True with at least "
+            "one external provider enabled and ALLOWED_EMAIL_DOMAINS empty. Any "
+            "successful Entra/LDAP login would create a real VIEWER account. "
+            "Set ALLOWED_EMAIL_DOMAINS or disable AUTO_PROVISION_USERS."
+        )
+
+
+_validate_auth_provider_safety()
