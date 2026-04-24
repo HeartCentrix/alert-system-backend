@@ -252,10 +252,23 @@ async def handle_voice_response(
             logger.warning(f"Invalid digit received: {Digits} from user {user.id}")
             return Response(content=_build_twiml_response("", "invalid_option"), media_type=XML_CONTENT_TYPE)
 
-        # Find most recent active notification
-        notification = db.query(Notification).filter(
-            Notification.status.in_(['sending', 'sent', 'scheduled'])
-        ).order_by(desc(Notification.created_at)).first()
+        # Find the most recent active notification THIS user was targeted
+        # for. Previously this picked the globally most-recent active
+        # notification, so concurrent alerts for different audiences could
+        # cross-attribute voice responses — safety-critical integrity bug
+        # (security review B-M4). A follow-up should embed notification_id
+        # in the TwiML callback URL so we can verify by id; for now the
+        # per-user lookup closes the cross-attribution window.
+        notification = (
+            db.query(Notification)
+            .join(Notification.target_users)
+            .filter(
+                Notification.status.in_(['sending', 'sent', 'scheduled']),
+                User.id == user.id,
+            )
+            .order_by(desc(Notification.created_at))
+            .first()
+        )
 
         if notification:
             _record_voice_response(db, notification, user, response_type, From, Digits)
