@@ -88,6 +88,16 @@ def _log_user_identity(user_id: Optional[int], email: Optional[str]) -> str:
 # app.services.rate_limiter.check_password_reset_rate_limit /
 # record_password_reset_request (security review B-H5).
 
+# Dummy bcrypt hash used to equalise response time when the supplied email
+# does not correspond to a user. Running bcrypt on a throwaway hash costs
+# the same ~250 ms as verifying against a real user's hash, which denies
+# the attacker a timing oracle for account enumeration (security review
+# B-M8). The hash below is a valid bcrypt hash for a random string; it is
+# never expected to match any real password.
+_UNKNOWN_USER_HASH = (
+    "$2b$12$CwTycUXWue0Thq9StjUM0uJ8QnQFn3HkkWGQmQ3YQ5u4qQ1sWxX2G"
+)
+
 # Redis-based login rate limiting constants (kept for backward compatibility with old functions)
 ACCOUNT_LOCKOUT_THRESHOLD = 5  # Failed attempts before account lockout
 IP_RATE_LIMIT_MAX_ATTEMPTS = 20  # Max attempts per IP across all accounts
@@ -1189,8 +1199,13 @@ async def login(request: LoginRequest, req: Request, response: Response, db: Ann
         if user:
             await _check_account_lockout(user, client_ip)
 
-        # STEP 4: Validate credentials (user not found case)
+        # STEP 4: Validate credentials (user not found case).
+        # Always run bcrypt even when the user does not exist so that the
+        # response time is indistinguishable from the wrong-password path.
+        # Otherwise an attacker can enumerate registered emails by timing
+        # alone (security review B-M8).
         if not user:
+            verify_password(request.password, _UNKNOWN_USER_HASH)
             await _handle_invalid_credentials(client_ip)
 
         # STEP 5: Check device fingerprint
