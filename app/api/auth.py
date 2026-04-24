@@ -84,10 +84,9 @@ def _log_user_identity(user_id: Optional[int], email: Optional[str]) -> str:
         parts.append(f"email={_scrub_email(email)}")
     return ", ".join(parts) if parts else "[UNKNOWN]"
 
-# Simple in-memory rate limiting for password reset requests
-# Format: {email: last_request_timestamp}
-_password_reset_rate_limit: dict[str, float] = {}
-PASSWORD_RESET_RATE_LIMIT_SECONDS = 30  # 30 seconds between requests per email
+# Password-reset rate limiting now lives in Redis — see
+# app.services.rate_limiter.check_password_reset_rate_limit /
+# record_password_reset_request (security review B-H5).
 
 # Redis-based login rate limiting constants (kept for backward compatibility with old functions)
 ACCOUNT_LOCKOUT_THRESHOLD = 5  # Failed attempts before account lockout
@@ -1403,15 +1402,17 @@ def logout(
         429: {"description": "Too Many Requests - Rate limit exceeded (1 request per minute per email)"},
     }
 )
-def forgot_password(request: PasswordResetRequest, req: Request, db: Annotated[Session, Depends(get_db)] = None):
+async def forgot_password(request: PasswordResetRequest, req: Request, db: Annotated[Session, Depends(get_db)] = None):
     """
     Request a password reset email.
 
     Security measures:
-    - Rate limiting: 1 request per minute per email
-    - No email enumeration: Same response regardless of whether email exists
+    - Rate limiting: per-email cooldown + per-IP hourly cap, both in Redis
+      (survives across workers and process restarts — previously an
+      in-memory dict, security review B-H5).
+    - No email enumeration: Same response regardless of whether email exists.
     - Token hashing: Password reset tokens are hashed before storage (SHA-256)
-      Even if the database is compromised, attackers cannot use stolen tokens
+      so stolen DB rows cannot be used directly.
     """
     # Prevent password reset for SSO-only deployments
     if "local" not in settings.AUTH_PROVIDERS.lower():
@@ -1420,15 +1421,24 @@ def forgot_password(request: PasswordResetRequest, req: Request, db: Annotated[S
             detail="Password reset is disabled. Your organization uses Single Sign-On (SSO) for authentication. Please contact your administrator if you need access."
         )
 
+    from app.services.rate_limiter import (
+        check_password_reset_rate_limit,
+        record_password_reset_request,
+    )
+
     # Normalize email for rate limiting
     email_normalized = request.email.strip().lower()
+    client_ip = _get_client_ip(req) if req else None
 
-    # Rate limiting check
-    current_time = time.time()
-    last_request = _password_reset_rate_limit.get(email_normalized)
-    if last_request and (current_time - last_request) < PASSWORD_RESET_RATE_LIMIT_SECONDS:
-        # Still within rate limit window - return success anyway to prevent enumeration
+    # Rate limiting check (per-email cooldown OR per-IP hourly cap)
+    if not await check_password_reset_rate_limit(email_normalized, client_ip):
+        # Within rate limit window — still return success to prevent enumeration.
         return {"message": PASSWORD_RESET_SENT_MSG}
+
+    # Record the attempt now regardless of branch below — this prevents
+    # attackers from probing which emails exist by watching whether a
+    # subsequent request hits the rate limit.
+    await record_password_reset_request(email_normalized, client_ip)
 
     # Find user (case-insensitive email lookup)
     user = db.query(User).filter(
@@ -1437,8 +1447,6 @@ def forgot_password(request: PasswordResetRequest, req: Request, db: Annotated[S
 
     # Always return the same message to prevent email enumeration
     if not user:
-        # Update rate limit even for non-existent emails
-        _password_reset_rate_limit[email_normalized] = current_time
         return {"message": PASSWORD_RESET_SENT_MSG}
 
     # Don't send reset emails for SSO users
@@ -1448,7 +1456,7 @@ def forgot_password(request: PasswordResetRequest, req: Request, db: Annotated[S
 
     # Generate reset token (plaintext - sent to user via email)
     token = secrets.token_urlsafe(32)
-    
+
     # Hash the token before storing in database
     # This ensures that even if the DB is compromised, tokens can't be used directly
     hashed_token = hash_password_reset_token(token)
@@ -1458,9 +1466,6 @@ def forgot_password(request: PasswordResetRequest, req: Request, db: Annotated[S
 
     # Send email with plaintext token (user needs the plaintext to reset password)
     email_service.send_password_reset_email(user.email, token, user.full_name)
-
-    # Update rate limit
-    _password_reset_rate_limit[email_normalized] = current_time
 
     return {"message": PASSWORD_RESET_SENT_MSG}
 

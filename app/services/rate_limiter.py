@@ -15,6 +15,7 @@ when using rediss:// scheme (ssl_cert_reqs=CERT_REQUIRED).
 import redis.asyncio as redis
 import ssl
 from datetime import timedelta
+from typing import Optional
 from app.config import settings
 
 # Build SSL options for TLS connections
@@ -357,3 +358,57 @@ async def clear_api_rate_limit(user_id: int, endpoint: str):
     r = _get_client()
     key = _api_rate_limit_key(user_id, endpoint)
     await r.delete(key)
+
+
+# ──────────────────────────────────────────────
+# Password-reset request rate limiting (security review B-H5)
+# ──────────────────────────────────────────────
+# Previously this was a module-global dict, which is per-process and so
+# silently ineffective under multiple uvicorn workers; it also grew without
+# bound. Move to Redis with two dimensions: per-email (anti-enum, matches
+# the docstring's '1 request per minute per email') and per-IP (global cap
+# against bulk enumeration from a single source).
+
+PASSWORD_RESET_EMAIL_COOLDOWN = timedelta(seconds=60)
+PASSWORD_RESET_IP_MAX_PER_HOUR = 20
+PASSWORD_RESET_IP_WINDOW = timedelta(hours=1)
+
+
+def _pw_reset_email_key(email: str) -> str:
+    return f"pwreset:email:{email.lower()}"
+
+
+def _pw_reset_ip_key(ip: str) -> str:
+    return f"pwreset:ip:{ip}"
+
+
+async def check_password_reset_rate_limit(email: str, ip: Optional[str]) -> bool:
+    """
+    Return True if the request is allowed, False if it must be rate-limited.
+
+    Allowed means: (a) there is no active per-email cooldown and (b) the IP
+    has not exceeded its hourly ceiling.
+    """
+    r = _get_client()
+    if await r.exists(_pw_reset_email_key(email)):
+        return False
+    if ip:
+        count = await r.get(_pw_reset_ip_key(ip))
+        if count is not None and int(count) >= PASSWORD_RESET_IP_MAX_PER_HOUR:
+            return False
+    return True
+
+
+async def record_password_reset_request(email: str, ip: Optional[str]) -> None:
+    """Mark a password-reset request in Redis for both dimensions."""
+    r = _get_client()
+    await r.set(
+        _pw_reset_email_key(email),
+        "1",
+        ex=PASSWORD_RESET_EMAIL_COOLDOWN,
+    )
+    if ip:
+        ip_key = _pw_reset_ip_key(ip)
+        count = await r.incr(ip_key)
+        if count == 1:
+            await r.expire(ip_key, PASSWORD_RESET_IP_WINDOW)
