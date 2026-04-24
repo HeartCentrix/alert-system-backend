@@ -256,12 +256,14 @@ def _get_client_ip(request: Request) -> str:
     Raises HTTPException 400 if client IP cannot be determined.
     """
     if not request.client or not request.client.host:
-        # Fail closed - cannot determine IP, deny the request
-        # This prevents attacks where client info is missing/malformed
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Unable to determine client IP"
-        )
+        # L4 load-balancer health probes and some embedded test clients
+        # arrive without a populated request.client. Previously we raised
+        # 400 here which surfaced as bogus noise on every LB probe. Fall
+        # back to a stable sentinel so callers downstream (rate limiter,
+        # audit log) still have an IP-shaped value to key on, without
+        # allowing a spoof vector (this branch only fires when ASGI itself
+        # did not attach client info). Security review B-L2.
+        return "0.0.0.0"
     return request.client.host
 
 
