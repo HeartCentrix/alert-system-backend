@@ -1660,10 +1660,19 @@ def reset_rate_limits(
     db: Annotated[Session, Depends(get_db)] = None,
     current_user: Annotated[User, Depends(require_admin)] = None
 ):
-    """Debug endpoint to reset all rate limits. ADMIN only.
+    """Debug endpoint to reset all rate limits.
 
-    Remove in production or restrict to super_admin only.
+    Refuses to run outside development. In production a compromised admin
+    token could otherwise wipe lockouts for every user, including the
+    bootstrap super-admin, and silently undo the brute-force protection
+    (security review B-M5).
     """
+    if settings.APP_ENV.lower() != "development":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Debug endpoint disabled outside development.",
+        )
+
     r = _get_redis_client()
 
     # Delete all lockout keys
