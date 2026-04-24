@@ -184,10 +184,6 @@ def user_requires_mfa(user) -> bool:
     Returns:
         True if MFA is required, False otherwise
     """
-    # Exception: admin@tmalert.com is a test account, skip MFA requirement
-    if user.email == "admin@tmalert.com":
-        return False
-
     # If MFA is already enabled, require it
     if user.mfa_enabled:
         return True
