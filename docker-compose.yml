@@ -3,14 +3,17 @@ version: "3.9"
 services:
   db:
     image: postgres:16-alpine
+    # POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB are supplied from the
+    # local .env file — no credential literals in version control
+    # (security review finding D-C1).
     environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=password
-      - POSTGRES_DB=tm_alert
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -31,9 +34,8 @@ services:
     build: .
     ports:
       - "8000:8000"
+    # DATABASE_URL / REDIS_URL come from .env (loaded via env_file below).
     environment:
-      - DATABASE_URL=postgresql://postgres:password@db:5432/tm_alert
-      - REDIS_URL=redis://redis:6379/0
       - ENVIRONMENT=production
     env_file:
       - .env
@@ -47,8 +49,6 @@ services:
   celery_worker:
     build: .
     environment:
-      - DATABASE_URL=postgresql://postgres:password@db:5432/tm_alert
-      - REDIS_URL=redis://redis:6379/0
       - ENVIRONMENT=production
       - SERVICE_TYPE=worker
     env_file:
@@ -63,8 +63,6 @@ services:
   celery_beat:
     build: .
     environment:
-      - DATABASE_URL=postgresql://postgres:password@db:5432/tm_alert
-      - REDIS_URL=redis://redis:6379/0
       - ENVIRONMENT=production
       - SERVICE_TYPE=beat
     env_file:
