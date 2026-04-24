@@ -1,3 +1,4 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 from typing import Optional
 
@@ -99,6 +100,22 @@ class Settings(BaseSettings):
     # app.core.security.user_requires_mfa refuses the exemption in any
     # other environment, so setting this in prod has no effect.
     MFA_EXEMPT_EMAILS: str = ""
+
+    # Refuse to boot with empty signing secrets. Defaults of "" would let
+    # every JWT (access, refresh, MFA challenge) be signed with the empty
+    # HMAC key if the operator forgot to set them, turning deployment into
+    # a complete auth bypass (security review B-C1 / B-C2). CHECKIN_SECRET_KEY
+    # is intentionally allowed to be empty because app/utils/checkin_link.py
+    # falls back to SECRET_KEY, which this validator guarantees is set.
+    @field_validator("SECRET_KEY", "REFRESH_SECRET_KEY", "MFA_CHALLENGE_SECRET_KEY")
+    @classmethod
+    def _require_non_empty_secret(cls, v: str, info) -> str:
+        if not v or not v.strip():
+            raise ValueError(
+                f"{info.field_name} must be a non-empty random string. "
+                f"Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
+            )
+        return v
 
     class Config:
         env_file = ".env"
