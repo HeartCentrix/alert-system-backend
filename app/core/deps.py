@@ -165,6 +165,29 @@ def get_current_user(
     return user
 
 
+def require_password_not_stale(
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> User:
+    """
+    Refuse protected routes while force_password_change is set on the user.
+
+    The password-change, logout, and /auth/me endpoints intentionally use
+    the plain get_current_user so the user can read their own state and
+    rotate the credential. Everything else should opt into this dependency
+    (or require_current_user_active, which wraps it) to prevent stale-
+    credential sessions from continuing to act. Security review B-L5.
+    """
+    if getattr(current_user, "force_password_change", False):
+        raise HTTPException(
+            status_code=status.HTTP_428_PRECONDITION_REQUIRED,
+            detail={
+                "message": "Password change required before using this endpoint.",
+                "code": "password_change_required",
+            },
+        )
+    return current_user
+
+
 def require_roles(*roles: UserRole):
     """Create a dependency that requires specific roles for access.
     
