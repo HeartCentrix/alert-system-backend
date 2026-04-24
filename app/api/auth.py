@@ -1617,8 +1617,28 @@ def update_my_profile(
     - is_active (cannot reactivate deactivated accounts)
     - employee_id (managed by admin only)
     """
-    # Use exclude_unset=True to only update fields that were explicitly provided
-    for field, value in data.model_dump(exclude_unset=True).items():
+    # Explicit allow-list rather than blind setattr on whatever
+    # UserProfileUpdate happens to expose today. If the schema ever gains a
+    # `role`, `is_active`, `hashed_password`, or similar field (by merge
+    # mistake or refactor), blind setattr silently becomes privilege
+    # escalation. Hard-code the safe fields here (security review B-M3).
+    _ALLOWED_SELF_UPDATE_FIELDS = {
+        "first_name",
+        "last_name",
+        "phone",
+        "department",
+        "title",
+        "location_id",
+        "latitude",
+        "longitude",
+    }
+    submitted = data.model_dump(exclude_unset=True)
+    for field, value in submitted.items():
+        if field not in _ALLOWED_SELF_UPDATE_FIELDS:
+            # Silently ignore unknown/sensitive fields rather than 400 —
+            # clients may send extra payload for UI reasons, but must never
+            # land on the user row.
+            continue
         setattr(current_user, field, value)
 
     db.add(create_audit_log(
