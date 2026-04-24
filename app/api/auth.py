@@ -1238,24 +1238,17 @@ async def refresh_token(req: Request, response: Response, db: Annotated[Session,
     Refresh access token using the refresh token from HttpOnly cookie or request body.
 
     Security:
-    - Refresh token read from HttpOnly cookie (primary) or request body (fallback for cross-origin)
-    - Old token revoked, new token issued (rotation)
-    - New refresh token set as HttpOnly cookie
+    - Refresh token read from HttpOnly cookie only. The previous body
+      fallback defeated the purpose of the HttpOnly cookie: an allowed-
+      origin page could POST the token as JSON and the cookie went along
+      for the ride, bypassing the double-submit pattern entirely
+      (security review B-H1). Cross-origin deployments must round-trip
+      the refresh cookie — use a same-origin proxy or add the origin to
+      the CORS allow-list so the browser sends the cookie.
+    - Old token revoked atomically, new token issued (rotation).
+    - New refresh token set as HttpOnly cookie.
     """
-    # Try to read refresh token from HttpOnly cookie first (same-origin fallback)
     refresh_token_str = req.cookies.get("refresh_token")
-
-    # If no cookie, try request body (cross-origin fallback for Vercel + Railway)
-    if not refresh_token_str:
-        try:
-            content_type = req.headers.get("content-type", "")
-            if "application/json" in content_type:
-                import json
-                body_bytes = await req.body()
-                body_data = json.loads(body_bytes.decode())
-                refresh_token_str = body_data.get("refresh_token")
-        except Exception:
-            pass  # Will raise 401 below if no token found
 
     if not refresh_token_str:
         raise HTTPException(

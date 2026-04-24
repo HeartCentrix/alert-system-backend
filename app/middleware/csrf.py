@@ -11,9 +11,19 @@ request header must match the csrf_token cookie value (which the browser
 sends automatically, opaque to JS).
 
 Exempt paths (unauthenticated or non-browser callers):
-  /api/v1/auth/login, /api/v1/auth/refresh, /api/v1/auth/mfa/verify-login,
-  /api/v1/auth/mfa/recovery-code/verify, /api/v1/auth/forgot-password,
-  /api/v1/auth/reset-password, /api/v1/webhooks/*
+  /api/v1/auth/mfa/verify-login (MFA challenge token is the anti-forgery),
+  /api/v1/auth/mfa/recovery-code/verify,
+  /api/v1/auth/forgot-password,
+  /api/v1/auth/reset-password,
+  /api/v1/auth/entra/*,
+  /api/v1/auth/ldap/login,
+  /api/v1/auth/providers,
+  /api/v1/webhooks/*,
+  /api/v1/notifications/{id}/respond
+
+/auth/login and /auth/refresh require CSRF tokens (security review B-H1).
+The frontend should GET any API endpoint before the first login so the
+csrf_token cookie + X-CSRF-Token header round-trip has taken place.
 
 Security: secrets.compare_digest() prevents timing-based token oracle attacks.
 """
@@ -28,8 +38,7 @@ logger = logging.getLogger(__name__)
 CSRF_ENFORCE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 CSRF_EXEMPT_PATHS = {
-    "/api/v1/auth/login",
-    "/api/v1/auth/refresh",
+    # /login and /refresh are intentionally NOT exempt — security review B-H1.
     "/api/v1/auth/mfa/verify-login",
     "/api/v1/auth/mfa/recovery-code/verify",
     "/api/v1/auth/forgot-password",
@@ -37,7 +46,7 @@ CSRF_EXEMPT_PATHS = {
     "/api/v1/auth/entra/callback",  # OAuth callback — uses state/PKCE instead of CSRF
     "/api/v1/auth/entra/login",     # Login redirect — GET request, no state change
     "/api/v1/auth/providers",        # Public endpoint — no auth required
-    "/api/v1/auth/ldap/login",       # LDAP login — uses token-based auth
+    "/api/v1/auth/ldap/login",       # LDAP login — token-based, separate flow
 }
 # Prefixes for paths that don't require CSRF (public endpoints, webhooks, etc.)
 CSRF_EXEMPT_PREFIXES = ("/api/v1/webhooks/",)
