@@ -94,6 +94,12 @@ class Settings(BaseSettings):
     AUTO_PROVISION_USERS: bool = True  # Auto-create users on first SSO/LDAP login
     ALLOWED_EMAIL_DOMAINS: str = ""  # Comma-separated: company.com,subsidiary.com (empty = allow all)
 
+    # Comma-separated emails exempted from role-based MFA enforcement.
+    # ONLY honoured when APP_ENV=development. The check in
+    # app.core.security.user_requires_mfa refuses the exemption in any
+    # other environment, so setting this in prod has no effect.
+    MFA_EXEMPT_EMAILS: str = ""
+
     class Config:
         env_file = ".env"
         case_sensitive = True

@@ -174,9 +174,14 @@ def user_requires_mfa(user) -> bool:
 
     MFA is required if:
     - user.mfa_enabled is True, OR
-    - user role is ADMIN or MANAGER (privileged roles)
+    - user role is SUPER_ADMIN, ADMIN, or MANAGER (privileged roles)
 
-    This centralizes MFA policy enforcement for consistent behavior.
+    Development-only exemption: if MFA_EXEMPT_EMAILS lists this user's
+    email AND APP_ENV=development, MFA is not required. The exemption is
+    hard-ignored outside development — a misconfigured prod deploy cannot
+    accidentally waive MFA for a privileged account. This is the safer
+    replacement for the removed hardcoded admin@tmalert.com bypass
+    (B-H3).
 
     Args:
         user: User model instance
@@ -192,9 +197,26 @@ def user_requires_mfa(user) -> bool:
     # Convert role enum to string for comparison
     user_role = str(user.role.value) if hasattr(user.role, 'value') else str(user.role)
     if user_role.lower() in MFA_REQUIRED_ROLES:
+        if _is_mfa_exempt_in_development(user):
+            return False
         return True
 
     return False
+
+
+def _is_mfa_exempt_in_development(user) -> bool:
+    """
+    Return True only when (a) APP_ENV is explicitly development and (b)
+    the user's email is listed in settings.MFA_EXEMPT_EMAILS.
+    """
+    if settings.APP_ENV.lower() != "development":
+        return False
+    exempt_raw = (settings.MFA_EXEMPT_EMAILS or "").strip()
+    if not exempt_raw:
+        return False
+    exempt_emails = {e.strip().lower() for e in exempt_raw.split(",") if e.strip()}
+    user_email = (getattr(user, "email", "") or "").lower()
+    return user_email in exempt_emails
 
 
 def can_user_self_disable_mfa(user) -> bool:
