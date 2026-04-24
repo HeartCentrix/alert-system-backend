@@ -10,8 +10,18 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 from app.config import settings
 
-# Use SECRET_KEY for signing check-in tokens
-# Tokens have a limited lifetime based on the notification deadline
+
+def _checkin_secret() -> str:
+    """
+    Return the signing key for check-in tokens.
+
+    Prefers CHECKIN_SECRET_KEY when set so rotating SECRET_KEY (e.g. in
+    response to a leaked check-in link) does not also invalidate every
+    active access/session token. Falls back to SECRET_KEY for
+    backward-compat with deployments that haven't provisioned a dedicated
+    key yet (security review B-M2).
+    """
+    return settings.CHECKIN_SECRET_KEY or settings.SECRET_KEY
 
 
 def generate_checkin_token(notification_id: int, user_id: int, deadline_minutes: Optional[int] = None) -> str:
@@ -37,7 +47,7 @@ def generate_checkin_token(notification_id: int, user_id: int, deadline_minutes:
         "type": "safety_checkin"
     }
     
-    token = jwt.encode(payload, settings.SECRET_KEY, algorithm="HS256")
+    token = jwt.encode(payload, _checkin_secret(), algorithm="HS256")
     return token
 
 
@@ -52,7 +62,7 @@ def verify_checkin_token(token: str) -> Optional[dict]:
         Decoded payload if valid, None if invalid or expired
     """
     try:
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
+        payload = jwt.decode(token, _checkin_secret(), algorithms=["HS256"])
         
         # Verify token type
         if payload.get("type") != "safety_checkin":

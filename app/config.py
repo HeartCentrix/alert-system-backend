@@ -8,6 +8,12 @@ class Settings(BaseSettings):
     SECRET_KEY: str = ""
     REFRESH_SECRET_KEY: str = ""
     MFA_CHALLENGE_SECRET_KEY: str = ""
+    # Dedicated key for safety check-in tokens so rotating SECRET_KEY in
+    # response to a leaked check-in link does not also invalidate every
+    # active access/session token. Falls back to SECRET_KEY so existing
+    # deployments keep working until a distinct key is provisioned
+    # (security review B-M2).
+    CHECKIN_SECRET_KEY: str = ""
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     FRONTEND_URL: str = "http://localhost:3000"
