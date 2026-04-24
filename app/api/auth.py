@@ -894,9 +894,9 @@ async def _handle_ldap_auth_failure(client_ip: str) -> None:
     """Handle failed LDAP authentication with rate limiting."""
     await record_ip_failure(client_ip)
 
-    from app.services.rate_limiter import _ip_fail_key, _get_client
+    from app.services.rate_limiter import _ip_key, _get_client
     r = _get_client()
-    ip_fail_count = await r.get(_ip_fail_key(client_ip)) or 0
+    ip_fail_count = await r.get(_ip_key(client_ip)) or 0
     ip_remaining = max(0, IP_RATE_LIMIT_MAX_ATTEMPTS - int(ip_fail_count))
 
     raise HTTPException(
@@ -1026,9 +1026,9 @@ async def _handle_invalid_credentials(client_ip: str) -> None:
     """Handle invalid credentials (user not found) case."""
     await record_ip_failure(client_ip)
     
-    from app.services.rate_limiter import _ip_fail_key, _get_client
+    from app.services.rate_limiter import _ip_key, _get_client
     r = _get_client()
-    ip_fail_count = await r.get(_ip_fail_key(client_ip)) or 0
+    ip_fail_count = await r.get(_ip_key(client_ip)) or 0
     ip_remaining = max(0, IP_RATE_LIMIT_MAX_ATTEMPTS - int(ip_fail_count))
     
     raise HTTPException(
