@@ -17,9 +17,9 @@ python-multipart==0.0.22
 python-dotenv==1.0.1
 
 # Database
-sqlalchemy==2.0.30
-alembic==1.13.1
-psycopg2-binary==2.9.9
+sqlalchemy==2.0.48
+alembic==1.18.4
+psycopg2-binary==2.9.11
 email-validator==2.1.1
 
 # Cache & Queue
