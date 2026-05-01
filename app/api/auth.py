@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request, Query, R
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, func, update
+from sqlalchemy.exc import IntegrityError
 import redis
 import json
 from app.database import get_db
@@ -127,15 +128,30 @@ def _set_refresh_cookie(response: Response, token: str, expire_days: int) -> Non
     """
     Attach the refresh token as an HttpOnly cookie on a FastAPI Response object.
 
-    Security: HttpOnly (no XSS), Secure (HTTPS only), SameSite per environment.
-    Path restricted to /api/v1/auth so cookie is not sent to other endpoints.
+    Cookie attributes:
+      HttpOnly  always True   — JS cannot read via document.cookie
+      Secure    is_production — True in any environment except APP_ENV=="development"
+      SameSite  is_production — None (cross-site XHR) in prod; Lax in dev
+      Path      /api/v1/auth  — cookie not attached to non-auth endpoints
+      HttpOnly + Secure together prevent XSS + insecure-channel exfil.
+
+    PROD SAFETY CONTRACT (security review):
+      - APP_ENV must be set to a non-empty value other than the literal
+        string "development" for any non-local deployment. The
+        deployment guide enforces this in DEPLOYMENT.md §4.
+      - Secure=is_production keeps Secure=True everywhere except local
+        development. The dev relaxation was needed because Chrome's
+        tracking-protection drops Secure cookies on cross-origin
+        same-site http://localhost subrequests, which broke the SSO
+        cookie hand-off in dev. Production traffic is HTTPS, where
+        Secure=True is unconditional and matches the original posture.
     """
     is_production = settings.APP_ENV != "development"
     response.set_cookie(
         key="refresh_token",
         value=token,
         httponly=True,
-        secure=True,
+        secure=is_production,
         samesite=_get_samesite_policy(is_production),
         path="/api/v1/auth",
         max_age=expire_days * 86400,
@@ -152,14 +168,17 @@ def _set_access_cookie(response: Response, token: str, expire_minutes: int) -> N
     breaks while the frontend migrates.
 
     Path '/' because the access cookie must accompany every API call,
-    not just /auth/*.
+    not just /auth/*. Secure attribute is conditional on environment —
+    see _set_refresh_cookie for the full prod-safety contract. tl;dr:
+    Secure=True everywhere except APP_ENV=="development"; APP_ENV must
+    be set correctly per DEPLOYMENT.md §4.
     """
     is_production = settings.APP_ENV != "development"
     response.set_cookie(
         key="access_token",
         value=token,
         httponly=True,
-        secure=True,
+        secure=is_production,
         samesite=_get_samesite_policy(is_production),
         path="/",
         max_age=expire_minutes * 60,
@@ -175,7 +194,7 @@ def _clear_session_cookies(response: Response) -> None:
             key=name,
             value="",
             httponly=True,
-            secure=True,
+            secure=is_production,
             samesite=samesite,
             path=path,
             max_age=0,
@@ -203,6 +222,64 @@ def format_lockout_time(seconds: int) -> str:
         return f"{hours} hour{'s' if hours > 1 else ''} {remaining_mins} minute{'s' if remaining_mins > 1 else ''}"
     
     return f"{hours} hour{'s' if hours > 1 else ''}"
+
+
+MFA_RESET_EXPIRE_SECONDS = 600  # 10 minutes — long enough for the user to
+# scan the QR with their authenticator and enter a code, short enough that an
+# abandoned reset doesn't leave a usable secret-bearing token in the wild.
+
+
+def _generate_mfa_reset_token(user_id: int, encrypted_secret: str) -> str:
+    """
+    Sign a JWT carrying the pending (Fernet-encrypted) MFA secret for an
+    in-progress reset flow. The secret is encrypted at rest by the same key
+    used for stored MFA secrets, so even leaking the JWT does not reveal the
+    plaintext secret without the server's MFA_ENCRYPTION_KEY.
+
+    Why this exists: the previous reset flow disabled MFA and overwrote
+    user.mfa_secret at start time, before the new TOTP was verified. If the
+    user cancelled mid-flow, they ended up with mfa_enabled=False, the old
+    authenticator entry gone, and recovery codes invalidated — effectively
+    locked out. By holding the pending secret in this short-lived
+    server-signed token instead of mutating the user row, cancellation
+    leaves the existing MFA fully intact.
+    """
+    import jwt as pyjwt
+
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": str(user_id),
+        "type": "mfa_reset",
+        "secret": encrypted_secret,
+        "iat": now,
+        "exp": now + timedelta(seconds=MFA_RESET_EXPIRE_SECONDS),
+    }
+    return pyjwt.encode(payload, settings.MFA_CHALLENGE_SECRET_KEY, algorithm="HS256")
+
+
+def _verify_mfa_reset_token(token: str) -> tuple[bool, int, str]:
+    """
+    Verify a /mfa/reset/start-issued reset token. Returns
+    (is_valid, user_id, encrypted_secret). On any failure (expired, bad
+    signature, wrong type, missing claim), returns (False, 0, "").
+    """
+    import jwt as pyjwt
+    from jwt.exceptions import PyJWTError
+
+    try:
+        payload = pyjwt.decode(
+            token,
+            settings.MFA_CHALLENGE_SECRET_KEY,
+            algorithms=["HS256"],
+        )
+        if payload.get("type") != "mfa_reset":
+            return False, 0, ""
+        secret = payload.get("secret")
+        if not secret or not isinstance(secret, str):
+            return False, 0, ""
+        return True, int(payload["sub"]), secret
+    except (PyJWTError, ValueError, KeyError):
+        return False, 0, ""
 
 
 def _generate_challenge_token(user_id: int) -> str:
@@ -692,19 +769,18 @@ async def _entra_callback_success(user: User, request: Request, response: Respon
     ))
     db.commit()
 
-    # Set both session cookies — the access cookie replaces the frontend
-    # sessionStorage access token (F-C2), the refresh cookie was already in
-    # place. The callback page will call /auth/me to hydrate user state.
-    _set_refresh_cookie(response, refresh_token_str, settings.REFRESH_TOKEN_EXPIRE_DAYS)
-    _set_access_cookie(response, access_token, settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-
-    # Redirect to frontend without any tokens in the URL. Tokens in a
-    # redirect URL are logged by browsers, proxies, and Referer headers; a
-    # single log scrape then compromises long-lived sessions for every
-    # Entra user (security review finding B-C2 / F-C3).
+    # Build the redirect response and set cookies ON IT. Setting cookies
+    # on the FastAPI-injected `response` parameter is a no-op when the
+    # handler returns a different Response — FastAPI uses the returned
+    # object as-is and drops modifications to the injected one. Previously
+    # this caused access_token / refresh_token to never reach the
+    # browser after Entra SSO, blocking /auth/me from authenticating.
     frontend_url = settings.FRONTEND_URL.rstrip("/")
     redirect_url = f"{frontend_url}/auth/callback?sso=entra"
-    return RedirectResponse(url=redirect_url, status_code=302)
+    redirect_response = RedirectResponse(url=redirect_url, status_code=302)
+    _set_refresh_cookie(redirect_response, refresh_token_str, settings.REFRESH_TOKEN_EXPIRE_DAYS)
+    _set_access_cookie(redirect_response, access_token, settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    return redirect_response
 
 
 # ─── ENTRA CALLBACK ENDPOINT ─────────────────────────────────────────────────
@@ -1705,6 +1781,11 @@ def update_my_profile(
         "location_id",
         "latitude",
         "longitude",
+        # User-controllable notification preferences. Pydantic validates
+        # entries against the AlertChannel enum so arbitrary values cannot
+        # be injected. No privilege-escalation surface — affects only the
+        # user's own notification routing.
+        "preferred_channels",
     }
     submitted = data.model_dump(exclude_unset=True)
     for field, value in submitted.items():
@@ -1723,13 +1804,46 @@ def update_my_profile(
         details={"updated_fields": list(data.model_dump(exclude_unset=True).keys())},
         request=req,
     ))
-    
+
     # Sync location changes between users.location_id and user_locations table
     if data.location_id is not None:
         from app.api.location_audience import _sync_user_location_primary
         _sync_user_location_primary(db, current_user.id, data.location_id)
-    
-    db.commit()
+
+    try:
+        db.commit()
+    except IntegrityError as e:
+        # Translate database unique-constraint violations into clean 409s
+        # so the SPA can render a meaningful inline message instead of a
+        # generic "Internal server error". Common cases:
+        #   - ix_users_phone: another user already registered this phone
+        #   - ix_users_email: email collision (rare on self-update — schema
+        #     doesn't expose email, but keep the path defensive in case a
+        #     future field exposes it)
+        db.rollback()
+        constraint_msg_map = {
+            "ix_users_phone": "This phone number is already in use by another account. Use a different phone or contact your administrator.",
+            "ix_users_email": "This email is already in use by another account.",
+        }
+        error_text = str(getattr(e, "orig", e))
+        for constraint, friendly in constraint_msg_map.items():
+            if constraint in error_text:
+                logger.info(
+                    f"Profile update for user {current_user.id} rejected — unique constraint {constraint}"
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=friendly,
+                )
+        # Unknown integrity violation — log it but still surface a clean
+        # 409 instead of leaking SQL via 500.
+        logger.warning(
+            f"Profile update for user {current_user.id} hit unhandled integrity error: {error_text[:200]}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="One of the values you submitted conflicts with an existing record. Please review and try again.",
+        )
     db.refresh(current_user)
     return current_user
 
@@ -1974,11 +2088,16 @@ def start_mfa_reset(
     mfa_service = get_mfa_service(db)
 
     try:
-        secret, qr_code_uri, manual_entry_key = mfa_service.start_reset(
+        # start_reset returns the pending encrypted secret WITHOUT mutating
+        # the user row. We sign it into a short-lived reset_token that the
+        # client returns on /mfa/reset/complete. Cancellation = token
+        # discarded = existing MFA stays intact.
+        secret, qr_code_uri, manual_entry_key, encrypted_pending = mfa_service.start_reset(
             user=current_user,
             current_password=request.current_password,
             mfa_code=request.mfa_code
         )
+        reset_token = _generate_mfa_reset_token(current_user.id, encrypted_pending)
 
         db.commit()
 
@@ -1988,7 +2107,8 @@ def start_mfa_reset(
             secret=secret,
             qr_code_uri=qr_code_uri,
             manual_entry_key=manual_entry_key,
-            message="Your previous MFA has been invalidated. Scan the new QR code with your authenticator app."
+            reset_token=reset_token,
+            message="Scan the new QR code with your authenticator app. Your existing MFA continues to work until you confirm the new code."
         )
 
     except ValueError as e:
@@ -2010,21 +2130,33 @@ def complete_mfa_reset(
 
     This completes the reset/re-enrollment flow:
     - User submits 6-digit code from NEW authenticator app
-    - On success: MFA is enabled with new secret
-    - New recovery codes are generated
+    - On success: MFA is enabled with new secret atomically
+    - New recovery codes are generated, old ones invalidated
+    - If reset_token is invalid/expired or OTP verification fails, the
+      user row is NOT mutated — the original MFA remains active.
 
     Security:
-    - Validates OTP against new pending secret
+    - Validates the signed reset_token (HS256, 10-min TTL, type=mfa_reset)
+    - Validates OTP against the pending secret carried in that token
     - Only enables MFA on successful verification
     - Generates new recovery codes
     - Audit logged
     """
     mfa_service = get_mfa_service(db)
 
+    # Verify the reset token first — must match this user, not be expired.
+    is_valid, token_user_id, pending_encrypted = _verify_mfa_reset_token(request.reset_token)
+    if not is_valid or token_user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="MFA reset session expired or invalid. Please start the reset again."
+        )
+
     try:
         recovery_codes, batch_id = mfa_service.complete_reset(
             user=current_user,
-            code=request.code
+            code=request.code,
+            pending_encrypted_secret=pending_encrypted,
         )
 
         db.commit()

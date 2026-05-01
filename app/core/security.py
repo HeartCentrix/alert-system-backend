@@ -498,8 +498,24 @@ def validate_password_strength(password: str) -> Tuple[bool, str]:
         result = zxcvbn(password)
         # zxcvbn scores 0-4; require score >= 3 (hard to crack)
         if result["score"] < 3:
-            feedback = result.get("feedback", {}).get("warning", "Password is too weak")
-            return False, f"Weak password: {feedback}"
+            feedback = result.get("feedback") or {}
+            warning = (feedback.get("warning") or "").strip()
+            suggestions = [s.strip() for s in (feedback.get("suggestions") or []) if s and isinstance(s, str)]
+            # zxcvbn often leaves `warning` empty when the issue is a
+            # combination of factors; the actionable detail lives in
+            # `suggestions`. Build a single human-readable string from
+            # whichever pieces are present rather than emit the bare
+            # "Weak password: " prefix that confused the SPA.
+            parts = []
+            if warning:
+                parts.append(warning)
+            if suggestions:
+                parts.append(" ".join(suggestions))
+            detail = " — ".join(parts) if parts else (
+                "It is too easy to guess. Use a longer mix of unrelated words, "
+                "numbers, and symbols, and avoid common patterns or your name."
+            )
+            return False, f"Weak password: {detail}"
     except ImportError:
         # zxcvbn not installed, skip this check
         pass

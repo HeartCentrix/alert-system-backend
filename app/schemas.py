@@ -278,10 +278,16 @@ class MFARegenerateRecoveryCodesRequest(BaseModel):
 
     For normal users:
     - May use TOTP or single unused recovery code (if authenticator unavailable)
+
+    current_password is Optional because SSO users (auth_provider != 'local')
+    have no local password. Service layer
+    (mfa_lifecycle.regenerate_recovery_codes) enforces password verification
+    for local users only; SSO users still need a valid TOTP/recovery code,
+    so the dual-proof property is preserved (possession factor = TOTP, no
+    knowledge factor for SSO users since identity comes from the IdP).
     """
-    current_password: str = Field(
-        ...,
-        min_length=1,
+    current_password: Optional[str] = Field(
+        default="",
         max_length=PASSWORD_MAX_LENGTH,
         description=CURRENT_PASSWORD_DESCRIPTION
     )
@@ -302,13 +308,6 @@ class MFARegenerateRecoveryCodesRequest(BaseModel):
         max_length=RECOVERY_CODE_MAX_LENGTH,
         description="Recovery code (required for recovery_code method)"
     )
-
-    @field_validator("current_password")
-    @classmethod
-    def validate_password_not_empty(cls, v):
-        if not v or not v.strip():
-            raise ValueError(CURRENT_PASSWORD_REQUIRED_MSG)
-        return v
 
     @field_validator("method")
     @classmethod
@@ -357,28 +356,35 @@ class MFARegenerateRecoveryCodesResponse(BaseModel):
 # ─── MFA LIFECYCLE MANAGEMENT ────────────────────────────────────────────────
 
 class MFAEnrollStartRequest(BaseModel):
-    """Request to start MFA enrollment (requires reauthentication)."""
-    current_password: str = Field(
-        ...,
-        min_length=1,
+    """Request to start MFA enrollment.
+
+    current_password is Optional because SSO users (auth_provider != 'local')
+    have no local password — they prove identity via the active SSO session.
+    The service layer (mfa_lifecycle.start_enrollment) enforces password
+    verification for local users only; sending an empty string here for an
+    SSO user is correct, and sending an empty string for a local user will
+    still be rejected by verify_password() with INVALID_CURRENT_PASSWORD_MSG.
+    """
+    current_password: Optional[str] = Field(
+        default="",
         max_length=PASSWORD_MAX_LENGTH,
         description=CURRENT_PASSWORD_DESCRIPTION
     )
 
-    @field_validator("current_password")
-    @classmethod
-    def validate_password_not_empty(cls, v):
-        if not v or not v.strip():
-            raise ValueError(CURRENT_PASSWORD_REQUIRED_MSG)
-        return v
-
 
 class MFAEnrollStartResponse(BaseModel):
-    """Response when starting MFA enrollment."""
+    """Response when starting MFA enrollment or reset.
+
+    `reset_token` is populated only by the /mfa/reset/start endpoint. It
+    carries the pending encrypted MFA secret in a short-lived signed JWT;
+    the client must return it on /mfa/reset/complete. Plain enrollment
+    (/mfa/enroll/start) leaves it None.
+    """
     secret: str
     qr_code_uri: str
     manual_entry_key: str
     message: str
+    reset_token: Optional[str] = None
     # Note: MFA is NOT enabled yet - waiting for OTP verification
 
 
@@ -412,10 +418,14 @@ class MFAEnrollConfirmResponse(BaseModel):
 
 
 class MFADisableRequest(BaseModel):
-    """Request to disable MFA (requires reauthentication + current factor)."""
-    current_password: str = Field(
-        ...,
-        min_length=1,
+    """Request to disable MFA (requires reauthentication + current factor).
+
+    current_password is Optional because SSO users (auth_provider != 'local')
+    have no local password. Service layer (mfa_lifecycle.disable_mfa)
+    enforces password verification for local users only.
+    """
+    current_password: Optional[str] = Field(
+        default="",
         max_length=PASSWORD_MAX_LENGTH,
         description=CURRENT_PASSWORD_DESCRIPTION
     )
@@ -425,13 +435,6 @@ class MFADisableRequest(BaseModel):
         max_length=20,
         description="Current TOTP code or recovery code"
     )
-
-    @field_validator("current_password")
-    @classmethod
-    def validate_password_not_empty(cls, v):
-        if not v or not v.strip():
-            raise ValueError(CURRENT_PASSWORD_REQUIRED_MSG)
-        return v
 
     @field_validator("mfa_code")
     @classmethod
@@ -452,10 +455,14 @@ class MFADisableResponse(BaseModel):
 
 
 class MFAResetStartRequest(BaseModel):
-    """Request to reset/replace MFA (requires reauthentication + current factor)."""
-    current_password: str = Field(
-        ...,
-        min_length=1,
+    """Request to reset/replace MFA (requires reauthentication + current factor).
+
+    current_password is Optional because SSO users (auth_provider != 'local')
+    have no local password. Service layer (mfa_lifecycle.start_mfa_reset)
+    enforces password verification for local users only.
+    """
+    current_password: Optional[str] = Field(
+        default="",
         max_length=PASSWORD_MAX_LENGTH,
         description=CURRENT_PASSWORD_DESCRIPTION
     )
@@ -466,22 +473,27 @@ class MFAResetStartRequest(BaseModel):
         description="Current TOTP code or recovery code"
     )
 
-    @field_validator("current_password")
-    @classmethod
-    def validate_password_not_empty(cls, v):
-        if not v or not v.strip():
-            raise ValueError(CURRENT_PASSWORD_REQUIRED_MSG)
-        return v
-
 
 class MFAResetConfirmRequest(BaseModel):
-    """Request to confirm MFA reset with new TOTP code."""
+    """Request to confirm MFA reset with new TOTP code.
+
+    reset_token is the short-lived JWT issued by /mfa/reset/start that
+    carries the pending (encrypted) MFA secret. The transactional reset
+    flow does not touch the user row until this token verifies, so a
+    cancelled or expired reset leaves the existing MFA fully intact.
+    """
     code: str = Field(
         ...,
         min_length=MFA_CODE_LENGTH,
         max_length=MFA_CODE_LENGTH,
         pattern=MFA_CODE_PATTERN,
         description=TOTP_DESCRIPTION
+    )
+    reset_token: str = Field(
+        ...,
+        min_length=10,
+        max_length=4096,
+        description="Reset token issued by /mfa/reset/start"
     )
 
     @field_validator("code")
@@ -743,6 +755,13 @@ class UserResponse(BaseModel):
     is_online: Optional[bool] = None   # Real-time online presence (heartbeat)
     location_id: Optional[int] = None
     preferred_channels: Optional[List[str]] = None
+    # auth_provider tells the SPA which login method this user came in via
+    # ('local' / 'entra' / 'ldap'). The MFA management modals branch on this
+    # to decide whether to ask for a current password (SSO users have none).
+    auth_provider: Optional[str] = None
+    # mfa_enabled lets the SPA show the correct MFA management state without
+    # a separate /auth/mfa/status call.
+    mfa_enabled: Optional[bool] = None
     created_at: datetime
 
     class Config:

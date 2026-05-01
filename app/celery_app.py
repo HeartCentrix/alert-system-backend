@@ -63,7 +63,14 @@ celery_app.conf.update(
         },
         "cleanup-expired-assignments": {
             "task": "app.location_tasks.cleanup_expired_assignments",
-            "schedule": 86400.0,  # Daily
+            # Run every 60 seconds so expiry timestamps take effect within
+            # at most one minute. Previously this ran daily, which meant
+            # an expired user could continue receiving notifications for
+            # up to 24 hours after their assignment ended. The
+            # active-member lookup queries also defensively filter
+            # `expires_at IS NULL OR expires_at > now()` so expired users
+            # never receive notifications even if the task is briefly behind.
+            "schedule": 60.0,
         },
         "refresh-redis-geo-index": {
             "task": "app.location_tasks.refresh_redis_geo_index",

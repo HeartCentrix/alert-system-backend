@@ -11,7 +11,7 @@ import logging
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
-from sqlalchemy import select, and_, or_
+from sqlalchemy import select, and_, or_, text
 
 from app.celery_app import celery_app
 from app.database import SessionLocal
@@ -342,7 +342,13 @@ def _assign_user_to_location(
             detected_longitude=detected_longitude,
             distance_from_center_miles=distance_miles
         ).on_conflict_do_nothing(
-            index_elements=['user_id', 'location_id', 'status']
+            # Match the actual partial unique index on user_locations:
+            # uq_user_location_active = (user_id, location_id) WHERE status = 'active'.
+            # Previous code referenced a non-existent (user_id, location_id, status)
+            # constraint, which made every geofence assignment attempt raise
+            # InvalidColumnReference and silently retry forever.
+            index_elements=['user_id', 'location_id'],
+            index_where=text("status = 'active'"),
         )
         
         result = db.execute(stmt)
@@ -473,13 +479,19 @@ def _get_users_with_location(db: Session) -> List[Dict[str, Any]]:
 
     Returns a list of dicts with user_id, latitude, longitude, and location_id.
     """
+    # Filter on is_enabled (admin-controlled account status) rather than
+    # the deprecated is_active flag. Using is_active silently dropped
+    # newly-provisioned users (default False) and SSO users from the
+    # geofence sweep — see app/models.py:118-120 for the flag semantics
+    # ('is_enabled' = account active, 'is_online' = current presence,
+    # 'is_active' = legacy alias kept around for backward compat).
     users_with_location = db.query(
         User.id,
         User.latitude,
         User.longitude,
         User.location_id
     ).filter(
-        User.is_active == True,
+        User.is_enabled == True,
         User.latitude.isnot(None),
         User.longitude.isnot(None)
     ).all()

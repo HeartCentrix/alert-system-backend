@@ -268,7 +268,7 @@ class MFAService:
 
         return True
 
-    def start_reset(self, user: User, current_password: str, mfa_code: Optional[str] = None) -> Tuple[str, str, str]:
+    def start_reset(self, user: User, current_password: str, mfa_code: Optional[str] = None) -> Tuple[str, str, str, str]:
         """
         Start MFA reset/replacement flow.
 
@@ -282,8 +282,15 @@ class MFAService:
         - SSO users (entra/ldap) skip password check - identity already verified via SSO session
         - Requires current MFA code OR recovery code (if available)
         - For locked-out users, mfa_code can be None (admin-assisted path)
-        - Invalidates old MFA secret and recovery codes
-        - Creates pending new enrollment
+
+        TRANSACTIONAL PROPERTY (NEW):
+        This function does NOT mutate user.mfa_secret, user.mfa_enabled, or
+        recovery codes. The pending new secret is returned so the caller can
+        wrap it in a short-lived signed token. Only complete_reset commits
+        the swap atomically. If the user cancels (closes modal, network
+        blip, walks away), the existing MFA stays fully usable. Previously
+        this method disabled MFA and invalidated recovery codes immediately,
+        leaving cancelled users effectively locked out.
 
         Args:
             user: User model instance
@@ -291,7 +298,9 @@ class MFAService:
             mfa_code: Current TOTP code or recovery code (optional for admin reset)
 
         Returns:
-            Tuple of (secret, qr_code_uri, manual_entry_key)
+            Tuple of (secret, qr_code_uri, manual_entry_key, encrypted_pending_secret)
+            The encrypted_pending_secret should be packaged into a signed
+            reset token by the API handler and returned to the client.
 
         Raises:
             ValueError: If verification fails
@@ -310,28 +319,17 @@ class MFAService:
                 logger.warning(f"Invalid MFA code during reset for user {user.id}")
                 raise ValueError("Invalid MFA code or recovery code")
 
-        # Invalidate old MFA secret
-        old_secret = user.mfa_secret
-        user.mfa_secret = None
-        user.mfa_enabled = False
-
-        # Invalidate old recovery codes
-        invalidate_all_recovery_codes(
-            db=self.db,
-            user_id=user.id,
-            invalidated_by_user_id=user.id,
-            reason='mfa_reset'
-        )
-
-        # Generate new secret for re-enrollment
+        # Generate new pending secret. Do NOT touch user.mfa_secret /
+        # user.mfa_enabled / recovery codes — the existing MFA must remain
+        # fully usable until complete_reset verifies the new TOTP. The
+        # caller will sign encrypted_secret into a JWT held by the client.
         secret = generate_mfa_secret()
         qr_code_uri = generate_mfa_qr_code_uri(user.email, secret)
-
-        # Encrypt and store new secret (pending enrollment)
         encrypted_secret = encrypt_mfa_secret(secret)
-        user.mfa_secret = encrypted_secret
 
-        # Audit log
+        # Audit log — start of reset flow. Note that nothing is committed
+        # to the user row yet; if the user never completes, this is the
+        # only audit trace.
         self.db.add(AuditLog(
             user_id=user.id,
             user_email=user.email,
@@ -339,40 +337,52 @@ class MFAService:
             resource_type="user",
             resource_id=user.id,
             details={
-                "old_secret_invalidated": bool(old_secret),
-                "reason": "user_initiated_reset"
+                "reason": "user_initiated_reset",
+                "transactional": True,
             }
         ))
 
-        logger.info(f"MFA reset started for user {user.id}")
+        logger.info(f"MFA reset started for user {user.id} (no row mutation; pending secret held in client token)")
 
-        return secret, qr_code_uri, secret
+        return secret, qr_code_uri, secret, encrypted_secret
 
-    def complete_reset(self, user: User, code: str) -> Tuple[List[str], str]:
+    def complete_reset(self, user: User, code: str, pending_encrypted_secret: str) -> Tuple[List[str], str]:
         """
-        Complete MFA reset by verifying new OTP code.
+        Complete MFA reset by verifying the new OTP code against the
+        pending secret carried in the reset token.
+
+        TRANSACTIONAL PROPERTY:
+        Verifies the new TOTP against the pending secret first. Only when
+        verification succeeds does it atomically:
+          - swap user.mfa_secret to the new pending secret,
+          - keep user.mfa_enabled = True (was never flipped),
+          - invalidate the old recovery codes,
+          - generate fresh recovery codes,
+        all in one DB commit. If verification fails, nothing on the user
+        row changes — the original MFA remains the active factor.
 
         Args:
             user: User model instance
-            code: 6-digit TOTP code from new authenticator app
+            code: 6-digit TOTP code from the new authenticator app
+            pending_encrypted_secret: Encrypted MFA secret extracted from
+                the signed reset token issued by start_reset.
 
         Returns:
             Tuple of (recovery_codes_plaintext, batch_id)
 
         Raises:
-            ValueError: If code verification fails
+            ValueError: If code verification fails (no row mutation)
         """
-        # This is essentially the same as complete_enrollment
-        # but with different audit logging
-        if not user.mfa_secret:
-            logger.warning(f"No pending MFA enrollment for user {user.id} during reset")
+        if not pending_encrypted_secret:
+            logger.warning(f"No pending secret on MFA reset complete for user {user.id}")
             raise ValueError("MFA reset not initiated. Please start reset first.")
 
-        if not verify_totp_code(user.mfa_secret, code):
+        # Verify the new TOTP against the PENDING secret, not user.mfa_secret.
+        if not verify_totp_code(pending_encrypted_secret, code):
             logger.warning(f"Invalid OTP code during MFA reset for user {user.id}")
             raise ValueError("Invalid verification code. Please try again.")
 
-        # Replay protection — reject reuse within the same 30-second window
+        # Replay protection — reject reuse within the same 30-second window.
         if is_totp_replay(user, code):
             logger.warning(f"TOTP replay attempt detected during MFA reset for user {user.id}")
             raise ValueError(TOTP_REPLAY_MSG)
@@ -381,8 +391,20 @@ class MFAService:
         user.last_used_totp_code = code
         user.last_used_totp_at = datetime.now(timezone.utc)
 
-        # Enable MFA
+        # Atomic swap: replace the active MFA secret only now that the
+        # new TOTP has verified. user.mfa_enabled is already True (was
+        # never flipped during reset).
+        user.mfa_secret = pending_encrypted_secret
         user.mfa_enabled = True
+
+        # Now safe to invalidate the OLD recovery codes — the new MFA
+        # is locked in.
+        invalidate_all_recovery_codes(
+            db=self.db,
+            user_id=user.id,
+            invalidated_by_user_id=user.id,
+            reason='mfa_reset'
+        )
 
         # Generate new recovery codes
         plaintext_codes, batch_id = generate_recovery_codes(

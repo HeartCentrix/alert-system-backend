@@ -100,19 +100,22 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         # HttpOnly: JS cannot read it via document.cookie (mitigates XSS theft).
         # The frontend reads the token from the X-CSRF-Token response header
         # and keeps it in memory to send on subsequent state-changing requests.
-        # SameSite=None + Secure: required for cross-origin (Vercel → Railway).
-        # In development mode, secure=False and samesite=lax so localhost works.
+        # SameSite=None + Secure in production (cross-origin frontend ↔ API).
+        # In development (plain http localhost), Secure=False so the browser
+        # actually sends the cookie back on subsequent XHR — Secure=True over
+        # http://localhost was inconsistent across browsers and broke the
+        # SSO callback flow where cookies need to survive a cross-origin
+        # redirect.
         if not existing_token:
             from app.config import settings
             is_production = settings.APP_ENV != "development"
             # path="/api" scopes the cookie to API endpoints only — avoids ZAP's
             # "Loosely Scoped Cookie" alert that fires for path="/".
-            # Secure=True always (modern browsers accept it on localhost).
             response.set_cookie(
                 key=CSRF_COOKIE_NAME,
                 value=csrf_token,
                 httponly=True,
-                secure=True,
+                secure=is_production,
                 samesite="none" if is_production else "lax",
                 path="/api",
                 max_age=86400,
