@@ -755,7 +755,15 @@ async def _entra_callback_success(user: User, request: Request, response: Respon
     user.last_login = datetime.now(timezone.utc)
     user.last_seen_at = datetime.now(timezone.utc)
     user.is_online = True
-    user.is_enabled = True
+    # Account enablement is admin-controlled — NEVER re-enable on login
+    # (security review). Reject disabled accounts before the session is
+    # established; tokens minted above are not yet committed or set as
+    # cookies, so raising here rolls back and issues nothing.
+    if not user.is_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is disabled. Contact your administrator.",
+        )
 
     # Audit log
     db.add(create_audit_log(
@@ -933,7 +941,15 @@ async def _create_ldap_login_response(user: User, request: Request, response: Re
     user.last_login = datetime.now(timezone.utc)
     user.last_seen_at = datetime.now(timezone.utc)
     user.is_online = True
-    user.is_enabled = True
+    # Account enablement is admin-controlled — NEVER re-enable on login
+    # (security review). Reject disabled accounts before the session is
+    # established; tokens minted above are not yet committed or set as
+    # cookies, so raising here rolls back and issues nothing.
+    if not user.is_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is disabled. Contact your administrator.",
+        )
 
     db.add(create_audit_log(
         user_id=user.id,
@@ -1267,7 +1283,15 @@ async def _create_login_success_response(
     user.last_login = datetime.now(timezone.utc)
     user.last_seen_at = datetime.now(timezone.utc)
     user.is_online = True
-    user.is_enabled = True
+    # Account enablement is admin-controlled — NEVER re-enable on login
+    # (security review). Reject disabled accounts before the session is
+    # established; tokens minted above are not yet committed or set as
+    # cookies, so raising here rolls back and issues nothing.
+    if not user.is_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is disabled. Contact your administrator.",
+        )
     
     # Audit log
     db.add(create_audit_log(
@@ -1464,15 +1488,19 @@ async def refresh_token(req: Request, response: Response, db: Annotated[Session,
 
     _rt_id, rt_user_id = rotated
 
-    # Check if user exists (don't check is_active - that's for online presence, not account status)
+    # is_active is online presence, not account status. Account enablement
+    # (is_enabled) MUST be enforced here: a disabled/offboarded user holding a
+    # still-valid refresh cookie must not be able to rotate into new tokens
+    # (security review). The old token was already revoked atomically above,
+    # so rejecting here also terminates the session.
     user = db.query(User).filter(
         User.id == rt_user_id
     ).first()
-    if not user:
+    if not user or not user.is_enabled:
         db.commit()  # persist the revoke even though we reject
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found"
+            detail="Session is no longer valid. Please log in again."
         )
 
     # Old token is already revoked atomically above; issue new ones.
@@ -2471,7 +2499,15 @@ async def _finalize_mfa_login(
     user.last_login = datetime.now(timezone.utc)
     user.last_seen_at = datetime.now(timezone.utc)
     user.is_online = True
-    user.is_enabled = True
+    # Account enablement is admin-controlled — NEVER re-enable on login
+    # (security review). Reject disabled accounts before the session is
+    # established; tokens minted above are not yet committed or set as
+    # cookies, so raising here rolls back and issues nothing.
+    if not user.is_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is disabled. Contact your administrator.",
+        )
 
     db.add(create_audit_log(
         user_id=user.id,
