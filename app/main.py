@@ -374,38 +374,75 @@ def _ensure_database_schema():
 
 
 async def _seed_default_admin():
-    """Seed default super admin if no users exist."""
+    """Seed the default super admin if (and only if) no users exist.
+
+    The password is ALWAYS a fresh random token — never a static/default
+    credential — created with force_password_change so it must be rotated on
+    first login. It is written once to BOOTSTRAP_PW_FILE for the operator to
+    read, and that file is deleted the moment the super admin rotates the
+    password (see app/api/auth.py). The plaintext is never logged.
+    """
+    email = settings.BOOTSTRAP_ADMIN_EMAIL
+    write_ok = False
+    pw_file = settings.BOOTSTRAP_PW_FILE
     try:
         db = SessionLocal()
         try:
-            if db.query(User).count() == 0:
-                bootstrap_pw = secrets.token_urlsafe(32)
-                admin = User(
-                    email="admin@tmalert.com",
-                    hashed_password=hash_password(bootstrap_pw),
-                    first_name="Super",
-                    last_name="Admin",
-                    role=UserRole.SUPER_ADMIN,
-                    is_active=True,
-                    force_password_change=True
+            if db.query(User).count() != 0:
+                return
+            bootstrap_pw = secrets.token_urlsafe(32)
+            # Persist the credential BEFORE committing the user, so we never
+            # create an admin whose one-time password is unreadable. If the
+            # file cannot be written, abort the seed rather than strand it.
+            write_ok = await _write_bootstrap_password(bootstrap_pw)
+            if not write_ok:
+                logger.error(
+                    "Aborting admin seed: could not persist bootstrap password to %s. "
+                    "Back it with a writable volume, then restart.", pw_file,
                 )
-                db.add(admin)
-                db.commit()
-                await _write_bootstrap_password(bootstrap_pw)
+                return
+            admin = User(
+                email=email,
+                hashed_password=hash_password(bootstrap_pw),
+                first_name="Super",
+                last_name="Admin",
+                role=UserRole.SUPER_ADMIN,
+                is_active=True,
+                force_password_change=True,
+            )
+            db.add(admin)
+            db.commit()
+            logger.info(
+                "Default super admin %s created. Read its one-time password from "
+                "%s (e.g. `docker exec tm-alert-api cat %s`); it is force-rotated "
+                "on first login and the file is deleted on rotation.",
+                email, pw_file, pw_file,
+            )
         finally:
             db.close()
     except Exception as e:
         logger.error(f"Failed to seed default admin: {e}")
 
 
-async def _write_bootstrap_password(bootstrap_pw: str):
-    """Write bootstrap password to secure file using async file API."""
+async def _write_bootstrap_password(bootstrap_pw: str) -> bool:
+    """Write the one-time bootstrap password to BOOTSTRAP_PW_FILE (0600).
+
+    Returns True on success. Creates the parent dir first so a fresh
+    volume mount works. The plaintext is never logged.
+    """
+    pw_file = settings.BOOTSTRAP_PW_FILE
     try:
-        async with await anyio.open_file("/run/secrets/bootstrap_pw", "w") as f:
+        os.makedirs(os.path.dirname(pw_file) or ".", exist_ok=True)
+        async with await anyio.open_file(pw_file, "w") as f:
             await f.write(bootstrap_pw)
-        logger.info("Default admin created: admin@tmalert.com (password written to /run/secrets/bootstrap_pw)")
-    except (IOError, OSError):
-        logger.warning("Default admin created: admin@tmalert.com - retrieve password from secure logs on first boot only")
+        try:
+            os.chmod(pw_file, 0o600)
+        except OSError:
+            pass
+        return True
+    except (IOError, OSError) as e:
+        logger.error("Could not write bootstrap password file %s: %s", pw_file, e)
+        return False
 
 
 @asynccontextmanager
@@ -480,13 +517,12 @@ if railway_domain:
         allowed_origins.append(railway_url)
         logger.info(f"Added Railway domain to CORS allowed origins: {railway_url}")
 
-# Allow Railway subdomain patterns for preview deployments and migrations
-# This supports:
-# - Railway preview deployments (pr-*.railway.app)
-# - Migration between Railway accounts (different subdomains)
-# - Multiple environments (staging, production) on different Railway subdomains
+# NOTE: CORS uses an explicit allow-list only (allow_origins above). There is
+# NO allow_origin_regex / wildcard — the old "*.railway.app/.com" regex was
+# removed (security review B-H2) because it trusted any host on those domains
+# with credentials. Preview/staging deployments must be added to the list via
+# FRONTEND_URL or RAILWAY_PUBLIC_DOMAIN, not matched by pattern.
 logger.info(f"CORS allowed origins: {allowed_origins}")
-logger.info("CORS origin regex: Railway subdomains allowed for migration flexibility")
 
 # Request ID — generates UUID per request for log correlation
 app.add_middleware(RequestIDMiddleware)

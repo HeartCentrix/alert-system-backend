@@ -123,6 +123,11 @@ class User(Base):
     mfa_secret = Column(String(255))  # Increased from 32 to store Fernet-encrypted secrets
     last_used_totp_code = Column(String(6), nullable=True, default=None)
     last_used_totp_at = Column(DateTime(timezone=True), nullable=True, default=None)
+    # False = first-time MFA recovery codes generated but NOT yet acknowledged;
+    # blocks session establishment on EVERY login until acknowledged (so the
+    # codes screen can't be bypassed by re-logging-in). NULL/True = acknowledged
+    # (existing users unaffected). See app/api/auth.py recovery-codes flow.
+    mfa_recovery_acknowledged = Column(Boolean, default=True, nullable=True)
     avatar_url = Column(String(500))
     preferred_channels = Column(JSON, default=["sms", "email"])
     latitude = Column(Float, nullable=True)   # Last known latitude

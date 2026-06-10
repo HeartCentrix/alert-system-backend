@@ -41,6 +41,10 @@ CSRF_EXEMPT_PATHS = {
     # /login and /refresh are intentionally NOT exempt — security review B-H1.
     "/api/v1/auth/mfa/verify-login",
     "/api/v1/auth/mfa/recovery-code/verify",
+    # Establishes the session after first-time MFA setup; the signed,
+    # short-lived recovery_setup_token is the anti-forgery proof and no
+    # session cookie exists yet at this point (security review).
+    "/api/v1/auth/mfa/recovery-codes/acknowledge",
     "/api/v1/auth/forgot-password",
     "/api/v1/auth/reset-password",
     "/api/v1/auth/entra/callback",  # OAuth callback — uses state/PKCE instead of CSRF

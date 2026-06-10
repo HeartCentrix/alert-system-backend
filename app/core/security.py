@@ -74,17 +74,20 @@ def encrypt_mfa_secret(secret: str) -> str:
     """
     fernet = _get_mfa_fernet()
     if not fernet:
-        # Encryption not configured, return plaintext (backward compatibility)
-        return secret
-    
+        # Fail CLOSED: never persist a TOTP seed in cleartext. MFA_ENCRYPTION_KEY
+        # is enforced at startup (app.config), so this only triggers on a
+        # genuinely broken/missing key — in which case refuse rather than
+        # silently weaken every account's 2FA (security review).
+        logger.error("Refusing to store MFA secret: MFA_ENCRYPTION_KEY is missing or invalid.")
+        raise RuntimeError("MFA encryption is not configured; cannot store MFA secret.")
+
     try:
         encrypted = fernet.encrypt(secret.encode('utf-8'))
         return encrypted.decode('utf-8')
     except Exception as e:
         logger.error(f"Failed to encrypt MFA secret: {e}")
-        # Fail closed: return plaintext rather than breaking MFA entirely
-        # This is a security tradeoff; in high-security environments, raise instead
-        return secret
+        # Fail closed — do not fall back to plaintext.
+        raise RuntimeError("MFA secret encryption failed.") from e
 
 
 def decrypt_mfa_secret(encrypted_secret: str) -> Optional[str]:
@@ -426,10 +429,21 @@ def is_totp_replay(user, code: str) -> bool:
     if not user.last_used_totp_code or not user.last_used_totp_at:
         return False  # No previous code recorded, cannot be a replay
 
+    if user.last_used_totp_code != code:
+        return False  # Different code — TOTP issues one code per 30s step
+
     current_window = math.floor(time.time() / 30)
     last_window = math.floor(user.last_used_totp_at.timestamp() / 30)
 
-    return user.last_used_totp_code == code and current_window == last_window
+    # A code generated for step S verifies for steps [S - window, S + window]
+    # (clock-skew tolerance, settings.MFA_TOTP_VALID_WINDOW). The old check only
+    # flagged a replay when the *wall-clock* window equalled the last-used
+    # window, so with window >= 1 a captured code could be replayed one step
+    # later (it still verifies via skew, but current_window != last_window).
+    # Reject the same code for the whole span it can remain verifiable
+    # (up to 2*window steps after first use). With the default window=0 this is
+    # exactly the original same-window behaviour.
+    return (current_window - last_window) <= (2 * settings.MFA_TOTP_VALID_WINDOW)
 
 
 def generate_mfa_secret() -> str:

@@ -6,6 +6,17 @@ from typing import Optional
 class Settings(BaseSettings):
     APP_NAME: str = "TM Alert"
     APP_ENV: str = "development"
+
+    # ── Bootstrap super-admin seeding ──────────────────────────────────
+    # First-boot super admin, created only when the users table is empty
+    # (see app.main._seed_default_admin). The password is ALWAYS randomly
+    # generated — never a static/default credential — and written once to
+    # BOOTSTRAP_PW_FILE for the operator to read, then force-rotated on first
+    # login. Back BOOTSTRAP_PW_FILE with a durable volume so a container
+    # recreate does not strand the credential (/run alone is ephemeral).
+    BOOTSTRAP_ADMIN_EMAIL: str = "admin@tmalert.com"
+    BOOTSTRAP_PW_FILE: str = "/run/secrets/bootstrap_pw"
+
     SECRET_KEY: str = ""
     REFRESH_SECRET_KEY: str = ""
     MFA_CHALLENGE_SECRET_KEY: str = ""
@@ -19,6 +30,14 @@ class Settings(BaseSettings):
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     FRONTEND_URL: str = "http://localhost:3000"
     BACKEND_URL: str = "http://localhost:8000"
+
+    # Number of trusted reverse-proxy hops in front of the app. Controls how
+    # the real client IP is derived from X-Forwarded-For for rate limiting /
+    # lockout (see app.api.auth._get_client_ip). 0 = trust none (use the
+    # direct peer); 1 = single edge proxy (Railway/Vercel); 2 = nginx behind
+    # an edge. MUST match the real deployment topology — too high lets clients
+    # spoof their IP. Safe default 0.
+    TRUSTED_PROXY_COUNT: int = 0
 
     DATABASE_URL: str = "postgresql://postgres:password@localhost:5432/tm_alert"
     REDIS_URL: str = "redis://localhost:6379/0"
@@ -114,6 +133,30 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"{info.field_name} must be a non-empty random string. "
                 f"Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
+            )
+        return v
+
+    @field_validator("MFA_ENCRYPTION_KEY")
+    @classmethod
+    def _require_valid_mfa_key(cls, v: str) -> str:
+        # MFA secrets must always be encrypted at rest. Refuse to boot without a
+        # valid Fernet key so the app can never silently store TOTP seeds in
+        # cleartext (security review — pairs with fail-closed encrypt in
+        # app.core.security.encrypt_mfa_secret).
+        if not v or not v.strip():
+            raise ValueError(
+                "MFA_ENCRYPTION_KEY must be set. Generate one with: "
+                "python -c \"from cryptography.fernet import Fernet; "
+                "print(Fernet.generate_key().decode())\""
+            )
+        try:
+            from cryptography.fernet import Fernet
+            Fernet(v.encode())
+        except Exception as e:
+            raise ValueError(
+                f"MFA_ENCRYPTION_KEY is not a valid Fernet key: {e}. Generate one "
+                "with: python -c \"from cryptography.fernet import Fernet; "
+                "print(Fernet.generate_key().decode())\""
             )
         return v
 

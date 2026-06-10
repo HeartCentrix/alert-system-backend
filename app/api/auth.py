@@ -1,6 +1,7 @@
 import secrets
 import time
 import logging
+import ipaddress
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Query, Response, Body
@@ -18,7 +19,7 @@ from app.schemas import (
     UserProfileUpdate, MFASetupInitiateResponse, MFASetupConfirmRequest,
     MFAStatusResponse, MFANeededResponse,
     LoginSuccessResponse, LoginMFASetupResponse, LoginMFAChallengeResponse,
-    MFAVerifyLoginRequest,
+    MFAVerifyLoginRequest, MFARecoveryPendingResponse, RecoveryAckRequest,
     MFARecoveryCodeVerifyRequest, MFARecoveryCodesResponse, MFARecoveryCodeStatus,
     MFARegenerateRecoveryCodesRequest, MFARegenerateRecoveryCodesResponse,
     MFAEnrollStartRequest, MFAEnrollStartResponse, MFAEnrollConfirmRequest,
@@ -341,6 +342,38 @@ def _verify_challenge_token(token: str) -> tuple[bool, int]:
         return False, 0
 
 
+# Short window for the user to read + save their first-time recovery codes.
+RECOVERY_ACK_EXPIRE_SECONDS = 15 * 60
+
+
+def _generate_recovery_ack_token(user_id: int) -> str:
+    """Signed, short-lived token proving a first-time-MFA user must still
+    acknowledge their recovery codes before a session is established. Distinct
+    'type' claim so it can't be replayed as a challenge/access token."""
+    import jwt as pyjwt
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": str(user_id),
+        "type": "mfa_recovery_ack",
+        "iat": now,
+        "exp": now + timedelta(seconds=RECOVERY_ACK_EXPIRE_SECONDS),
+    }
+    return pyjwt.encode(payload, settings.MFA_CHALLENGE_SECRET_KEY, algorithm="HS256")
+
+
+def _verify_recovery_ack_token(token: str) -> tuple[bool, int]:
+    """Verify a recovery-ack token. Returns (is_valid, user_id)."""
+    import jwt as pyjwt
+    from jwt.exceptions import PyJWTError
+    try:
+        payload = pyjwt.decode(token, settings.MFA_CHALLENGE_SECRET_KEY, algorithms=["HS256"])
+        if payload.get("type") != "mfa_recovery_ack":
+            return False, 0
+        return True, int(payload["sub"])
+    except (PyJWTError, ValueError, KeyError):
+        return False, 0
+
+
 def _get_redis_client() -> redis.Redis:
     """
     Get a synchronous Redis client for login rate limiting.
@@ -371,25 +404,47 @@ def _get_redis_client() -> redis.Redis:
 
 def _get_client_ip(request: Request) -> str:
     """
-    Extract client IP address from request.
-    
-    Uses request.client.host exclusively (trusted source from ASGI).
-    X-Forwarded-For is NOT used here because it is user-controlled and
-    can be spoofed by attackers. Using it would allow bypassing IP-based
-    rate limiting by simply sending a fake header.
-    
-    Raises HTTPException 400 if client IP cannot be determined.
+    Extract the real client IP for rate limiting and audit logging.
+
+    Behind a reverse proxy, request.client.host is the *proxy's* IP, so every
+    client shares one rate-limit key — one attacker can then lock out all
+    login traffic (global DoS). But X-Forwarded-For is client-spoofable, so we
+    only trust it for exactly the number of proxy hops the operator declares
+    via TRUSTED_PROXY_COUNT:
+
+      - TRUSTED_PROXY_COUNT = 0 (default): no proxy is trusted; use
+        request.client.host. Safe when the app is exposed directly.
+      - TRUSTED_PROXY_COUNT = N (>0): the app sits behind N trusted proxies
+        (e.g. 1 for Railway/Vercel edge, 2 for nginx-behind-edge). Take the
+        IP N hops in from the right of the chain [XFF..., request.client.host],
+        which is the first address a trusted proxy did not itself set.
+
+    Set TRUSTED_PROXY_COUNT to the number of proxies actually in front of the
+    app in each deployment. Leaving it at 0 behind a proxy is safe (no DoS
+    amplification beyond the proxy) but not granular; setting it too high lets
+    clients spoof their IP, so match it to the real topology.
     """
-    if not request.client or not request.client.host:
-        # L4 load-balancer health probes and some embedded test clients
-        # arrive without a populated request.client. Previously we raised
-        # 400 here which surfaced as bogus noise on every LB probe. Fall
-        # back to a stable sentinel so callers downstream (rate limiter,
-        # audit log) still have an IP-shaped value to key on, without
-        # allowing a spoof vector (this branch only fires when ASGI itself
-        # did not attach client info). Security review B-L2.
+    direct = request.client.host if (request.client and request.client.host) else None
+
+    n = getattr(settings, "TRUSTED_PROXY_COUNT", 0) or 0
+    if n > 0:
+        xff = request.headers.get("x-forwarded-for", "")
+        forwarded = [p.strip() for p in xff.split(",") if p.strip()]
+        chain = forwarded + ([direct] if direct else [])
+        idx = len(chain) - 1 - n
+        if 0 <= idx < len(chain):
+            candidate = chain[idx]
+            try:
+                ipaddress.ip_address(candidate)
+                return candidate
+            except ValueError:
+                pass  # malformed header — fall back to the direct peer below
+
+    if not direct:
+        # L4 health probes / embedded test clients arrive without client info.
+        # Stable sentinel so downstream keying still works (security review B-L2).
         return "0.0.0.0"
-    return request.client.host
+    return direct
 
 
 def check_ip_rate_limit(ip_address: str) -> tuple[bool, int]:
@@ -755,7 +810,15 @@ async def _entra_callback_success(user: User, request: Request, response: Respon
     user.last_login = datetime.now(timezone.utc)
     user.last_seen_at = datetime.now(timezone.utc)
     user.is_online = True
-    user.is_enabled = True
+    # Account enablement is admin-controlled — NEVER re-enable on login
+    # (security review). Reject disabled accounts before the session is
+    # established; tokens minted above are not yet committed or set as
+    # cookies, so raising here rolls back and issues nothing.
+    if not user.is_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is disabled. Contact your administrator.",
+        )
 
     # Audit log
     db.add(create_audit_log(
@@ -859,6 +922,8 @@ async def ldap_login(
     response: Response,
     username: Annotated[str, Body(...)],
     password: Annotated[str, Body(...)],
+    mfa_code: Annotated[str | None, Body()] = None,
+    device_fingerprint: Annotated[str | None, Body()] = None,
     db: Annotated[Session, Depends(get_db)] = None,
 ):
     """Authenticate with on-prem Active Directory via LDAP."""
@@ -885,13 +950,15 @@ async def ldap_login(
 
     user = _find_or_create_ldap_user(db, ldap_user)
 
-    return await _create_ldap_login_response(user, request, response, db, client_ip)
+    return await _create_ldap_login_response(
+        user, request, response, db, client_ip, mfa_code, device_fingerprint
+    )
 
 
 # ─── LDAP LOGIN HELPER FUNCTIONS ─────────────────────────────────────────────
 
 
-async def _create_ldap_login_response(user: User, request: Request, response: Response, db: Session, client_ip: str) -> LoginSuccessResponse:
+async def _create_ldap_login_response(user: User, request: Request, response: Response, db: Session, client_ip: str, mfa_code: str | None = None, device_fingerprint: str | None = None) -> LoginSuccessResponse:
     """Create LDAP login success response with tokens."""
     from app.core.security import create_access_token, create_refresh_token, MFA_REQUIRED_ROLES
 
@@ -910,7 +977,7 @@ async def _create_ldap_login_response(user: User, request: Request, response: Re
                 }
             )
         # LDAP privileged user has TOTP set up — issue MFA challenge via existing flow
-        mfa_response = await _handle_login_mfa(user, request, db, client_ip)
+        mfa_response = await _handle_login_mfa(user, mfa_code, device_fingerprint, db, client_ip)
         if mfa_response is not None:
             return mfa_response
         # MFA verified successfully, fall through to token issuance
@@ -929,7 +996,15 @@ async def _create_ldap_login_response(user: User, request: Request, response: Re
     user.last_login = datetime.now(timezone.utc)
     user.last_seen_at = datetime.now(timezone.utc)
     user.is_online = True
-    user.is_enabled = True
+    # Account enablement is admin-controlled — NEVER re-enable on login
+    # (security review). Reject disabled accounts before the session is
+    # established; tokens minted above are not yet committed or set as
+    # cookies, so raising here rolls back and issues nothing.
+    if not user.is_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is disabled. Contact your administrator.",
+        )
 
     db.add(create_audit_log(
         user_id=user.id,
@@ -1047,10 +1122,15 @@ async def _handle_ldap_auth_failure(client_ip: str) -> None:
     )
 
 
-async def _handle_login_mfa(user, request, db, client_ip) -> object:
+async def _handle_login_mfa(user, mfa_code, device_fingerprint, db, client_ip) -> object:
     """
     Handle MFA check during login. Returns a response object if MFA is pending,
     or None if authentication can proceed to token issuance.
+
+    Takes mfa_code / device_fingerprint as explicit values (not an ambient
+    request object) so every caller — local, LDAP, SSO — passes the same
+    shape. Passing a Starlette Request here previously raised AttributeError
+    and broke the privileged-LDAP 2FA gate (security review).
     """
     from app.core.security import encrypt_mfa_secret, decrypt_mfa_secret
 
@@ -1083,7 +1163,7 @@ async def _handle_login_mfa(user, request, db, client_ip) -> object:
         )
 
     # User has MFA secret - verify code
-    if not request.mfa_code:
+    if not mfa_code:
         # MFA configured but code not provided — issue challenge
         challenge_token = _generate_challenge_token(user.id)
         logger.info(f"MFA challenge issued for {_log_user_identity(user.id, user.email)}")
@@ -1097,15 +1177,15 @@ async def _handle_login_mfa(user, request, db, client_ip) -> object:
 
     # Verify TOTP code
     plain_secret = decrypt_mfa_secret(user.mfa_secret) or user.mfa_secret
-    if not verify_totp_code(plain_secret, request.mfa_code):
+    if not verify_totp_code(plain_secret, mfa_code):
         await redis_record_failed_login(user.id)
         await record_ip_failure(client_ip)
-        if request.device_fingerprint:
-            await record_device_failure(request.device_fingerprint)
+        if device_fingerprint:
+            await record_device_failure(device_fingerprint)
         logger.warning(f"Invalid MFA code for {_log_user_identity(user.id, user.email)}")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=INVALID_CREDENTIALS_MFA_MSG)
 
-    if is_totp_replay(user, request.mfa_code):
+    if is_totp_replay(user, mfa_code):
         logger.warning(f"TOTP replay attempt detected for {_log_user_identity(user.id, user.email)}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -1113,7 +1193,7 @@ async def _handle_login_mfa(user, request, db, client_ip) -> object:
         )
 
     # Mark TOTP code as used
-    user.last_used_totp_code = request.mfa_code
+    user.last_used_totp_code = mfa_code
     user.last_used_totp_at = datetime.now(timezone.utc)
     db.add(user)
     return None  # Proceed to token issuance
@@ -1258,7 +1338,15 @@ async def _create_login_success_response(
     user.last_login = datetime.now(timezone.utc)
     user.last_seen_at = datetime.now(timezone.utc)
     user.is_online = True
-    user.is_enabled = True
+    # Account enablement is admin-controlled — NEVER re-enable on login
+    # (security review). Reject disabled accounts before the session is
+    # established; tokens minted above are not yet committed or set as
+    # cookies, so raising here rolls back and issues nothing.
+    if not user.is_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is disabled. Contact your administrator.",
+        )
     
     # Audit log
     db.add(create_audit_log(
@@ -1348,7 +1436,11 @@ async def login(request: LoginRequest, req: Request, response: Response, db: Ann
 
         # STEP 7: Handle MFA verification
         mfa_response = await _handle_login_mfa(
-            user=user, request=request, db=db, client_ip=client_ip
+            user=user,
+            mfa_code=request.mfa_code,
+            device_fingerprint=request.device_fingerprint,
+            db=db,
+            client_ip=client_ip,
         )
         if mfa_response is not None:
             return mfa_response
@@ -1381,7 +1473,7 @@ async def login(request: LoginRequest, req: Request, response: Response, db: Ann
 )
 async def refresh_token(req: Request, response: Response, db: Annotated[Session, Depends(get_db)] = None):
     """
-    Refresh access token using the refresh token from HttpOnly cookie or request body.
+    Refresh the access token using the refresh token from the HttpOnly cookie.
 
     Security:
     - Refresh token read from HttpOnly cookie only. The previous body
@@ -1451,15 +1543,19 @@ async def refresh_token(req: Request, response: Response, db: Annotated[Session,
 
     _rt_id, rt_user_id = rotated
 
-    # Check if user exists (don't check is_active - that's for online presence, not account status)
+    # is_active is online presence, not account status. Account enablement
+    # (is_enabled) MUST be enforced here: a disabled/offboarded user holding a
+    # still-valid refresh cookie must not be able to rotate into new tokens
+    # (security review). The old token was already revoked atomically above,
+    # so rejecting here also terminates the session.
     user = db.query(User).filter(
         User.id == rt_user_id
     ).first()
-    if not user:
+    if not user or not user.is_enabled:
         db.commit()  # persist the revoke even though we reject
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found"
+            detail="Session is no longer valid. Please log in again."
         )
 
     # Old token is already revoked atomically above; issue new ones.
@@ -2406,6 +2502,9 @@ def _enable_mfa_and_generate_recovery_codes(user: User, db: Session) -> tuple[bo
         return False, None
 
     user.mfa_enabled = True
+    # Block session establishment until these codes are acknowledged. Persisted
+    # so a re-login before acknowledgement cannot bypass the gate.
+    user.mfa_recovery_acknowledged = False
     recovery_codes = None
 
     try:
@@ -2432,8 +2531,9 @@ async def _finalize_mfa_login(
     db: Session,
     was_new_mfa: bool,
     recovery_codes: Optional[list[str]]
-) -> LoginSuccessResponse:
-    """Issue tokens and complete MFA login flow."""
+):
+    """Complete MFA login: establish a session, or (first-time setup) return a
+    recovery-codes-pending response with an ack token instead."""
     try:
         await clear_account_failures(user.id)
     except Exception as e:
@@ -2445,20 +2545,59 @@ async def _finalize_mfa_login(
         success=True
     ))
 
-    access_token = create_access_token({"sub": str(user.id), "role": user.role})
-    refresh_token_str = create_refresh_token({"sub": str(user.id)})
-
-    rt = RefreshToken(
-        user_id=user.id,
-        token=refresh_token_str,
-        expires_at=datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
-    )
-    db.add(rt)
+    # Account enablement is admin-controlled — NEVER re-enable on login
+    # (security review). Reject disabled accounts before anything is issued.
+    if not user.is_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is disabled. Contact your administrator.",
+        )
 
     user.last_login = datetime.now(timezone.utc)
     user.last_seen_at = datetime.now(timezone.utc)
     user.is_online = True
-    user.is_enabled = True
+
+    # RECOVERY CODES NOT YET ACKNOWLEDGED: do NOT establish a session. The user
+    # must see and save their one-time recovery codes first. This is checked on
+    # EVERY login (via the persisted mfa_recovery_acknowledged flag), so
+    # abandoning the codes screen and logging in again cannot bypass the gate.
+    # The session is only minted when the client calls
+    # /auth/mfa/recovery-codes/acknowledge (security review).
+    if user.mfa_recovery_acknowledged is False:
+        codes = recovery_codes
+        if not codes:
+            # Re-login before acknowledgement: the original plaintext codes are
+            # gone (stored hashed), so reissue a fresh set to display now. The
+            # old unacknowledged codes are invalidated.
+            try:
+                invalidate_all_recovery_codes(db=db, user_id=user.id)
+                codes, _batch = generate_recovery_codes(
+                    db=db,
+                    user_id=user.id,
+                    generated_by_user_id=user.id,
+                    reason='reissue_unacknowledged',
+                )
+            except Exception as e:
+                logger.error(f"Failed to reissue recovery codes for user {user.id}: {e}")
+                codes = []
+        db.add(create_audit_log(
+            user_id=user.id,
+            user_email=user.email,
+            action="mfa_enabled_recovery_pending",
+            resource_type="user",
+            resource_id=user.id,
+            request=req,
+        ))
+        db.commit()
+        logger.info(f"User {user.id} login blocked: recovery codes awaiting acknowledgement")
+        return MFARecoveryPendingResponse(
+            status="recovery_codes_required",
+            recovery_codes=codes,
+            recovery_codes_warning="Store these codes securely. They will not be shown again.",
+            recovery_setup_token=_generate_recovery_ack_token(user.id),
+            user=UserResponse.model_validate(user),
+            message="Save your recovery codes, then confirm to finish signing in.",
+        )
 
     db.add(create_audit_log(
         user_id=user.id,
@@ -2468,31 +2607,39 @@ async def _finalize_mfa_login(
         resource_id=user.id,
         request=req,
     ))
-    db.commit()
-
     logger.info(f"MFA verification complete, login successful for user {user.id}")
+    return _establish_session(user, response, db)
+
+
+def _establish_session(user: User, response: Response, db: Session) -> LoginSuccessResponse:
+    """Mint access+refresh tokens, persist the refresh token, set the HttpOnly
+    cookies, and return the success response. Shared by the normal MFA login
+    path and the recovery-codes acknowledge endpoint."""
+    access_token = create_access_token({"sub": str(user.id), "role": user.role})
+    refresh_token_str = create_refresh_token({"sub": str(user.id)})
+
+    db.add(RefreshToken(
+        user_id=user.id,
+        token=refresh_token_str,
+        expires_at=datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
+    ))
+    db.commit()
 
     _set_refresh_cookie(response, refresh_token_str, settings.REFRESH_TOKEN_EXPIRE_DAYS)
     _set_access_cookie(response, access_token, settings.ACCESS_TOKEN_EXPIRE_MINUTES)
 
-    response_data = {
-        "status": "success",
-        "access_token": access_token,
-        "token_type": "bearer",
-        "user": UserResponse.model_validate(user),
-        "refresh_token": refresh_token_str,
-    }
-
-    if was_new_mfa and recovery_codes:
-        response_data["recovery_codes"] = recovery_codes
-        response_data["recovery_codes_warning"] = "Store these codes securely. They will not be shown again."
-
-    return LoginSuccessResponse(**response_data)
+    return LoginSuccessResponse(
+        status="success",
+        access_token=access_token,
+        token_type="bearer",
+        user=UserResponse.model_validate(user),
+        refresh_token=refresh_token_str,
+    )
 
 
 # ─── MFA LOGIN VERIFICATION ENDPOINT ─────────────────────────────────────────
 
-@router.post("/mfa/verify-login", response_model=LoginSuccessResponse)
+@router.post("/mfa/verify-login")
 async def verify_mfa_and_complete_login(
     request: MFAVerifyLoginRequest,
     req: Request,
@@ -2546,6 +2693,53 @@ async def verify_mfa_and_complete_login(
         was_new_mfa=was_new_mfa,
         recovery_codes=recovery_codes
     )
+
+
+@router.post("/mfa/recovery-codes/acknowledge", response_model=LoginSuccessResponse)
+async def acknowledge_recovery_codes(
+    request: RecoveryAckRequest,
+    req: Request,
+    response: Response,
+    db: Annotated[Session, Depends(get_db)] = None,
+):
+    """Finish a first-time-MFA login after the user has saved their recovery
+    codes. The session (HttpOnly cookies) is only established here, gated by
+    the signed recovery_setup_token issued by /mfa/verify-login — so the
+    recovery-codes screen cannot be bypassed by navigating away (security
+    review)."""
+    client_ip = _get_client_ip(req)
+
+    is_valid, user_id = _verify_recovery_ack_token(request.recovery_setup_token)
+    if not is_valid:
+        logger.warning(f"Invalid or expired recovery-ack token from IP {client_ip}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="This confirmation link has expired. Please sign in again.",
+        )
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user or not user.is_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is not available. Contact your administrator.",
+        )
+
+    user.last_login = datetime.now(timezone.utc)
+    user.last_seen_at = datetime.now(timezone.utc)
+    user.is_online = True
+    # Clear the pending gate — only now may a session be established, and future
+    # logins proceed normally.
+    user.mfa_recovery_acknowledged = True
+    db.add(create_audit_log(
+        user_id=user.id,
+        user_email=user.email,
+        action="mfa_recovery_codes_acknowledged",
+        resource_type="user",
+        resource_id=user.id,
+        request=req,
+    ))
+    logger.info(f"Recovery codes acknowledged; session established for user {user.id}")
+    return _establish_session(user, response, db)
 
 
 # ─── MFA RECOVERY CODE ENDPOINTS ──────────────────────────────────────────────
@@ -2661,8 +2855,11 @@ async def verify_recovery_code_and_login(
         expires_at=datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
     )
     db.add(rt)
-    
+
     user.last_login = datetime.now(timezone.utc)
+    # Using a recovery code proves the user has saved them — clear any pending
+    # acknowledgement gate so future logins proceed normally.
+    user.mfa_recovery_acknowledged = True
 
     db.add(create_audit_log(
         user_id=user.id,
