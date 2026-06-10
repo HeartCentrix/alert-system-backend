@@ -373,6 +373,15 @@ def _validate_user_update_permissions(current_user: User, user: User, data: User
             detail="Access denied. You can only update your own profile."
         )
     
+    # No one may change their OWN role — even admins. Prevents self-demotion
+    # lockout and self-escalation; role changes must be made by another
+    # authorized administrator (security review).
+    if data.role is not None and data.role != user.role and current_user.id == user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You cannot change your own role. Ask another administrator."
+        )
+
     # Prevent privilege escalation: non-admins cannot change role to admin
     if data.role is not None and data.role != user.role:
         if current_user.role not in [UserRole.SUPER_ADMIN, UserRole.ADMIN]:
