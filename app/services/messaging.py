@@ -453,27 +453,95 @@ def _is_safe_url(url: str) -> bool:
         return False
 
 
+import threading as _threading
+from contextlib import contextmanager as _contextmanager
+
+_dns_pin_lock = _threading.Lock()
+
+
+def _safe_resolved_addrinfo(hostname: str):
+    """Resolve `hostname` once and return its addrinfo entries iff EVERY
+    resolved IP is public. Returns [] on failure or if any address is
+    private/reserved. Resolving a single time and reusing the result for the
+    actual connection is what closes the DNS-rebinding TOCTOU window — the old
+    code validated one resolution then let httpx resolve again independently.
+    """
+    try:
+        infos = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    except socket.gaierror:
+        return []
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return []
+        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+                or ip.is_multicast or ip.is_unspecified):
+            return []
+    return infos
+
+
+@_contextmanager
+def _pinned_dns(hostname: str, infos):
+    """Pin socket.getaddrinfo for `hostname` to the already-validated `infos`
+    for the duration of one request, so httpx connects to the exact IPs we
+    vetted. TLS SNI / certificate validation still use the real hostname.
+    Serialized by a lock so the temporary global override is thread-safe.
+    """
+    real_getaddrinfo = socket.getaddrinfo
+
+    def _fake(host, port, family=0, type=0, proto=0, flags=0):
+        if host == hostname:
+            return [
+                (fam, socktype, prot, "", (sa[0], port) + tuple(sa[2:]))
+                for (fam, socktype, prot, _canon, sa) in infos
+            ]
+        return real_getaddrinfo(host, port, family, type, proto, flags)
+
+    with _dns_pin_lock:
+        socket.getaddrinfo = _fake
+        try:
+            yield
+        finally:
+            socket.getaddrinfo = real_getaddrinfo
+
+
+def _post_webhook_ssrf_safe(webhook_url: str, payload: dict, timeout: float = 10.0):
+    """POST to a webhook URL with SSRF protection that survives DNS rebinding.
+
+    Validates scheme/host, resolves+validates the host exactly once, pins the
+    connection to those vetted IPs, and disables redirects. Raises ValueError
+    if the URL is unsafe.
+    """
+    if not _is_safe_url(webhook_url):
+        raise ValueError("Invalid webhook URL")
+    hostname = urlparse(webhook_url).hostname
+    infos = _safe_resolved_addrinfo(hostname)
+    if not infos:
+        raise ValueError("Webhook URL resolves to a non-public address")
+    import httpx
+    with _pinned_dns(hostname, infos):
+        return httpx.post(webhook_url, json=payload, timeout=timeout, follow_redirects=False)
+
+
 class WebhookService:
     def send_slack(self, webhook_url: str, message: str, title: str = "") -> dict:
         if not webhook_url:
             logger.warning(f"[SLACK] No webhook URL provided | Message: {message[:50]}...")
             return {"status": "skipped", "error": "No webhook URL provided"}
 
-        # Validate URL to prevent SSRF attacks
-        if not _is_safe_url(webhook_url):
-            logger.error("Slack webhook blocked: SSRF protection triggered for URL")
-            return {"status": "blocked", "error": "Invalid webhook URL"}
-
         try:
-            import httpx
             payload = {
                 "blocks": [
                     {"type": "header", "text": {"type": "plain_text", "text": f"🚨 {title}"}},
                     {"type": "section", "text": {"type": "mrkdwn", "text": message}},
                 ]
             }
-            response = httpx.post(webhook_url, json=payload, timeout=10)
+            response = _post_webhook_ssrf_safe(webhook_url, payload)
             return {"status": "sent" if response.status_code == 200 else "failed"}
+        except ValueError as e:
+            logger.error(f"Slack webhook blocked: SSRF protection triggered ({e})")
+            return {"status": "blocked", "error": "Invalid webhook URL"}
         except Exception as e:
             logger.error(f"Slack webhook failed: {e}")
             return {"error": str(e), "status": "failed"}
@@ -483,13 +551,7 @@ class WebhookService:
             logger.warning(f"[TEAMS] No webhook URL provided | Message: {message[:50]}...")
             return {"status": "skipped", "error": "No webhook URL provided"}
 
-        # Validate URL to prevent SSRF attacks
-        if not _is_safe_url(webhook_url):
-            logger.error("Teams webhook blocked: SSRF protection triggered for URL")
-            return {"status": "blocked", "error": "Invalid webhook URL"}
-
         try:
-            import httpx
             payload = {
                 "@type": "MessageCard",
                 "@context": "http://schema.org/extensions",
@@ -497,8 +559,11 @@ class WebhookService:
                 "summary": title,
                 "sections": [{"activityTitle": f"🚨 {title}", "activityText": message}]
             }
-            response = httpx.post(webhook_url, json=payload, timeout=10)
+            response = _post_webhook_ssrf_safe(webhook_url, payload)
             return {"status": "sent" if response.status_code == 200 else "failed"}
+        except ValueError as e:
+            logger.error(f"Teams webhook blocked: SSRF protection triggered ({e})")
+            return {"status": "blocked", "error": "Invalid webhook URL"}
         except Exception as e:
             logger.error(f"Teams webhook failed: {e}")
             return {"error": str(e), "status": "failed"}
