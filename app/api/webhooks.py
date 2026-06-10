@@ -3,7 +3,7 @@ from fastapi.responses import Response, PlainTextResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from typing import Annotated, Optional, List
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
 from twilio.request_validator import RequestValidator
 from app.database import get_db
 from app.core.deps import get_current_user
@@ -71,25 +71,28 @@ async def validate_twilio_request(request: Request, body: bytes) -> bool:
         True if signature is valid, False otherwise
     """
     # Skip validation in development mode for local testing with ngrok.
-    # The previous check was only APP_ENV == "development"; if a prod
-    # container ever started with APP_ENV misconfigured (CI default,
-    # container cache, ops mistake) while reachable from the public
-    # internet, every Twilio webhook would become unauthenticated. Add a
-    # secondary guard that also requires the configured BACKEND_URL to be
-    # localhost-like (security review B-M1).
+    # FAIL CLOSED: only skip when APP_ENV=development AND BACKEND_URL's host is
+    # exactly a local/ngrok host. The previous guard used substring matching
+    # ("localhost" in url -> "localhost.evil.com" passed) and fell through to
+    # skip when BACKEND_URL was empty (`... and backend_url` short-circuits),
+    # so a misconfigured dev/staging container accepted unsigned Twilio
+    # webhooks (security review B-M1).
     if settings.APP_ENV == "development":
-        backend_url = (settings.BACKEND_URL or "").lower()
-        local_hosts = ("localhost", "127.0.0.1", "::1", "ngrok")
-        if not any(h in backend_url for h in local_hosts) and backend_url:
-            logger.error(
-                "Refusing to skip Twilio signature validation: APP_ENV=development "
-                "but BACKEND_URL=%s looks public. Set APP_ENV=production or point "
-                "BACKEND_URL at a local/ngrok host.",
-                settings.BACKEND_URL,
-            )
-            return False
-        logger.debug("Skipping Twilio signature validation in development mode")
-        return True
+        host = (urlparse(settings.BACKEND_URL).hostname or "").lower() if settings.BACKEND_URL else ""
+        is_local_host = (
+            host in {"localhost", "127.0.0.1", "::1"}
+            or host.endswith(".ngrok.io")
+            or host.endswith(".ngrok-free.app")
+        )
+        if is_local_host:
+            logger.debug("Skipping Twilio signature validation in development mode (local host %s)", host)
+            return True
+        logger.error(
+            "Refusing to skip Twilio signature validation: APP_ENV=development but "
+            "BACKEND_URL=%r is empty or not a local/ngrok host. Validating signature.",
+            settings.BACKEND_URL,
+        )
+        # fall through to real signature validation rather than skipping
 
     if not settings.TWILIO_AUTH_TOKEN:
         logger.error("TWILIO_AUTH_TOKEN not configured — cannot validate Twilio requests")
