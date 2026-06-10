@@ -262,7 +262,11 @@ def ensure_sso_columns():
         
         # Ensure is_online column
         ensure_column_exists('users', 'is_online', 'BOOLEAN', nullable=True)
-        
+
+        # Ensure mfa_recovery_acknowledged column (nullable: NULL/True = acked,
+        # so existing users are unaffected; only a fresh setup sets it False)
+        ensure_column_exists('users', 'mfa_recovery_acknowledged', 'BOOLEAN', nullable=True)
+
         logger.info("SSO columns verified/created successfully")
         
     except Exception as e:

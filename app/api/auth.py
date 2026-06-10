@@ -2502,6 +2502,9 @@ def _enable_mfa_and_generate_recovery_codes(user: User, db: Session) -> tuple[bo
         return False, None
 
     user.mfa_enabled = True
+    # Block session establishment until these codes are acknowledged. Persisted
+    # so a re-login before acknowledgement cannot bypass the gate.
+    user.mfa_recovery_acknowledged = False
     recovery_codes = None
 
     try:
@@ -2554,12 +2557,29 @@ async def _finalize_mfa_login(
     user.last_seen_at = datetime.now(timezone.utc)
     user.is_online = True
 
-    # FIRST-TIME MFA SETUP: do NOT establish a session yet. The user must see
-    # and save their one-time recovery codes first. Return them with a signed,
-    # short-lived ack token; the session is only minted when the client calls
-    # /auth/mfa/recovery-codes/acknowledge. This makes the recovery-codes gate
-    # server-enforced instead of a bypassable client flag (security review).
-    if was_new_mfa and recovery_codes:
+    # RECOVERY CODES NOT YET ACKNOWLEDGED: do NOT establish a session. The user
+    # must see and save their one-time recovery codes first. This is checked on
+    # EVERY login (via the persisted mfa_recovery_acknowledged flag), so
+    # abandoning the codes screen and logging in again cannot bypass the gate.
+    # The session is only minted when the client calls
+    # /auth/mfa/recovery-codes/acknowledge (security review).
+    if user.mfa_recovery_acknowledged is False:
+        codes = recovery_codes
+        if not codes:
+            # Re-login before acknowledgement: the original plaintext codes are
+            # gone (stored hashed), so reissue a fresh set to display now. The
+            # old unacknowledged codes are invalidated.
+            try:
+                invalidate_all_recovery_codes(db=db, user_id=user.id)
+                codes, _batch = generate_recovery_codes(
+                    db=db,
+                    user_id=user.id,
+                    generated_by_user_id=user.id,
+                    reason='reissue_unacknowledged',
+                )
+            except Exception as e:
+                logger.error(f"Failed to reissue recovery codes for user {user.id}: {e}")
+                codes = []
         db.add(create_audit_log(
             user_id=user.id,
             user_email=user.email,
@@ -2569,10 +2589,10 @@ async def _finalize_mfa_login(
             request=req,
         ))
         db.commit()
-        logger.info(f"MFA enabled for user {user.id}; awaiting recovery-code acknowledgement")
+        logger.info(f"User {user.id} login blocked: recovery codes awaiting acknowledgement")
         return MFARecoveryPendingResponse(
             status="recovery_codes_required",
-            recovery_codes=recovery_codes,
+            recovery_codes=codes,
             recovery_codes_warning="Store these codes securely. They will not be shown again.",
             recovery_setup_token=_generate_recovery_ack_token(user.id),
             user=UserResponse.model_validate(user),
@@ -2707,6 +2727,9 @@ async def acknowledge_recovery_codes(
     user.last_login = datetime.now(timezone.utc)
     user.last_seen_at = datetime.now(timezone.utc)
     user.is_online = True
+    # Clear the pending gate — only now may a session be established, and future
+    # logins proceed normally.
+    user.mfa_recovery_acknowledged = True
     db.add(create_audit_log(
         user_id=user.id,
         user_email=user.email,
@@ -2832,8 +2855,11 @@ async def verify_recovery_code_and_login(
         expires_at=datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
     )
     db.add(rt)
-    
+
     user.last_login = datetime.now(timezone.utc)
+    # Using a recovery code proves the user has saved them — clear any pending
+    # acknowledgement gate so future logins proceed normally.
+    user.mfa_recovery_acknowledged = True
 
     db.add(create_audit_log(
         user_id=user.id,
