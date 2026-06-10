@@ -31,6 +31,14 @@ class Settings(BaseSettings):
     FRONTEND_URL: str = "http://localhost:3000"
     BACKEND_URL: str = "http://localhost:8000"
 
+    # Number of trusted reverse-proxy hops in front of the app. Controls how
+    # the real client IP is derived from X-Forwarded-For for rate limiting /
+    # lockout (see app.api.auth._get_client_ip). 0 = trust none (use the
+    # direct peer); 1 = single edge proxy (Railway/Vercel); 2 = nginx behind
+    # an edge. MUST match the real deployment topology — too high lets clients
+    # spoof their IP. Safe default 0.
+    TRUSTED_PROXY_COUNT: int = 0
+
     DATABASE_URL: str = "postgresql://postgres:password@localhost:5432/tm_alert"
     REDIS_URL: str = "redis://localhost:6379/0"
 

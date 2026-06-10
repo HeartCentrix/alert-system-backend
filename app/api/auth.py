@@ -1,6 +1,7 @@
 import secrets
 import time
 import logging
+import ipaddress
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Query, Response, Body
@@ -371,25 +372,47 @@ def _get_redis_client() -> redis.Redis:
 
 def _get_client_ip(request: Request) -> str:
     """
-    Extract client IP address from request.
-    
-    Uses request.client.host exclusively (trusted source from ASGI).
-    X-Forwarded-For is NOT used here because it is user-controlled and
-    can be spoofed by attackers. Using it would allow bypassing IP-based
-    rate limiting by simply sending a fake header.
-    
-    Raises HTTPException 400 if client IP cannot be determined.
+    Extract the real client IP for rate limiting and audit logging.
+
+    Behind a reverse proxy, request.client.host is the *proxy's* IP, so every
+    client shares one rate-limit key — one attacker can then lock out all
+    login traffic (global DoS). But X-Forwarded-For is client-spoofable, so we
+    only trust it for exactly the number of proxy hops the operator declares
+    via TRUSTED_PROXY_COUNT:
+
+      - TRUSTED_PROXY_COUNT = 0 (default): no proxy is trusted; use
+        request.client.host. Safe when the app is exposed directly.
+      - TRUSTED_PROXY_COUNT = N (>0): the app sits behind N trusted proxies
+        (e.g. 1 for Railway/Vercel edge, 2 for nginx-behind-edge). Take the
+        IP N hops in from the right of the chain [XFF..., request.client.host],
+        which is the first address a trusted proxy did not itself set.
+
+    Set TRUSTED_PROXY_COUNT to the number of proxies actually in front of the
+    app in each deployment. Leaving it at 0 behind a proxy is safe (no DoS
+    amplification beyond the proxy) but not granular; setting it too high lets
+    clients spoof their IP, so match it to the real topology.
     """
-    if not request.client or not request.client.host:
-        # L4 load-balancer health probes and some embedded test clients
-        # arrive without a populated request.client. Previously we raised
-        # 400 here which surfaced as bogus noise on every LB probe. Fall
-        # back to a stable sentinel so callers downstream (rate limiter,
-        # audit log) still have an IP-shaped value to key on, without
-        # allowing a spoof vector (this branch only fires when ASGI itself
-        # did not attach client info). Security review B-L2.
+    direct = request.client.host if (request.client and request.client.host) else None
+
+    n = getattr(settings, "TRUSTED_PROXY_COUNT", 0) or 0
+    if n > 0:
+        xff = request.headers.get("x-forwarded-for", "")
+        forwarded = [p.strip() for p in xff.split(",") if p.strip()]
+        chain = forwarded + ([direct] if direct else [])
+        idx = len(chain) - 1 - n
+        if 0 <= idx < len(chain):
+            candidate = chain[idx]
+            try:
+                ipaddress.ip_address(candidate)
+                return candidate
+            except ValueError:
+                pass  # malformed header — fall back to the direct peer below
+
+    if not direct:
+        # L4 health probes / embedded test clients arrive without client info.
+        # Stable sentinel so downstream keying still works (security review B-L2).
         return "0.0.0.0"
-    return request.client.host
+    return direct
 
 
 def check_ip_rate_limit(ip_address: str) -> tuple[bool, int]:
