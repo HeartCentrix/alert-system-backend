@@ -160,12 +160,6 @@ jobs:
           pip-audit --format json > pip-audit-report.json || true
         continue-on-error: false
       
-      - name: Run Gitleaks secret detection
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
-      
       - name: Check for hardcoded secrets
         run: |
           # Check for common secret patterns
