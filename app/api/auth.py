@@ -859,6 +859,8 @@ async def ldap_login(
     response: Response,
     username: Annotated[str, Body(...)],
     password: Annotated[str, Body(...)],
+    mfa_code: Annotated[str | None, Body()] = None,
+    device_fingerprint: Annotated[str | None, Body()] = None,
     db: Annotated[Session, Depends(get_db)] = None,
 ):
     """Authenticate with on-prem Active Directory via LDAP."""
@@ -885,13 +887,15 @@ async def ldap_login(
 
     user = _find_or_create_ldap_user(db, ldap_user)
 
-    return await _create_ldap_login_response(user, request, response, db, client_ip)
+    return await _create_ldap_login_response(
+        user, request, response, db, client_ip, mfa_code, device_fingerprint
+    )
 
 
 # ─── LDAP LOGIN HELPER FUNCTIONS ─────────────────────────────────────────────
 
 
-async def _create_ldap_login_response(user: User, request: Request, response: Response, db: Session, client_ip: str) -> LoginSuccessResponse:
+async def _create_ldap_login_response(user: User, request: Request, response: Response, db: Session, client_ip: str, mfa_code: str | None = None, device_fingerprint: str | None = None) -> LoginSuccessResponse:
     """Create LDAP login success response with tokens."""
     from app.core.security import create_access_token, create_refresh_token, MFA_REQUIRED_ROLES
 
@@ -910,7 +914,7 @@ async def _create_ldap_login_response(user: User, request: Request, response: Re
                 }
             )
         # LDAP privileged user has TOTP set up — issue MFA challenge via existing flow
-        mfa_response = await _handle_login_mfa(user, request, db, client_ip)
+        mfa_response = await _handle_login_mfa(user, mfa_code, device_fingerprint, db, client_ip)
         if mfa_response is not None:
             return mfa_response
         # MFA verified successfully, fall through to token issuance
@@ -1047,10 +1051,15 @@ async def _handle_ldap_auth_failure(client_ip: str) -> None:
     )
 
 
-async def _handle_login_mfa(user, request, db, client_ip) -> object:
+async def _handle_login_mfa(user, mfa_code, device_fingerprint, db, client_ip) -> object:
     """
     Handle MFA check during login. Returns a response object if MFA is pending,
     or None if authentication can proceed to token issuance.
+
+    Takes mfa_code / device_fingerprint as explicit values (not an ambient
+    request object) so every caller — local, LDAP, SSO — passes the same
+    shape. Passing a Starlette Request here previously raised AttributeError
+    and broke the privileged-LDAP 2FA gate (security review).
     """
     from app.core.security import encrypt_mfa_secret, decrypt_mfa_secret
 
@@ -1083,7 +1092,7 @@ async def _handle_login_mfa(user, request, db, client_ip) -> object:
         )
 
     # User has MFA secret - verify code
-    if not request.mfa_code:
+    if not mfa_code:
         # MFA configured but code not provided — issue challenge
         challenge_token = _generate_challenge_token(user.id)
         logger.info(f"MFA challenge issued for {_log_user_identity(user.id, user.email)}")
@@ -1097,15 +1106,15 @@ async def _handle_login_mfa(user, request, db, client_ip) -> object:
 
     # Verify TOTP code
     plain_secret = decrypt_mfa_secret(user.mfa_secret) or user.mfa_secret
-    if not verify_totp_code(plain_secret, request.mfa_code):
+    if not verify_totp_code(plain_secret, mfa_code):
         await redis_record_failed_login(user.id)
         await record_ip_failure(client_ip)
-        if request.device_fingerprint:
-            await record_device_failure(request.device_fingerprint)
+        if device_fingerprint:
+            await record_device_failure(device_fingerprint)
         logger.warning(f"Invalid MFA code for {_log_user_identity(user.id, user.email)}")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=INVALID_CREDENTIALS_MFA_MSG)
 
-    if is_totp_replay(user, request.mfa_code):
+    if is_totp_replay(user, mfa_code):
         logger.warning(f"TOTP replay attempt detected for {_log_user_identity(user.id, user.email)}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -1113,7 +1122,7 @@ async def _handle_login_mfa(user, request, db, client_ip) -> object:
         )
 
     # Mark TOTP code as used
-    user.last_used_totp_code = request.mfa_code
+    user.last_used_totp_code = mfa_code
     user.last_used_totp_at = datetime.now(timezone.utc)
     db.add(user)
     return None  # Proceed to token issuance
@@ -1348,7 +1357,11 @@ async def login(request: LoginRequest, req: Request, response: Response, db: Ann
 
         # STEP 7: Handle MFA verification
         mfa_response = await _handle_login_mfa(
-            user=user, request=request, db=db, client_ip=client_ip
+            user=user,
+            mfa_code=request.mfa_code,
+            device_fingerprint=request.device_fingerprint,
+            db=db,
+            client_ip=client_ip,
         )
         if mfa_response is not None:
             return mfa_response
