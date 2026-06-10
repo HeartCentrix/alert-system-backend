@@ -19,7 +19,7 @@ from app.schemas import (
     UserProfileUpdate, MFASetupInitiateResponse, MFASetupConfirmRequest,
     MFAStatusResponse, MFANeededResponse,
     LoginSuccessResponse, LoginMFASetupResponse, LoginMFAChallengeResponse,
-    MFAVerifyLoginRequest,
+    MFAVerifyLoginRequest, MFARecoveryPendingResponse, RecoveryAckRequest,
     MFARecoveryCodeVerifyRequest, MFARecoveryCodesResponse, MFARecoveryCodeStatus,
     MFARegenerateRecoveryCodesRequest, MFARegenerateRecoveryCodesResponse,
     MFAEnrollStartRequest, MFAEnrollStartResponse, MFAEnrollConfirmRequest,
@@ -338,6 +338,38 @@ def _verify_challenge_token(token: str) -> tuple[bool, int]:
             return False, 0
         user_id = int(payload["sub"])
         return True, user_id
+    except (PyJWTError, ValueError, KeyError):
+        return False, 0
+
+
+# Short window for the user to read + save their first-time recovery codes.
+RECOVERY_ACK_EXPIRE_SECONDS = 15 * 60
+
+
+def _generate_recovery_ack_token(user_id: int) -> str:
+    """Signed, short-lived token proving a first-time-MFA user must still
+    acknowledge their recovery codes before a session is established. Distinct
+    'type' claim so it can't be replayed as a challenge/access token."""
+    import jwt as pyjwt
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": str(user_id),
+        "type": "mfa_recovery_ack",
+        "iat": now,
+        "exp": now + timedelta(seconds=RECOVERY_ACK_EXPIRE_SECONDS),
+    }
+    return pyjwt.encode(payload, settings.MFA_CHALLENGE_SECRET_KEY, algorithm="HS256")
+
+
+def _verify_recovery_ack_token(token: str) -> tuple[bool, int]:
+    """Verify a recovery-ack token. Returns (is_valid, user_id)."""
+    import jwt as pyjwt
+    from jwt.exceptions import PyJWTError
+    try:
+        payload = pyjwt.decode(token, settings.MFA_CHALLENGE_SECRET_KEY, algorithms=["HS256"])
+        if payload.get("type") != "mfa_recovery_ack":
+            return False, 0
+        return True, int(payload["sub"])
     except (PyJWTError, ValueError, KeyError):
         return False, 0
 
@@ -2496,8 +2528,9 @@ async def _finalize_mfa_login(
     db: Session,
     was_new_mfa: bool,
     recovery_codes: Optional[list[str]]
-) -> LoginSuccessResponse:
-    """Issue tokens and complete MFA login flow."""
+):
+    """Complete MFA login: establish a session, or (first-time setup) return a
+    recovery-codes-pending response with an ack token instead."""
     try:
         await clear_account_failures(user.id)
     except Exception as e:
@@ -2509,27 +2542,41 @@ async def _finalize_mfa_login(
         success=True
     ))
 
-    access_token = create_access_token({"sub": str(user.id), "role": user.role})
-    refresh_token_str = create_refresh_token({"sub": str(user.id)})
-
-    rt = RefreshToken(
-        user_id=user.id,
-        token=refresh_token_str,
-        expires_at=datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
-    )
-    db.add(rt)
-
-    user.last_login = datetime.now(timezone.utc)
-    user.last_seen_at = datetime.now(timezone.utc)
-    user.is_online = True
     # Account enablement is admin-controlled — NEVER re-enable on login
-    # (security review). Reject disabled accounts before the session is
-    # established; tokens minted above are not yet committed or set as
-    # cookies, so raising here rolls back and issues nothing.
+    # (security review). Reject disabled accounts before anything is issued.
     if not user.is_enabled:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Account is disabled. Contact your administrator.",
+        )
+
+    user.last_login = datetime.now(timezone.utc)
+    user.last_seen_at = datetime.now(timezone.utc)
+    user.is_online = True
+
+    # FIRST-TIME MFA SETUP: do NOT establish a session yet. The user must see
+    # and save their one-time recovery codes first. Return them with a signed,
+    # short-lived ack token; the session is only minted when the client calls
+    # /auth/mfa/recovery-codes/acknowledge. This makes the recovery-codes gate
+    # server-enforced instead of a bypassable client flag (security review).
+    if was_new_mfa and recovery_codes:
+        db.add(create_audit_log(
+            user_id=user.id,
+            user_email=user.email,
+            action="mfa_enabled_recovery_pending",
+            resource_type="user",
+            resource_id=user.id,
+            request=req,
+        ))
+        db.commit()
+        logger.info(f"MFA enabled for user {user.id}; awaiting recovery-code acknowledgement")
+        return MFARecoveryPendingResponse(
+            status="recovery_codes_required",
+            recovery_codes=recovery_codes,
+            recovery_codes_warning="Store these codes securely. They will not be shown again.",
+            recovery_setup_token=_generate_recovery_ack_token(user.id),
+            user=UserResponse.model_validate(user),
+            message="Save your recovery codes, then confirm to finish signing in.",
         )
 
     db.add(create_audit_log(
@@ -2540,31 +2587,39 @@ async def _finalize_mfa_login(
         resource_id=user.id,
         request=req,
     ))
-    db.commit()
-
     logger.info(f"MFA verification complete, login successful for user {user.id}")
+    return _establish_session(user, response, db)
+
+
+def _establish_session(user: User, response: Response, db: Session) -> LoginSuccessResponse:
+    """Mint access+refresh tokens, persist the refresh token, set the HttpOnly
+    cookies, and return the success response. Shared by the normal MFA login
+    path and the recovery-codes acknowledge endpoint."""
+    access_token = create_access_token({"sub": str(user.id), "role": user.role})
+    refresh_token_str = create_refresh_token({"sub": str(user.id)})
+
+    db.add(RefreshToken(
+        user_id=user.id,
+        token=refresh_token_str,
+        expires_at=datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
+    ))
+    db.commit()
 
     _set_refresh_cookie(response, refresh_token_str, settings.REFRESH_TOKEN_EXPIRE_DAYS)
     _set_access_cookie(response, access_token, settings.ACCESS_TOKEN_EXPIRE_MINUTES)
 
-    response_data = {
-        "status": "success",
-        "access_token": access_token,
-        "token_type": "bearer",
-        "user": UserResponse.model_validate(user),
-        "refresh_token": refresh_token_str,
-    }
-
-    if was_new_mfa and recovery_codes:
-        response_data["recovery_codes"] = recovery_codes
-        response_data["recovery_codes_warning"] = "Store these codes securely. They will not be shown again."
-
-    return LoginSuccessResponse(**response_data)
+    return LoginSuccessResponse(
+        status="success",
+        access_token=access_token,
+        token_type="bearer",
+        user=UserResponse.model_validate(user),
+        refresh_token=refresh_token_str,
+    )
 
 
 # ─── MFA LOGIN VERIFICATION ENDPOINT ─────────────────────────────────────────
 
-@router.post("/mfa/verify-login", response_model=LoginSuccessResponse)
+@router.post("/mfa/verify-login")
 async def verify_mfa_and_complete_login(
     request: MFAVerifyLoginRequest,
     req: Request,
@@ -2618,6 +2673,50 @@ async def verify_mfa_and_complete_login(
         was_new_mfa=was_new_mfa,
         recovery_codes=recovery_codes
     )
+
+
+@router.post("/mfa/recovery-codes/acknowledge", response_model=LoginSuccessResponse)
+async def acknowledge_recovery_codes(
+    request: RecoveryAckRequest,
+    req: Request,
+    response: Response,
+    db: Annotated[Session, Depends(get_db)] = None,
+):
+    """Finish a first-time-MFA login after the user has saved their recovery
+    codes. The session (HttpOnly cookies) is only established here, gated by
+    the signed recovery_setup_token issued by /mfa/verify-login — so the
+    recovery-codes screen cannot be bypassed by navigating away (security
+    review)."""
+    client_ip = _get_client_ip(req)
+
+    is_valid, user_id = _verify_recovery_ack_token(request.recovery_setup_token)
+    if not is_valid:
+        logger.warning(f"Invalid or expired recovery-ack token from IP {client_ip}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="This confirmation link has expired. Please sign in again.",
+        )
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user or not user.is_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is not available. Contact your administrator.",
+        )
+
+    user.last_login = datetime.now(timezone.utc)
+    user.last_seen_at = datetime.now(timezone.utc)
+    user.is_online = True
+    db.add(create_audit_log(
+        user_id=user.id,
+        user_email=user.email,
+        action="mfa_recovery_codes_acknowledged",
+        resource_type="user",
+        resource_id=user.id,
+        request=req,
+    ))
+    logger.info(f"Recovery codes acknowledged; session established for user {user.id}")
+    return _establish_session(user, response, db)
 
 
 # ─── MFA RECOVERY CODE ENDPOINTS ──────────────────────────────────────────────

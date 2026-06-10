@@ -176,6 +176,25 @@ class LoginSuccessResponse(BaseModel):
     recovery_codes_warning: Optional[str] = None  # Security warning
 
 
+class MFARecoveryPendingResponse(BaseModel):
+    """Returned on first-time MFA setup. NO session is established yet: the
+    client must display the recovery codes and call
+    /auth/mfa/recovery-codes/acknowledge with recovery_setup_token to finish
+    signing in. This makes the 'save your recovery codes' gate server-enforced
+    rather than a bypassable client flag (security review)."""
+    status: str = "recovery_codes_required"
+    recovery_codes: List[str]
+    recovery_codes_warning: Optional[str] = None
+    recovery_setup_token: str
+    user: "UserResponse"
+    message: str
+
+
+class RecoveryAckRequest(BaseModel):
+    """Acknowledge first-time MFA recovery codes and establish the session."""
+    recovery_setup_token: str
+
+
 class LoginMFASetupResponse(BaseModel):
     """MFA setup required - user needs to configure MFA."""
     status: str = "mfa_required"
