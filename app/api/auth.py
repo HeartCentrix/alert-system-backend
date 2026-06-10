@@ -1473,7 +1473,7 @@ async def login(request: LoginRequest, req: Request, response: Response, db: Ann
 )
 async def refresh_token(req: Request, response: Response, db: Annotated[Session, Depends(get_db)] = None):
     """
-    Refresh access token using the refresh token from HttpOnly cookie or request body.
+    Refresh the access token using the refresh token from the HttpOnly cookie.
 
     Security:
     - Refresh token read from HttpOnly cookie only. The previous body
