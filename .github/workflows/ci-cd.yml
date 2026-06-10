@@ -44,6 +44,14 @@ env:
   NODE_VERSION: '18'
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  # CI-only dummy secrets. Importing app.config instantiates Settings(), whose
+  # validators require these to be non-empty (and MFA_ENCRYPTION_KEY a valid
+  # Fernet key) so the app can never boot insecurely. These are throwaway test
+  # values — real secrets live in the deploy environment, never here.
+  SECRET_KEY: ci0000000000000000000000000000000000000000000000000000000000test
+  REFRESH_SECRET_KEY: ci1111111111111111111111111111111111111111111111111111111test
+  MFA_CHALLENGE_SECRET_KEY: ci2222222222222222222222222222222222222222222222222222222test
+  MFA_ENCRYPTION_KEY: YWoYObqjGZ5jLNl4zD31uS1RtvV1QQulUc4-RnVV3Kw=
 
 # Cancel in-progress runs for PRs
 concurrency:
