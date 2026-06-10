@@ -440,8 +440,25 @@ def _send_voice_channel(
     log.to_address = user.phone
     voice_message = notification.message
     if checkin_url:
-        voice_message = f"{notification.message}. A safety check-in response is required. Please visit the link sent to your email or log in to the portal to respond."
-    
+        # On a voice call the recipient responds with the keypad (the TwiML
+        # adds "Press 1 if you are safe. Press 2 if you need help."). Only
+        # mention email/SMS if those channels were ALSO selected for this
+        # notification — don't tell a phone-only recipient to check a link
+        # that was never sent.
+        other = [c for c in (notification.channels or []) if c in ("sms", "email")]
+        if other:
+            ch = " or ".join("text message" if c == "sms" else "email" for c in other)
+            voice_message = (
+                f"{notification.message}. A safety check-in is required. "
+                f"You can respond using the {ch} we sent you, or respond now "
+                f"using your phone keypad."
+            )
+        else:
+            voice_message = (
+                f"{notification.message}. A safety check-in is required. "
+                f"Please respond now using your phone keypad."
+            )
+
     logger.info(f"Making voice call to {_scrub_phone(user.phone)} for notification {notification.id}")
     result = twilio_service.make_voice_call(user.phone, voice_message)
     logger.info(f"Voice call result for notification {notification.id} to {_scrub_phone(user.phone)}: {result.get('status', 'unknown')}")
