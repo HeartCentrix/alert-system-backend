@@ -41,6 +41,13 @@ services:
       - tm-alert
     ports:
       - "8000:8000"
+    # Durable home for the one-time, randomly generated bootstrap admin
+    # password. /run is wiped on every new container, so without this volume
+    # the first-boot credential is lost on recreate (the seed is one-shot —
+    # only runs when the users table is empty). The file is deleted once the
+    # super admin rotates the password on first login.
+    volumes:
+      - bootstrap_secrets:/run/secrets
     # DATABASE_URL / REDIS_URL come from .env (loaded via env_file below).
     environment:
       - ENVIRONMENT=production
@@ -127,3 +134,4 @@ networks:
 volumes:
   postgres_data:
   redis_data:
+  bootstrap_secrets:
