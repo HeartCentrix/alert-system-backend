@@ -31,6 +31,12 @@ PyJWT==2.12.1
 passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 pyotp==2.9.0
+# Runtime dependency: Fernet encryption for MFA secrets at rest
+# (app/core/security.py) and the MFA_ENCRYPTION_KEY config validator.
+cryptography==43.0.3
+# Password-strength scoring (validate_password_strength). Keep here so the
+# check can't silently no-op on a missing import.
+zxcvbn==4.4.28
 
 # External Services
 twilio==9.1.0
