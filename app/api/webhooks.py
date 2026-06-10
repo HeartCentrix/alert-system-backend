@@ -445,22 +445,39 @@ async def handle_checkin_response(
     try:
         # Parse query parameters
         query_params = dict(request.query_params)
-        
-        user_id = query_params.get("user_id")
-        notification_id = query_params.get("notification_id")
-        response_type = query_params.get("response", "safe")  # Default to safe
+
+        # SECURITY (IDOR fix): the responder MUST be proven by a signed,
+        # expiring check-in token — never trusted from a raw user_id query
+        # param, which let anyone forge any user's safety response. The
+        # (user_id, notification_id) pair is derived from the verified token
+        # payload only. This mirrors the authoritative respond endpoint
+        # (/api/v1/notifications/{id}/respond).
+        token = query_params.get("token")
+        response_type = query_params.get("response", "safe")  # safe | need_help
         channel = query_params.get("channel", "email")  # email or sms
-        
+
+        if not token:
+            logger.warning("Check-in response rejected: missing signed token")
+            return PlainTextResponse("Invalid or expired link", status_code=400)
+
+        from app.utils.checkin_link import verify_checkin_token
+        payload = verify_checkin_token(token)
+        if not payload:
+            logger.warning("Check-in response rejected: invalid or expired token")
+            return PlainTextResponse("This link is invalid or has expired.", status_code=403)
+
+        user_id = payload.get("user_id")
+        notification_id = payload.get("notification_id")
         if not user_id or not notification_id:
-            logger.warning(f"Missing user_id or notification_id in check-in response: {query_params}")
-            return PlainTextResponse("Invalid link - missing parameters", status_code=400)
-        
+            logger.warning("Check-in response rejected: token missing identifiers")
+            return PlainTextResponse("Invalid link", status_code=400)
+
         # Validate user exists
         user = db.query(User).filter(User.id == int(user_id)).first()
         if not user:
             logger.warning(f"User {user_id} not found for check-in response")
             return PlainTextResponse("Invalid user", status_code=404)
-        
+
         # Validate notification exists
         notification = db.query(Notification).filter(
             Notification.id == int(notification_id)
