@@ -107,11 +107,36 @@ TM Alert supports multiple authentication providers to integrate with your organ
 # Comma-separated list: local, entra, ldap
 AUTH_PROVIDERS=local,entra,ldap
 
-# Individual provider toggles
+# Individual provider toggles (local is controlled via AUTH_PROVIDERS above)
 ENTRA_ENABLED=true
 LDAP_ENABLED=false
-LOCAL_ENABLED=true
 ```
+
+#### Deployment behind a reverse proxy (`TRUSTED_PROXY_COUNT`)
+
+The login rate-limiter / lockout keys on the client IP. Behind a reverse
+proxy, `request.client.host` is the **proxy's** IP, so without configuration
+every client shares one rate-limit key — one attacker could lock out all
+login traffic (a global DoS). Set `TRUSTED_PROXY_COUNT` to the number of
+trusted proxy hops in front of the app so the real client IP is read from
+`X-Forwarded-For`:
+
+```env
+# 0 = trust none / app exposed directly (default, safe)
+# 1 = single edge proxy  (Railway, Vercel, a single nginx/ALB)
+# 2 = nginx behind an edge proxy
+TRUSTED_PROXY_COUNT=1
+```
+
+- **Local / direct:** leave `0`.
+- **Railway / Vercel:** set `1`.
+- **Self-hosted with N proxies in front:** set `N`.
+
+Setting it **too high** lets clients spoof their IP via a forged
+`X-Forwarded-For`; setting it **too low** behind a proxy weakens per-client
+rate limiting. Match it to your real topology. (Also ensure `BACKEND_URL`
+includes the scheme — `https://your-app...` — in production; it is used to
+build and verify Twilio webhook URLs.)
 
 #### Microsoft Entra ID Setup
 
