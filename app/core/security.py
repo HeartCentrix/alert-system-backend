@@ -74,17 +74,20 @@ def encrypt_mfa_secret(secret: str) -> str:
     """
     fernet = _get_mfa_fernet()
     if not fernet:
-        # Encryption not configured, return plaintext (backward compatibility)
-        return secret
-    
+        # Fail CLOSED: never persist a TOTP seed in cleartext. MFA_ENCRYPTION_KEY
+        # is enforced at startup (app.config), so this only triggers on a
+        # genuinely broken/missing key — in which case refuse rather than
+        # silently weaken every account's 2FA (security review).
+        logger.error("Refusing to store MFA secret: MFA_ENCRYPTION_KEY is missing or invalid.")
+        raise RuntimeError("MFA encryption is not configured; cannot store MFA secret.")
+
     try:
         encrypted = fernet.encrypt(secret.encode('utf-8'))
         return encrypted.decode('utf-8')
     except Exception as e:
         logger.error(f"Failed to encrypt MFA secret: {e}")
-        # Fail closed: return plaintext rather than breaking MFA entirely
-        # This is a security tradeoff; in high-security environments, raise instead
-        return secret
+        # Fail closed — do not fall back to plaintext.
+        raise RuntimeError("MFA secret encryption failed.") from e
 
 
 def decrypt_mfa_secret(encrypted_secret: str) -> Optional[str]:
