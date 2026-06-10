@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from typing import Annotated, Optional, List
 from urllib.parse import parse_qs, urlparse
+from html import escape as html_escape
 from twilio.request_validator import RequestValidator
 from app.database import get_db
 from app.core.deps import get_current_user
@@ -525,7 +526,18 @@ async def handle_checkin_response(
         response_type_str = "SAFE" if response_type_value == ResponseType.SAFE else "NEED HELP"
         logger.info(f"Check-in response recorded: User {user.id} ({user.email}) - {response_type_str} for Notification {notification.id}")
         
-        # Return simple HTML response
+        # Build the confirmation page with output escaping on EVERY interpolated
+        # value. Today all of these are server-controlled (fixed labels chosen by
+        # a server-side branch + a server timestamp) and no request/user input
+        # reaches the markup — but we escape unconditionally so this hand-built
+        # text/html page can never become a reflected-XSS sink, even if a future
+        # edit interpolates user/query data here (defense in depth).
+        is_safe = response_type_value == ResponseType.SAFE
+        heading_color = "#059669" if is_safe else "#dc2626"   # fixed literals
+        status_icon = "✅" if is_safe else "🆘"                # fixed literals
+        status_label = html_escape(response_type_str)         # "SAFE" / "NEED HELP"
+        rendered_at = html_escape(datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'))
+
         html_response = f"""
         <!DOCTYPE html>
         <html>
@@ -535,25 +547,25 @@ async def handle_checkin_response(
                 body {{ font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #f0f9ff; }}
                 .container {{ max-width: 500px; margin: 0 auto; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
                 .icon {{ font-size: 64px; margin-bottom: 20px; }}
-                h1 {{ color: {'#059669' if response_type_value == ResponseType.SAFE else '#dc2626'}; margin-bottom: 10px; }}
+                h1 {{ color: {heading_color}; margin-bottom: 10px; }}
                 p {{ color: #64748b; font-size: 18px; }}
                 .timestamp {{ color: #94a3b8; font-size: 14px; margin-top: 30px; }}
             </style>
         </head>
         <body>
             <div class="container">
-                <div class="icon">{'✅' if response_type_value == ResponseType.SAFE else '🆘'}</div>
+                <div class="icon">{status_icon}</div>
                 <h1>Response Recorded</h1>
-                <p>You marked yourself as <strong>{response_type_str}</strong></p>
+                <p>You marked yourself as <strong>{status_label}</strong></p>
                 <p>Thank you for responding to the TM Alert notification.</p>
                 <div class="timestamp">
-                    {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}
+                    {rendered_at}
                 </div>
             </div>
         </body>
         </html>
         """
-        
+
         return Response(content=html_response, media_type="text/html")
         
     except Exception as e:
