@@ -380,7 +380,15 @@ def _validate_user_update_permissions(current_user: User, user: User, data: User
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only admins can change user roles"
             )
-    
+
+    # Only SUPER_ADMIN may grant the SUPER_ADMIN role, and only SUPER_ADMIN may
+    # modify an existing SUPER_ADMIN user. These guards previously lived on a
+    # second, shadowed PUT /{user_id} route that FastAPI never reached
+    # (duplicate path, first registration wins) — fold them into the single
+    # surviving handler so they are actually enforced (security review).
+    _prevent_privilege_escalation(current_user, data.role)
+    _validate_super_admin_access(user, current_user)
+
     # Prevent editing sensitive fields for other users
     if current_user.id != user.id:
         _validate_sensitive_field_changes(current_user, data)
@@ -522,78 +530,6 @@ def _validate_super_admin_access(user: User, current_user: User) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only SUPER_ADMIN can modify SUPER_ADMIN users",
         )
-
-
-def _update_user_fields(user: User, data: UserUpdate) -> None:
-    """Apply update data to user object, handling empty employee_id."""
-    for field, value in data.model_dump(exclude_unset=True).items():
-        if field == 'user_id':
-            continue
-        if field == 'employee_id' and value == '':
-            value = None
-        setattr(user, field, value)
-
-
-@router.put(
-    "/{user_id}",
-    response_model=UserResponse,
-    responses={
-        400: {"description": "Bad Request - Duplicate email, phone, or employee_id"},
-        403: {"description": "Forbidden - ADMIN cannot create/update SUPER_ADMIN users"},
-        404: {
-            "description": "Not Found - User does not exist",
-            "content": {
-                "application/json": {
-                    "example": {"detail": "User not found"}
-                }
-            }
-        },
-    }
-)
-def update_user(
-    user_id: int,
-    data: UserUpdate,
-    db: Annotated[Session, Depends(get_db)] = None,
-    current_user: Annotated[User, Depends(require_admin)] = None,
-    request: Request = None,
-):
-    """Update a user account (admin endpoint).
-
-    Args:
-        user_id: ID of user to update
-        data: User update data
-        db: Database session
-        current_user: Authenticated admin user
-        request: HTTP request for audit logging
-
-    Returns:
-        Updated user account
-
-    Raises:
-        HTTPException: 404 - User not found
-        HTTPException: 403 - Insufficient permissions
-    """
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail=USER_NOT_FOUND_MSG)
-
-    _validate_super_admin_access(user, current_user)
-    _prevent_privilege_escalation(current_user, data.role)
-    _validate_user_uniqueness(db, user, data)
-    _update_user_fields(user, data)
-
-    db.add(create_audit_log(
-        user_id=current_user.id,
-        user_email=current_user.email,
-        action="update_user",
-        resource_type="user",
-        resource_id=user_id,
-        request=request,
-    ))
-    db.commit()
-    db.refresh(user)
-    refresh_dynamic_groups_for_user(db, user)
-    return user
 
 
 @router.delete(
