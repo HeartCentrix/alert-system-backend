@@ -21,6 +21,7 @@ from app.models import (
     UserRole,
 )
 from app.schemas import IncomingMessageResponse
+from app.utils.audit import create_audit_log
 from datetime import datetime, timezone
 import logging
 
@@ -340,6 +341,151 @@ async def handle_voice_status(
 
     # Always return 200 to Twilio
     return Response(status_code=200)
+
+
+# ─── INBOUND SMS (HELP / STOP keywords) ──────────────────────────────────────
+
+# Twilio's standard opt-out / help keyword sets. Twilio itself may also
+# enforce STOP at the carrier level (Advanced Opt-Out); handling it here as
+# well keeps OUR database flag (users.sms_opt_in) authoritative so the app
+# stops sending and the Preferences UI reflects reality.
+SMS_STOP_KEYWORDS = {"STOP", "STOPALL", "UNSUBSCRIBE", "CANCEL", "END", "QUIT"}
+SMS_HELP_KEYWORDS = {"HELP", "INFO"}
+
+
+def _build_sms_twiml(message: str = "") -> str:
+    """Build TwiML for an SMS reply. Empty message -> no reply sent."""
+    if not message:
+        return '<?xml version="1.0" encoding="UTF-8"?>\n<Response></Response>'
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        f"<Response><Message>{html_escape(message)}</Message></Response>"
+    )
+
+
+def _handle_sms_stop(db: Session, user: User, from_number: str) -> str:
+    """Process a STOP keyword: opt the user out of SMS and confirm.
+
+    Sets sms_opt_in=False (so app/tasks.py never texts them) and disables the
+    SMS channel preference. The user can opt back in any time by enabling SMS
+    in Settings → Preferences, which re-runs the consent popup and flips the
+    flag back to True — the loop can repeat indefinitely.
+    """
+    user.sms_opt_in = False
+    user.sms_opt_in_at = datetime.now(timezone.utc)
+    channels = user.preferred_channels or []
+    if "sms" in channels:
+        user.preferred_channels = [c for c in channels if c != "sms"]
+
+    db.add(create_audit_log(
+        user_id=user.id,
+        user_email=user.email,
+        action="sms_opt_in_declined",
+        resource_type="user",
+        resource_id=user.id,
+        details={"accepted": False, "source": "sms_stop_keyword"},
+    ))
+    db.commit()
+    logger.info(
+        f"SMS STOP processed: {_log_user_identity(user.id, user.email)} opted out "
+        f"from {_scrub_phone(from_number)}"
+    )
+    return (
+        "You have been unsubscribed from Taylor Morrison text alerts and will "
+        "receive no more messages. You can re-enable them any time from "
+        "Settings > Preferences in the alert portal."
+    )
+
+
+def _handle_sms_help(user: Optional[User]) -> str:
+    """Process a HELP keyword: tell the sender their current SMS status."""
+    if user is not None and user.sms_opt_in is True:
+        return (
+            "Taylor Morrison Alerts: you are currently receiving text alerts "
+            "at this number. Reply STOP to cancel at any time. Msg frequency "
+            "varies, up to 10 msgs/month. Msg & data rates may apply."
+        )
+    return (
+        "Taylor Morrison Alerts: you are not currently receiving text alerts "
+        "at this number. To sign up, enable SMS under Settings > Preferences "
+        "in the alert portal. Msg & data rates may apply."
+    )
+
+
+@router.post(
+    "/sms/incoming",
+    responses={
+        401: {"description": "Unauthorized - Invalid Twilio signature"},
+    }
+)
+async def handle_incoming_sms(
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Handle inbound SMS from Twilio ("A message comes in" webhook).
+
+    Keyword handling per the opt-in disclosure ("Reply HELP for help or STOP
+    to cancel at any time"):
+    - STOP/UNSUBSCRIBE/CANCEL/END/QUIT: records the opt-out (sms_opt_in=False,
+      SMS channel disabled) and confirms by text.
+    - HELP/INFO: replies with the sender's current alert status and how to
+      opt out (STOP) or back in (Settings → Preferences).
+    - Anything else: stored as an IncomingMessage for the Incoming page.
+    """
+    body_bytes = await request.body()
+
+    if not await validate_twilio_request(request, body_bytes):
+        raise HTTPException(status_code=401, detail="Invalid Twilio signature")
+
+    form_data = await request.form()
+    from_number = form_data.get("From", "")
+    sms_body = (form_data.get("Body", "") or "").strip()
+    keyword = sms_body.upper()
+
+    try:
+        logger.info(f"Inbound SMS: From={_scrub_phone(from_number)}, keyword_match={keyword in SMS_STOP_KEYWORDS or keyword in SMS_HELP_KEYWORDS}")
+
+        user = _lookup_user_by_phone(db, from_number) if from_number else None
+
+        # Record the inbound text for the Incoming page (body may contain
+        # PII — same handling as existing voice/check-in records).
+        # IncomingMessage.user_id is NOT NULL, so unknown senders are only
+        # logged, not stored.
+        if user:
+            db.add(IncomingMessage(
+                user_id=user.id,
+                user_email=user.email,
+                from_number=from_number,
+                body=sms_body[:1000],
+                channel=AlertChannel.SMS,
+                is_processed=keyword in SMS_STOP_KEYWORDS or keyword in SMS_HELP_KEYWORDS,
+                received_at=datetime.now(timezone.utc),
+            ))
+            db.commit()
+        else:
+            logger.info(f"Inbound SMS from unknown number {_scrub_phone(from_number)} — not stored (no matching user)")
+
+        if keyword in SMS_STOP_KEYWORDS:
+            if user:
+                reply = _handle_sms_stop(db, user, from_number)
+            else:
+                logger.warning(f"SMS STOP from unknown number {_scrub_phone(from_number)} — no account to opt out")
+                reply = (
+                    "You will receive no more messages from this number. "
+                    "(No alert account matched this phone number.)"
+                )
+            return Response(content=_build_sms_twiml(reply), media_type=XML_CONTENT_TYPE)
+
+        if keyword in SMS_HELP_KEYWORDS:
+            return Response(content=_build_sms_twiml(_handle_sms_help(user)), media_type=XML_CONTENT_TYPE)
+
+        # Not a keyword — no auto-reply, just the stored record.
+        return Response(content=_build_sms_twiml(), media_type=XML_CONTENT_TYPE)
+
+    except Exception as e:
+        logger.error(f"Error processing inbound SMS: {e}", exc_info=True)
+        # Return empty TwiML (200) so Twilio doesn't retry repeatedly.
+        return Response(content=_build_sms_twiml(), media_type=XML_CONTENT_TYPE)
 
 
 @router.get("/incoming-messages", response_model=List[IncomingMessageResponse])

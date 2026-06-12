@@ -235,6 +235,48 @@ class TestSendToChannel:
         # Should only be called once
         assert mock_twilio.send_sms.call_count == 1
 
+    def test_send_sms_channel_user_declined_opt_in(self, mock_twilio):
+        """SMS to user who declined the opt-in popup should never be sent."""
+        from app.tasks import _send_sms_channel
+
+        user = User(
+            email="declined-sms@example.com",
+            first_name="Declined",
+            last_name="OptIn",
+            phone="+15550009999",
+            sms_opt_in=False,
+        )
+        notification = MagicMock()
+        notification.id = 1
+
+        with patch("app.tasks._handle_missing_contact_info") as mock_handle:
+            result = _send_sms_channel(MagicMock(), notification, user, MagicMock(), None)
+
+        assert result == {"error": "User declined SMS opt-in"}
+        mock_handle.assert_called_once()
+        mock_twilio.send_sms.assert_not_called()
+
+    def test_send_sms_channel_user_accepted_opt_in(self, mock_twilio):
+        """SMS to user who accepted the opt-in popup should send normally."""
+        from app.tasks import _send_sms_channel
+
+        user = User(
+            email="accepted-sms@example.com",
+            first_name="Accepted",
+            last_name="OptIn",
+            phone="+15550008888",
+            sms_opt_in=True,
+        )
+        notification = MagicMock()
+        notification.id = 1
+        notification.message = "Test alert"
+        mock_twilio.send_sms.return_value = {"status": "sent"}
+
+        result = _send_sms_channel(MagicMock(), notification, user, MagicMock(), None)
+
+        assert result == {"status": "sent"}
+        mock_twilio.send_sms.assert_called_once()
+
     def test_send_channel_user_no_phone(
         self, db_session, test_notification, mock_twilio
     ):
