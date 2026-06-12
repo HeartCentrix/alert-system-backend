@@ -129,7 +129,15 @@ class User(Base):
     # (existing users unaffected). See app/api/auth.py recovery-codes flow.
     mfa_recovery_acknowledged = Column(Boolean, default=True, nullable=True)
     avatar_url = Column(String(500))
-    preferred_channels = Column(JSON, default=["sms", "email"])
+    # SMS is deliberately NOT a default channel — it is only enabled through
+    # the explicit text-alert opt-in popup (see sms_opt_in below).
+    preferred_channels = Column(JSON, default=["email"])
+    # SMS text-alert opt-in decision, captured by the first-login popup.
+    # NULL = not asked yet (popup shows on next login), True = accepted
+    # (consent given, phone captured), False = declined — never send SMS
+    # and don't allow selecting the SMS channel until they opt in.
+    sms_opt_in = Column(Boolean, nullable=True, default=None)
+    sms_opt_in_at = Column(DateTime(timezone=True), nullable=True)  # When the decision was recorded (consent audit)
     latitude = Column(Float, nullable=True)   # Last known latitude
     longitude = Column(Float, nullable=True)  # Last known longitude
     location_id = Column(Integer, ForeignKey(LOCATIONS_ID_FK), nullable=True)

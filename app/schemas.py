@@ -1,5 +1,5 @@
 import re
-from pydantic import BaseModel, EmailStr, Field, validator, field_validator, constr, ConfigDict
+from pydantic import BaseModel, EmailStr, Field, validator, field_validator, model_validator, constr, ConfigDict
 from typing import Optional, List, Any, Dict, Union
 from datetime import datetime
 from app.models import (
@@ -647,7 +647,9 @@ class UserCreate(BaseModel):
     )
     role: UserRole = UserRole.VIEWER
     location_id: Optional[int] = None
-    preferred_channels: List[AlertChannel] = [AlertChannel.SMS, AlertChannel.EMAIL]
+    # SMS is deliberately NOT a default — it requires the user's explicit
+    # text-alert opt-in (Settings → Preferences popup).
+    preferred_channels: List[AlertChannel] = [AlertChannel.EMAIL]
 
     @field_validator("password")
     @classmethod
@@ -759,6 +761,65 @@ class UserProfileUpdate(BaseModel):
         return v.strip() if v else v
 
 
+def normalize_mobile_to_e164(raw: str) -> Optional[str]:
+    """Normalize a mobile number to E.164 (+<country><number>) for Twilio.
+
+    Accepts common US formats — (555) 123-4567, 555-123-4567, 15551234567 —
+    and already-international numbers like +447911123456. Returns None when
+    the input cannot be a valid mobile number.
+
+    Rules:
+    - leading '+': keep the given country code; 8–15 digits total (E.164 max)
+    - 10 digits: assumed US/Canada -> prefixed with +1
+    - 11 digits starting with 1: US/Canada with country code -> prefixed with +
+    - anything else: rejected (caller must include a country code)
+    """
+    if not raw:
+        return None
+    stripped = raw.strip()
+    digits = "".join(c for c in stripped if c.isdigit())
+    has_plus = stripped.startswith("+")
+    if has_plus:
+        if 8 <= len(digits) <= 15:
+            return f"+{digits}"
+        return None
+    if len(digits) == 10:
+        return f"+1{digits}"
+    if len(digits) == 11 and digits.startswith("1"):
+        return f"+{digits}"
+    return None
+
+
+class SMSOptInRequest(BaseModel):
+    """SMS text-alert opt-in decision (Settings → Preferences popup).
+
+    accepted=True requires a phone number and explicit consent; the phone is
+    normalized to E.164 (required by Twilio) and stored on the user, replacing
+    any existing number. accepted=False records a decline so SMS is never sent.
+    """
+    accepted: bool
+    phone: Optional[str] = Field(
+        None,
+        max_length=PHONE_MAX_LENGTH,
+        pattern=PHONE_PATTERN
+    )
+    consent: bool = False
+
+    @model_validator(mode="after")
+    def validate_accept_requires_phone_and_consent(self):
+        if self.accepted:
+            normalized = normalize_mobile_to_e164(self.phone or "")
+            if not normalized:
+                raise ValueError(
+                    "Enter a valid mobile number. Include the country code "
+                    "(e.g. +1 555 123 4567) for non-US numbers."
+                )
+            self.phone = normalized
+            if not self.consent:
+                raise ValueError("Please check the box to give consent.")
+        return self
+
+
 class UserResponse(BaseModel):
     id: int
     email: str
@@ -781,6 +842,9 @@ class UserResponse(BaseModel):
     # mfa_enabled lets the SPA show the correct MFA management state without
     # a separate /auth/mfa/status call.
     mfa_enabled: Optional[bool] = None
+    # SMS text-alert opt-in: None = not asked yet (SPA shows the first-login
+    # popup), True = accepted, False = declined.
+    sms_opt_in: Optional[bool] = None
     created_at: datetime
 
     class Config:

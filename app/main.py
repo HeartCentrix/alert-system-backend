@@ -372,6 +372,14 @@ def _ensure_database_schema():
     except Exception as e:
         logger.error(f"Failed to ensure user_locations unique constraint: {e}")
 
+    # Ensure users table has SMS opt-in columns (first-login text-alert popup)
+    logger.info("Ensuring users table has sms_opt_in columns...")
+    try:
+        ensure_column_exists('users', 'sms_opt_in', 'BOOLEAN', nullable=True)
+        ensure_column_exists('users', 'sms_opt_in_at', 'TIMESTAMP WITH TIME ZONE', nullable=True)
+    except Exception as e:
+        logger.error(f"Failed to ensure sms_opt_in columns: {e}")
+
 
 async def _seed_default_admin():
     """Seed the default super admin if (and only if) no users exist.

@@ -25,7 +25,7 @@ from app.schemas import (
     MFAEnrollStartRequest, MFAEnrollStartResponse, MFAEnrollConfirmRequest,
     MFAEnrollConfirmResponse, MFADisableRequest, MFADisableResponse,
     MFAResetStartRequest, MFAResetConfirmRequest, MFAResetConfirmResponse,
-    MFAStatusDetailResponse,
+    MFAStatusDetailResponse, SMSOptInRequest,
 )
 from app.core.security import (
     verify_password, hash_password, create_access_token,
@@ -1884,6 +1884,16 @@ def update_my_profile(
         "preferred_channels",
     }
     submitted = data.model_dump(exclude_unset=True)
+    # Users who declined the SMS text-alert opt-in popup cannot select SMS
+    # as a notification channel — sends are also blocked in app/tasks.py,
+    # this just keeps the preference honest. NULL (not asked yet) is allowed
+    # so existing users aren't broken before their next login.
+    if "preferred_channels" in submitted and submitted["preferred_channels"] is not None:
+        if "sms" in submitted["preferred_channels"] and current_user.sms_opt_in is False:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="You declined SMS text alerts, so SMS cannot be selected as a notification channel. Opt in first to enable it.",
+            )
     for field, value in submitted.items():
         if field not in _ALLOWED_SELF_UPDATE_FIELDS:
             # Silently ignore unknown/sensitive fields rather than 400 —
@@ -1939,6 +1949,83 @@ def update_my_profile(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="One of the values you submitted conflicts with an existing record. Please review and try again.",
+        )
+    db.refresh(current_user)
+    return current_user
+
+
+@router.post(
+    "/sms-opt-in",
+    response_model=UserResponse,
+    responses={
+        401: {"description": "Unauthorized - No valid authentication token provided"},
+        409: {"description": "Phone number already in use by another account"},
+    }
+)
+def sms_opt_in(
+    data: SMSOptInRequest,
+    current_user: Annotated[User, Depends(get_current_user)] = None,
+    db: Annotated[Session, Depends(get_db)] = None,
+    req: Request = None,
+):
+    """Record the SMS text-alert opt-in decision.
+
+    Shown as a popup when the user enables the SMS channel in Settings →
+    Preferences. Accepting stores/replaces the user's phone number, records
+    the consent timestamp, and enables the SMS notification channel in one
+    step; declining records the refusal so SMS is never sent to them
+    (enforced in app/tasks.py).
+    """
+    now = datetime.now(timezone.utc)
+    if data.accepted:
+        # Phone numbers are unique per user — reject up front with a clean
+        # 409 instead of relying solely on the ix_users_phone constraint.
+        # data.phone arrives normalized to E.164 (+15551234567), but legacy
+        # rows may hold un-normalized forms — match those too.
+        e164_digits = data.phone.lstrip("+")  # e.g. 15551234567
+        candidate_forms = {data.phone, e164_digits, e164_digits[-10:]}
+        existing = db.query(User).filter(
+            User.phone.in_(candidate_forms),
+            User.id != current_user.id,
+        ).first()
+        if existing:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This phone number is already in use by another account. Use a different phone or contact your administrator.",
+            )
+        current_user.phone = data.phone  # Adds the number, or replaces an existing one
+        current_user.sms_opt_in = True
+        # Consent was given specifically to receive texts — enable the
+        # channel in the same step. Reassign (don't mutate) so SQLAlchemy
+        # tracks the JSON column change.
+        channels = current_user.preferred_channels or []
+        if "sms" not in channels:
+            current_user.preferred_channels = channels + ["sms"]
+    else:
+        current_user.sms_opt_in = False
+        # Declined users must not have SMS as a notification channel.
+        channels = current_user.preferred_channels or []
+        if "sms" in channels:
+            current_user.preferred_channels = [c for c in channels if c != "sms"]
+    current_user.sms_opt_in_at = now
+
+    db.add(create_audit_log(
+        user_id=current_user.id,
+        action="sms_opt_in_accepted" if data.accepted else "sms_opt_in_declined",
+        resource_type="user",
+        resource_id=current_user.id,
+        details={"accepted": data.accepted},
+        request=req,
+    ))
+
+    try:
+        db.commit()
+    except IntegrityError:
+        # Race with a concurrent update claiming the same phone number.
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This phone number is already in use by another account. Use a different phone or contact your administrator.",
         )
     db.refresh(current_user)
     return current_user

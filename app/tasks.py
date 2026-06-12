@@ -371,6 +371,13 @@ def _send_sms_channel(
     checkin_url: Optional[str]
 ) -> dict:
     """Send notification via SMS channel. Returns result dict."""
+    if user.sms_opt_in is False:
+        # User explicitly declined SMS text-alert consent on the first-login
+        # opt-in popup — never text them. NULL (not asked yet, e.g. existing
+        # users who haven't logged in since this feature shipped) still
+        # receives alerts; the popup forces a decision on their next login.
+        _handle_missing_contact_info(db, notification.id, log, "User declined SMS opt-in")
+        return {"error": "User declined SMS opt-in"}
     if not user.phone:
         _handle_missing_contact_info(db, notification.id, log, "No phone number")
         return {"error": "No phone number"}
@@ -901,7 +908,8 @@ def _send_urgent_sms_reminders(non_responder_ids: set, notification: Notificatio
     try:
         non_responders = db.query(User).filter(User.id.in_(non_responder_ids)).all()
         for user in non_responders:
-            if user.phone:
+            # Never text users who declined the SMS opt-in popup.
+            if user.phone and user.sms_opt_in is not False:
                 reminder_msg = (
                     f"URGENT: You haven't responded to the safety check-in yet. "
                     f"Please respond: {settings.FRONTEND_URL}/notifications/{notification.id}/respond"
