@@ -27,16 +27,16 @@ redis==5.0.4
 celery==5.4.0
 
 # Authentication
-PyJWT==2.12.1
+PyJWT==2.13.0
 passlib[bcrypt]==1.7.4
-bcrypt==4.0.1
-pyotp==2.9.0
+bcrypt==5.0.0
+pyotp==2.10.0
 # Runtime dependency: Fernet encryption for MFA secrets at rest
 # (app/core/security.py) and the MFA_ENCRYPTION_KEY config validator.
-cryptography==43.0.3
+cryptography==49.0.0
 # Password-strength scoring (validate_password_strength). Keep here so the
 # check can't silently no-op on a missing import.
-zxcvbn==4.4.28
+zxcvbn==4.5.0
 
 # External Services
 twilio==9.1.0
